@@ -25,15 +25,11 @@ type Progress func(index, total int, b Book)
 // encountered (subsequent errors are still attempted but only the first is
 // returned, so a single bad entry doesn't abort the whole sync).
 //
-// If shelfID > 0, only that shelf is synced; otherwise the full catalog.
-func Sync(client *Client, store *Store, library string, shelfID int, progress Progress) (downloaded, skipped, failed int, firstErr error) {
-	var books []Book
-	var err error
-	if shelfID > 0 {
-		books, err = client.WalkShelf(shelfID)
-	} else {
-		books, err = client.WalkAll()
-	}
+// If filterHref is non-empty, only that OPDS path is synced (a CWA shelf
+// path like /opds/shelf/1 or a generic subsection like /opds/books);
+// otherwise the full catalog.
+func Sync(client *Client, store *Store, library, filterHref string, progress Progress) (downloaded, skipped, failed int, firstErr error) {
+	books, err := client.WalkFiltered(filterHref)
 	if err != nil {
 		return 0, 0, 0, fmt.Errorf("walk catalog: %w", err)
 	}

@@ -160,6 +160,53 @@ type Shelf struct {
 	Name string
 }
 
+// FilterOption is one row in the filter picker. Works for both CWA shelves
+// (Href is /opds/shelf/<N>) and generic OPDS subsections (Href is whatever
+// the server exposes from its root navigation feed).
+type FilterOption struct {
+	Name string // display label
+	Href string // OPDS path to walk for this filter
+}
+
+// ListFilterOptions returns the options a user can choose from in the
+// filter picker. On CWA it returns the user's shelves; on any other OPDS
+// server it returns the top-level subsections of the root feed.
+func (c *Client) ListFilterOptions() ([]FilterOption, error) {
+	if c.IsCWA {
+		shelves, err := c.ListShelves()
+		if err != nil {
+			return nil, err
+		}
+		out := make([]FilterOption, 0, len(shelves))
+		for _, s := range shelves {
+			out = append(out, FilterOption{
+				Name: s.Name,
+				Href: fmt.Sprintf("/opds/shelf/%d", s.ID),
+			})
+		}
+		return out, nil
+	}
+	body, err := c.get("/opds")
+	if err != nil {
+		return nil, err
+	}
+	var f feed
+	if err := xml.Unmarshal(body, &f); err != nil {
+		return nil, fmt.Errorf("parse opds root: %w", err)
+	}
+	out := make([]FilterOption, 0, len(f.Entries))
+	for _, e := range f.Entries {
+		if href := navigationHref(e.Links); href != "" {
+			name := strings.TrimSpace(e.Title)
+			if name == "" {
+				name = href
+			}
+			out = append(out, FilterOption{Name: name, Href: href})
+		}
+	}
+	return out, nil
+}
+
 // DetectType fetches the root /opds feed once and sets c.IsCWA based on
 // subsections it finds. CWA-signatures we accept: a subsection link pointing
 // at /opds/books/letter/ or /opds/shelfindex, or a title containing
@@ -200,6 +247,21 @@ func (c *Client) WalkAll() ([]Book, error) {
 		return c.walk("/opds/books/letter/00")
 	}
 	return c.walkGeneric("/opds")
+}
+
+// WalkFiltered returns books under a specific OPDS path (CWA shelf path,
+// generic subsection, or any other OPDS feed URL). Empty filterHref means
+// "sync all books" and falls through to WalkAll. The CWA shelf fast path
+// (single paginated feed, no recursion) kicks in when filterHref looks like
+// "/opds/shelf/<N>" and the client is in CWA mode.
+func (c *Client) WalkFiltered(filterHref string) ([]Book, error) {
+	if filterHref == "" {
+		return c.WalkAll()
+	}
+	if c.IsCWA && strings.HasPrefix(filterHref, "/opds/shelf/") {
+		return c.walk(filterHref)
+	}
+	return c.walkGeneric(filterHref)
 }
 
 // WalkShelf returns every acquirable book in the given CWA shelf. Only

@@ -56,13 +56,15 @@ type syncState struct {
 	bookStart time.Time // when the current book's download began
 }
 
-// shelfPickerState holds the in-flight list-shelves request plus its result
-// or error. Written by the fetch goroutine, read by Draw.
+// shelfPickerState holds the in-flight list-options request plus its result
+// or error. Written by the fetch goroutine, read by Draw. Despite the legacy
+// name it covers both CWA shelves and generic OPDS subsections.
 type shelfPickerState struct {
 	mu       sync.Mutex
 	loading  bool
-	shelves  []Shelf
+	options  []FilterOption
 	err      error
+	isCWA    bool              // captured at fetch time so the draw function can label the screen
 	rowRects []image.Rectangle // one per visible row (index 0 = "All books")
 }
 
@@ -528,12 +530,12 @@ func (a *app) drawMain() {
 	ink.DrawString(image.Point{X: a.layout.margin, Y: 210}, "Server: "+a.cfg.Host)
 
 	filterText := "Filter: all books"
-	if a.cfg.ShelfID > 0 {
-		name := a.cfg.ShelfName
+	if a.cfg.FilterHref != "" {
+		name := a.cfg.FilterName
 		if name == "" {
-			name = fmt.Sprintf("shelf %d", a.cfg.ShelfID)
+			name = a.cfg.FilterHref
 		}
-		filterText = "Filter: " + name + " (shelf)"
+		filterText = "Filter: " + name
 	}
 	ink.DrawString(image.Point{X: a.layout.margin, Y: 255}, filterText)
 
@@ -724,7 +726,7 @@ func (a *app) runSync() {
 		a.sync.mu.Unlock()
 		a.refreshProgress()
 	}
-	dl, skip, fail, firstErr := Sync(a.client, a.store, a.cfg.Library, a.cfg.ShelfID, progress)
+	dl, skip, fail, firstErr := Sync(a.client, a.store, a.cfg.Library, a.cfg.FilterHref, progress)
 
 	a.sync.mu.Lock()
 	a.sync.active = false
@@ -847,12 +849,12 @@ func (a *app) drawSettings() {
 	// Filter status line above the buttons
 	body.SetActive(ink.Black)
 	filterLabel := "Filter: All books"
-	if a.cfg.ShelfID > 0 {
-		name := a.cfg.ShelfName
+	if a.cfg.FilterHref != "" {
+		name := a.cfg.FilterName
 		if name == "" {
-			name = fmt.Sprintf("shelf %d", a.cfg.ShelfID)
+			name = a.cfg.FilterHref
 		}
-		filterLabel = "Filter: " + name + " (shelf)"
+		filterLabel = "Filter: " + name
 	}
 	ink.DrawString(image.Point{X: a.layout.margin, Y: 400}, filterLabel)
 
@@ -920,20 +922,20 @@ func (a *app) startChangeInfo() {
 // ---------- Shelf picker ----------
 
 // openShelfPicker transitions to the picker screen and kicks off a fetch of
-// the shelf list in the background.
+// the filter options in the background.
 func (a *app) openShelfPicker() {
 	a.picker.mu.Lock()
 	a.picker.loading = true
-	a.picker.shelves = nil
+	a.picker.options = nil
 	a.picker.err = nil
 	a.picker.rowRects = nil
 	a.picker.mu.Unlock()
 	a.screen = screenShelfPicker
 	ink.Repaint()
-	go a.fetchShelves()
+	go a.fetchFilterOptions()
 }
 
-func (a *app) fetchShelves() {
+func (a *app) fetchFilterOptions() {
 	if err := a.ensureConnected(); err != nil {
 		a.picker.mu.Lock()
 		a.picker.loading = false
@@ -942,11 +944,12 @@ func (a *app) fetchShelves() {
 		ink.Repaint()
 		return
 	}
-	shelves, err := a.client.ListShelves()
+	opts, err := a.client.ListFilterOptions()
 	a.picker.mu.Lock()
 	a.picker.loading = false
-	a.picker.shelves = shelves
+	a.picker.options = opts
 	a.picker.err = err
+	a.picker.isCWA = a.client.IsCWA
 	a.picker.mu.Unlock()
 	ink.Repaint()
 }
@@ -967,21 +970,27 @@ func (a *app) drawShelfPicker() {
 
 	a.picker.mu.Lock()
 	loading := a.picker.loading
-	shelves := append([]Shelf(nil), a.picker.shelves...)
+	options := append([]FilterOption(nil), a.picker.options...)
 	pickerErr := a.picker.err
+	isCWA := a.picker.isCWA
 	a.picker.mu.Unlock()
+
+	thingName := "subsections"
+	if isCWA {
+		thingName = "shelves"
+	}
 
 	if loading {
 		body.SetActive(ink.Black)
-		ink.DrawString(image.Point{X: a.layout.margin, Y: 260}, "Loading shelves...")
+		ink.DrawString(image.Point{X: a.layout.margin, Y: 260}, "Loading "+thingName+"...")
 		ink.ShowHourglassAt(image.Point{X: a.layout.margin, Y: 340})
 	} else if pickerErr != nil {
 		body.SetActive(ink.Black)
-		ink.DrawString(image.Point{X: a.layout.margin, Y: 260}, "Could not load shelves:")
+		ink.DrawString(image.Point{X: a.layout.margin, Y: 260}, "Could not load "+thingName+":")
 		ink.DrawString(image.Point{X: a.layout.margin, Y: 310}, truncate(pickerErr.Error(), 60))
-	} else if len(shelves) == 0 {
+	} else if len(options) == 0 {
 		body.SetActive(ink.Black)
-		ink.DrawString(image.Point{X: a.layout.margin, Y: 260}, "This server does not expose shelves.")
+		ink.DrawString(image.Point{X: a.layout.margin, Y: 260}, "This server does not expose "+thingName+".")
 		ink.DrawString(image.Point{X: a.layout.margin, Y: 310}, "Select All books to continue.")
 		// Still render the All books row so the user can confirm.
 		rowH := 90
@@ -993,15 +1002,12 @@ func (a *app) drawShelfPicker() {
 		a.picker.rowRects = []image.Rectangle{rect}
 		a.picker.mu.Unlock()
 	} else {
-		// Render rows: "All books" first, then each shelf, each in a bordered
-		// box the user can tap. Compute row rects and stash them on the state
-		// so the pointer handler can hit-test.
 		rowH := 90
 		areaTop := a.layout.pickerAreaTop
 		areaBottom := a.layout.pickerAreaBottom
 		availableH := areaBottom - areaTop
 		maxRows := availableH/rowH - 1
-		total := 1 + len(shelves) // +1 for "All books"
+		total := 1 + len(options) // +1 for "All books"
 		visible := total
 		if visible > maxRows {
 			visible = maxRows
@@ -1017,17 +1023,16 @@ func (a *app) drawShelfPicker() {
 			if i == 0 {
 				text = "All books"
 			} else {
-				text = shelves[i-1].Name
+				text = options[i-1].Name
 			}
 			btnFont.SetActive(ink.Black)
 			drawCenteredText(btnFont, rect, truncate(text, 40), 44)
 		}
-		// Note if truncated
 		if total > visible {
 			body.SetActive(ink.Black)
 			ink.DrawString(
 				image.Point{X: a.layout.margin, Y: areaBottom - 30},
-				fmt.Sprintf("Showing %d of %d. Rename shelves in CWA to reorder.", visible, total),
+				fmt.Sprintf("Showing %d of %d.", visible, total),
 			)
 		}
 
@@ -1061,15 +1066,15 @@ func (a *app) shelfPickerPointer(e ink.PointerEvent) bool {
 	}
 	a.picker.mu.Lock()
 	rects := a.picker.rowRects
-	shelves := a.picker.shelves
+	options := a.picker.options
 	a.picker.mu.Unlock()
 	for i, r := range rects {
 		if e.Point.In(r) {
 			if i == 0 {
-				a.setFilter(0, "")
-			} else if i-1 < len(shelves) {
-				s := shelves[i-1]
-				a.setFilter(s.ID, s.Name)
+				a.setFilter("", "")
+			} else if i-1 < len(options) {
+				o := options[i-1]
+				a.setFilter(o.Href, o.Name)
 			}
 			a.screen = screenSettings
 			ink.HideHourglass()
@@ -1080,10 +1085,9 @@ func (a *app) shelfPickerPointer(e ink.PointerEvent) bool {
 	return false
 }
 
-// setFilter updates the in-memory config, persists it, and updates the open
-// Client so the next sync uses the new filter.
-func (a *app) setFilter(shelfID int, shelfName string) {
-	a.cfg.ShelfID = shelfID
-	a.cfg.ShelfName = shelfName
+// setFilter updates the in-memory config and persists it.
+func (a *app) setFilter(href, name string) {
+	a.cfg.FilterHref = href
+	a.cfg.FilterName = name
 	_ = SaveConfig(a.cfgPath, a.cfg)
 }

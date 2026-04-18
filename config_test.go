@@ -6,18 +6,40 @@ import (
 	"testing"
 )
 
+func TestConfigBackCompatShelfID(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "legacy.cfg")
+	old := "host = http://cwa.lan:8083\n" +
+		"user = alice\npassword = pw\n" +
+		"library = /lib\nstate_db = /db.sqlite\n" +
+		"shelf_id = 5\nshelf_name = old-shelf\n"
+	if err := os.WriteFile(path, []byte(old), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	got, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if got.FilterHref != "/opds/shelf/5" {
+		t.Errorf("FilterHref = %q, want /opds/shelf/5", got.FilterHref)
+	}
+	if got.FilterName != "old-shelf" {
+		t.Errorf("FilterName = %q, want old-shelf", got.FilterName)
+	}
+}
+
 func TestConfigRoundTrip(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "nested", "bookbeam.cfg")
 
 	want := &Config{
-		Host:      "http://cwa.lan:8083",
-		User:      "alice",
-		Pass:      "hunter2",
-		Library:   "/mnt/ext1/Books/CWA",
-		StateDB:   "/mnt/ext1/system/config/bookbeam.db",
-		ShelfID:   7,
-		ShelfName: "to-pocketbook",
+		Host:       "http://cwa.lan:8083",
+		User:       "alice",
+		Pass:       "hunter2",
+		Library:    "/mnt/ext1/Books/CWA",
+		StateDB:    "/mnt/ext1/system/config/bookbeam.db",
+		FilterHref: "/opds/shelf/7",
+		FilterName: "to-pocketbook",
 	}
 	if err := SaveConfig(path, want); err != nil {
 		t.Fatalf("save: %v", err)

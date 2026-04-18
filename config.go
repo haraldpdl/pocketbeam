@@ -10,13 +10,13 @@ import (
 )
 
 type Config struct {
-	Host      string // base URL, e.g. http://cwa.example.internal:8083
-	User      string // CWA user
-	Pass      string // CWA password
-	Library   string // local target dir, e.g. /mnt/ext1/Books/CWA
-	StateDB   string // sqlite path, e.g. /mnt/ext1/system/config/bookbeam.db
-	ShelfID   int    // 0 = sync all books; otherwise sync only this shelf
-	ShelfName string // last-known shelf name (display cache; refreshed on settings open)
+	Host       string // base URL, e.g. http://cwa.example.internal:8083
+	User       string // OPDS server user
+	Pass       string // OPDS server password
+	Library    string // local target dir, e.g. /mnt/ext1/Books/CWA
+	StateDB    string // sqlite path, e.g. /mnt/ext1/system/config/bookbeam.db
+	FilterHref string // OPDS path to sync (empty = all books). Works for CWA shelves AND generic subsections.
+	FilterName string // last-known display name of the filter (cache; refreshed in the picker)
 }
 
 // LoadConfig reads a flat key=value file. Comments begin with #. Whitespace
@@ -51,14 +51,24 @@ func LoadConfig(path string) (*Config, error) {
 			c.Library = strings.TrimSpace(v)
 		case "state_db":
 			c.StateDB = strings.TrimSpace(v)
+		case "filter_href":
+			c.FilterHref = strings.TrimSpace(v)
+		case "filter_name":
+			c.FilterName = strings.TrimSpace(v)
 		case "shelf_id":
+			// Back-compat: old configs wrote shelf_id. Convert to filter_href.
 			id, err := strconv.Atoi(strings.TrimSpace(v))
 			if err != nil {
 				return nil, fmt.Errorf("%s:%d: bad shelf_id %q: %w", path, n, v, err)
 			}
-			c.ShelfID = id
+			if id > 0 && c.FilterHref == "" {
+				c.FilterHref = fmt.Sprintf("/opds/shelf/%d", id)
+			}
 		case "shelf_name":
-			c.ShelfName = strings.TrimSpace(v)
+			// Back-compat: old configs wrote shelf_name. Preserve as the display name.
+			if c.FilterName == "" {
+				c.FilterName = strings.TrimSpace(v)
+			}
 		default:
 			return nil, fmt.Errorf("%s:%d: unknown key %q", path, n, k)
 		}
@@ -87,10 +97,10 @@ func SaveConfig(path string, c *Config) error {
 	fmt.Fprintf(&b, "password = %s\n", c.Pass)
 	fmt.Fprintf(&b, "library = %s\n", c.Library)
 	fmt.Fprintf(&b, "state_db = %s\n", c.StateDB)
-	if c.ShelfID > 0 {
-		fmt.Fprintf(&b, "shelf_id = %d\n", c.ShelfID)
-		if c.ShelfName != "" {
-			fmt.Fprintf(&b, "shelf_name = %s\n", c.ShelfName)
+	if c.FilterHref != "" {
+		fmt.Fprintf(&b, "filter_href = %s\n", c.FilterHref)
+		if c.FilterName != "" {
+			fmt.Fprintf(&b, "filter_name = %s\n", c.FilterName)
 		}
 	}
 	tmp := path + ".tmp"
