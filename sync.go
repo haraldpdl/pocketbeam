@@ -38,7 +38,7 @@ func Sync(client *Client, store *Store, library, filterHref string, progress Pro
 		if progress != nil {
 			progress(i+1, total, b)
 		}
-		local, err := store.LocalUpdated(b.UUID)
+		local, oldPath, exists, err := store.LocalEntry(b.UUID)
 		if err != nil {
 			failed++
 			if firstErr == nil {
@@ -46,7 +46,7 @@ func Sync(client *Client, store *Store, library, filterHref string, progress Pro
 			}
 			continue
 		}
-		if !local.IsZero() && !b.Updated.After(local) {
+		if exists && !b.Updated.After(local) {
 			skipped++
 			continue
 		}
@@ -57,6 +57,15 @@ func Sync(client *Client, store *Store, library, filterHref string, progress Pro
 				firstErr = fmt.Errorf("download %q: %w", b.Title, err)
 			}
 			continue
+		}
+		// If the book was renamed (title or author changed), the new download
+		// lands at a new path; tidy up the old file so we don't accumulate
+		// duplicates on the device.
+		if exists && oldPath != "" && oldPath != path {
+			if err := os.Remove(oldPath); err == nil {
+				// Best-effort: also remove the old author directory if it's now empty.
+				_ = os.Remove(filepath.Dir(oldPath))
+			}
 		}
 		if err := store.Upsert(b, path); err != nil {
 			failed++

@@ -87,18 +87,18 @@ func (s *Store) LastSync() (SyncSummary, bool, error) {
 
 func (s *Store) Close() error { return s.db.Close() }
 
-// LocalUpdated returns the last `updated` timestamp we have stored for the
-// given UUID. Zero time means we don't have it yet.
-func (s *Store) LocalUpdated(uuid string) (time.Time, error) {
+// LocalEntry returns the last-recorded updated timestamp and local path for
+// a book UUID. exists=false means we have not synced this book before.
+func (s *Store) LocalEntry(uuid string) (updated time.Time, path string, exists bool, err error) {
 	var ts int64
-	err := s.db.QueryRow("SELECT updated FROM books WHERE uuid = ?", uuid).Scan(&ts)
+	err = s.db.QueryRow("SELECT updated, local_path FROM books WHERE uuid = ?", uuid).Scan(&ts, &path)
 	if err == sql.ErrNoRows {
-		return time.Time{}, nil
+		return time.Time{}, "", false, nil
 	}
 	if err != nil {
-		return time.Time{}, err
+		return time.Time{}, "", false, err
 	}
-	return time.Unix(ts, 0), nil
+	return time.Unix(ts, 0), path, true, nil
 }
 
 // Upsert records a successful download.
