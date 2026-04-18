@@ -1,6 +1,6 @@
 # bookbeam
 
-Wireless ebook sync from a [Calibre-Web Automated](https://github.com/crocodilestick/Calibre-Web-Automated) server to a [PocketBook Era Color](https://pocketbook.ch/en-ch/products/pocketbook-era-color) and likely other PocketBook devices on firmware 6.x.
+Wireless ebook sync from any OPDS server to a [PocketBook Era Color](https://pocketbook.ch/en-ch/products/pocketbook-era-color) and likely other PocketBook devices on firmware 6.x. Tested against [Calibre-Web Automated](https://github.com/crocodilestick/Calibre-Web-Automated) with extra fast-path support (shelf filter, single-request "all books" feed).
 
 Native on-device app — no PC, no USB cable. Pulls new and updated ebooks over Wi-Fi using OPDS, keeps local state so every sync is an incremental diff, and drops the files straight into the device's library.
 
@@ -35,12 +35,14 @@ The app then appears in the device's Applications menu as `@bookbeam` with a gen
 
 Launch bookbeam from the Applications menu. You will be walked through:
 
-1. **Server URL** — e.g. `http://cwa.lan:8083` or `https://cwa.tailnet.example`
-2. **Username** — your Calibre-Web Automated login
+1. **OPDS server URL** — e.g. `http://library.lan:8083` or `https://library.tailnet.example`
+2. **Username** — your server login
 3. **Password** — same
 4. **Testing connection** — the wizard probes the server and validates your credentials before saving
 
 On success, the main sync screen appears. On failure, the wizard shows a specific error (bad URL, wrong credentials, server unreachable, etc.) and offers retry.
+
+The app auto-detects whether the server is Calibre-Web / Calibre-Web Automated and enables the shelf filter if so. Against other OPDS servers (Calibre's built-in content server, COPS, Audiobookshelf's OPDS feed, etc.) it falls back to a generic recursive walker that navigates the catalog's subsections; all books still sync, just via more HTTP requests.
 
 ## Usage
 
@@ -95,8 +97,8 @@ go test -tags=live -run TestLive
 
 - **App name shows as `@bookbeam`** in the PocketBook launcher with a generic icon. This is the PocketBook firmware's default presentation for any sideloaded app and matches KOReader's `@koreader` presentation. Customising it requires editing `/mnt/ext1/system/config/desktop/view.json` and placing BMP icons under `/mnt/ext1/applications/icons/`; that is a per-user polish step, not part of the default install.
 - **Password entry is visible** on the on-screen keyboard. The PocketBook InkView keyboard has no masked-input mode exposed through the SDK. Use a stance that blocks onlookers or set a throwaway password in CWA for device use.
-- **Single source only.** bookbeam syncs one CWA server at a time. Multiple-library support is a v2 item.
-- **Filter is shelf-only.** bookbeam can filter by a single CWA shelf; other filter types (tag, series, author, smart shelves) are a v2 item.
+- **Single source only.** bookbeam syncs one server at a time. Multiple-library support is a v2 item.
+- **Filter is Calibre-Web shelves only.** Against non-CWA OPDS servers the shelf picker falls through to "All books" only; generic OPDS doesn't have a universal "user collection" concept. Filtering by tag / series / author on CWA, or subsection picking on other servers, is a v2 item.
 - **No delete on remote-removal.** Books deleted from CWA are not removed from the device.
 - **Sync cannot be cancelled mid-run.** Interrupting (Back key or force-quit) is safe but leaves a partial download as a `.part` file that the next sync retries cleanly.
 
