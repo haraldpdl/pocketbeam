@@ -19,6 +19,7 @@ const (
 	screenFirstRun screen = iota
 	screenMain
 	screenSettings
+	screenShelfPicker
 )
 
 // wizardStep tracks where the user is in the first-run flow.
@@ -55,6 +56,16 @@ type syncState struct {
 	bookStart time.Time // when the current book's download began
 }
 
+// shelfPickerState holds the in-flight list-shelves request plus its result
+// or error. Written by the fetch goroutine, read by Draw.
+type shelfPickerState struct {
+	mu       sync.Mutex
+	loading  bool
+	shelves  []Shelf
+	err      error
+	rowRects []image.Rectangle // one per visible row (index 0 = "All books")
+}
+
 // layout holds screen-relative rectangles for every clickable element and for
 // the progress strip. Computed once in Init from the actual ScreenSize so the
 // UI adapts to whatever resolution the device reports.
@@ -72,7 +83,12 @@ type layout struct {
 
 	// settings screen
 	changeButton image.Rectangle
+	filterButton image.Rectangle
 	backButton   image.Rectangle
+
+	// shelf picker: per-row tap rects computed dynamically in draw.
+	pickerAreaTop    int
+	pickerAreaBottom int
 }
 
 // connectivity records the last known network state, derived from the outcome
@@ -118,22 +134,32 @@ func computeLayout(sz image.Point) layout {
 	settingsBtn := image.Rect(networkBtn.Max.X+40, btnY1, networkBtn.Max.X+40+btnW, btnY2)
 	quitBtn := image.Rect(w-sideMargin-btnW, btnY1, w-sideMargin, btnY2)
 
-	// Settings screen: single change-info button mid-upper; Back in the
-	// bottom-left mirroring the main screen.
+	// Settings screen: two stacked big buttons (change server info, change
+	// filter); Back in the bottom-left mirroring the main screen.
 	changeY1 := topSafe + 320
 	changeBtn := image.Rect(sideMargin, changeY1, sideMargin+contentW, changeY1+160)
+	filterY1 := changeY1 + 200
+	filterBtn := image.Rect(sideMargin, filterY1, sideMargin+contentW, filterY1+160)
+
+	// Shelf picker: rows live between the header (below topSafe) and the
+	// Back button (same position as bottom btnY1).
+	pickerTop := topSafe + 220
+	pickerBottom := btnY1 - 40
 
 	return layout{
-		screen:         sz,
-		margin:         sideMargin,
-		syncButton:     syncBtn,
-		networkButton:  networkBtn,
-		settingsButton: settingsBtn,
-		quitButton:     quitBtn,
-		progressArea:   progArea,
-		progressBar:    progBar,
-		changeButton:   changeBtn,
-		backButton:     networkBtn,
+		screen:           sz,
+		margin:           sideMargin,
+		syncButton:       syncBtn,
+		networkButton:    networkBtn,
+		settingsButton:   settingsBtn,
+		quitButton:       quitBtn,
+		progressArea:     progArea,
+		progressBar:      progBar,
+		changeButton:     changeBtn,
+		filterButton:     filterBtn,
+		backButton:       networkBtn,
+		pickerAreaTop:    pickerTop,
+		pickerAreaBottom: pickerBottom,
 	}
 }
 
@@ -146,6 +172,7 @@ type app struct {
 	screen      screen
 	wizard      wizardState
 	sync        syncState
+	picker      shelfPickerState
 	lastSync    SyncSummary
 	hasLastSync bool
 	bookCount   int
@@ -214,15 +241,29 @@ func (a *app) Draw() {
 		a.drawMain()
 	case screenSettings:
 		a.drawSettings()
+	case screenShelfPicker:
+		a.drawShelfPicker()
 	}
 	ink.FullUpdate()
 }
 
 func (a *app) Key(e ink.KeyEvent) bool {
-	// Back key quits, except during a probe or sync.
+	// Back key behaviour: return to previous screen from settings/picker,
+	// quit from first-run welcome/error or from main (if idle).
 	if e.Key == ink.KeyBack && a.wizard.step != stepTesting && !a.syncActive() {
-		ink.Exit()
-		return true
+		switch a.screen {
+		case screenSettings:
+			a.screen = screenMain
+			ink.Repaint()
+			return true
+		case screenShelfPicker:
+			a.screen = screenSettings
+			ink.Repaint()
+			return true
+		default:
+			ink.Exit()
+			return true
+		}
 	}
 	switch a.screen {
 	case screenFirstRun:
@@ -231,6 +272,8 @@ func (a *app) Key(e ink.KeyEvent) bool {
 		return a.mainKey(e)
 	case screenSettings:
 		return a.settingsKey(e)
+	case screenShelfPicker:
+		return a.shelfPickerKey(e)
 	}
 	return false
 }
@@ -243,6 +286,8 @@ func (a *app) Pointer(e ink.PointerEvent) bool {
 		return a.mainPointer(e)
 	case screenSettings:
 		return a.settingsPointer(e)
+	case screenShelfPicker:
+		return a.shelfPickerPointer(e)
 	}
 	return false
 }
@@ -478,12 +523,20 @@ func (a *app) drawMain() {
 	title.SetActive(ink.Black)
 	ink.DrawString(image.Point{X: a.layout.margin, Y: 120}, "bookbeam")
 
-	// Connection info
+	// Connection info + filter + status stacked tightly near the top
 	body.SetActive(ink.Black)
-	ink.DrawString(image.Point{X: a.layout.margin, Y: 220}, a.cfg.Host)
+	ink.DrawString(image.Point{X: a.layout.margin, Y: 210}, "Server: "+a.cfg.Host)
 
-	// Connection status
-	body.SetActive(ink.Black)
+	filterText := "Filter: all books"
+	if a.cfg.ShelfID > 0 {
+		name := a.cfg.ShelfName
+		if name == "" {
+			name = fmt.Sprintf("shelf %d", a.cfg.ShelfID)
+		}
+		filterText = "Filter: " + name + " (shelf)"
+	}
+	ink.DrawString(image.Point{X: a.layout.margin, Y: 255}, filterText)
+
 	var connText string
 	switch a.connState {
 	case connOnline:
@@ -493,18 +546,17 @@ func (a *app) drawMain() {
 	default:
 		connText = "Status: not yet tested"
 	}
-	ink.DrawString(image.Point{X: a.layout.margin, Y: 270}, connText)
+	ink.DrawString(image.Point{X: a.layout.margin, Y: 300}, connText)
 
 	// Last-sync summary
-	body.SetActive(ink.Black)
 	if a.hasLastSync {
-		ink.DrawString(image.Point{X: a.layout.margin, Y: 340}, fmt.Sprintf("Last synced: %s", humanAgo(a.lastSync.At)))
-		ink.DrawString(image.Point{X: a.layout.margin, Y: 390}, fmt.Sprintf("%d books in library", a.bookCount))
+		ink.DrawString(image.Point{X: a.layout.margin, Y: 360}, fmt.Sprintf("Last synced: %s", humanAgo(a.lastSync.At)))
+		ink.DrawString(image.Point{X: a.layout.margin, Y: 405}, fmt.Sprintf("%d books in library", a.bookCount))
 		if a.lastSync.Failed > 0 {
-			ink.DrawString(image.Point{X: a.layout.margin, Y: 440}, fmt.Sprintf("%d failed (will retry next sync)", a.lastSync.Failed))
+			ink.DrawString(image.Point{X: a.layout.margin, Y: 450}, fmt.Sprintf("%d failed (will retry next sync)", a.lastSync.Failed))
 		}
 	} else {
-		ink.DrawString(image.Point{X: a.layout.margin, Y: 340}, "Not yet synced. Tap Sync Now to begin.")
+		ink.DrawString(image.Point{X: a.layout.margin, Y: 360}, "Not yet synced. Tap Sync Now to begin.")
 	}
 
 	// Sync Now button
@@ -684,7 +736,7 @@ func (a *app) runSync() {
 		a.sync.mu.Unlock()
 		a.refreshProgress()
 	}
-	dl, skip, fail, firstErr := Sync(a.client, a.store, a.cfg.Library, progress)
+	dl, skip, fail, firstErr := Sync(a.client, a.store, a.cfg.Library, a.cfg.ShelfID, progress)
 
 	a.sync.mu.Lock()
 	a.sync.active = false
@@ -783,15 +835,32 @@ func (a *app) drawSettings() {
 	ink.DrawString(image.Point{X: 80, Y: 260}, "Server: "+a.cfg.Host)
 	ink.DrawString(image.Point{X: 80, Y: 320}, "User:   "+a.cfg.User)
 
+	// Filter status line above the buttons
+	body.SetActive(ink.Black)
+	filterLabel := "Filter: All books"
+	if a.cfg.ShelfID > 0 {
+		name := a.cfg.ShelfName
+		if name == "" {
+			name = fmt.Sprintf("shelf %d", a.cfg.ShelfID)
+		}
+		filterLabel = "Filter: " + name + " (shelf)"
+	}
+	ink.DrawString(image.Point{X: a.layout.margin, Y: 400}, filterLabel)
+
 	// Change-info button
 	ink.DrawRect(a.layout.changeButton, ink.Black)
 	ink.DrawRect(a.layout.changeButton.Inset(2), ink.Black)
 	btnFont.SetActive(ink.Black)
 	drawCenteredText(btnFont, a.layout.changeButton, "Change server info", 44)
 
+	// Change-filter button
+	ink.DrawRect(a.layout.filterButton, ink.Black)
+	ink.DrawRect(a.layout.filterButton.Inset(2), ink.Black)
+	drawCenteredText(btnFont, a.layout.filterButton, "Change sync filter", 44)
+
 	// Footer: version + Back
 	small.SetActive(ink.Black)
-	ink.DrawString(image.Point{X: 80, Y: 1700}, "bookbeam "+version)
+	ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.backButton.Min.Y - 40}, "bookbeam "+version)
 
 	ink.DrawRect(a.layout.backButton, ink.Black)
 	btnFont.SetActive(ink.Black)
@@ -799,12 +868,7 @@ func (a *app) drawSettings() {
 }
 
 func (a *app) settingsKey(e ink.KeyEvent) bool {
-	switch e.Key {
-	case ink.KeyBack:
-		a.screen = screenMain
-		ink.Repaint()
-		return true
-	case ink.KeyOk:
+	if e.Key == ink.KeyOk {
 		a.startChangeInfo()
 		return true
 	}
@@ -819,6 +883,9 @@ func (a *app) settingsPointer(e ink.PointerEvent) bool {
 	switch {
 	case p.In(a.layout.changeButton):
 		a.startChangeInfo()
+		return true
+	case p.In(a.layout.filterButton):
+		a.openShelfPicker()
 		return true
 	case p.In(a.layout.backButton):
 		a.screen = screenMain
@@ -839,4 +906,154 @@ func (a *app) startChangeInfo() {
 	a.wizard.pass = ""
 	a.screen = screenFirstRun
 	ink.OpenKeyboard("https://cwa.example.com:8083", 512)
+}
+
+// ---------- Shelf picker ----------
+
+// openShelfPicker transitions to the picker screen and kicks off a fetch of
+// the shelf list in the background.
+func (a *app) openShelfPicker() {
+	a.picker.mu.Lock()
+	a.picker.loading = true
+	a.picker.shelves = nil
+	a.picker.err = nil
+	a.picker.rowRects = nil
+	a.picker.mu.Unlock()
+	a.screen = screenShelfPicker
+	ink.Repaint()
+	go a.fetchShelves()
+}
+
+func (a *app) fetchShelves() {
+	shelves, err := a.client.ListShelves()
+	a.picker.mu.Lock()
+	a.picker.loading = false
+	a.picker.shelves = shelves
+	a.picker.err = err
+	a.picker.mu.Unlock()
+	ink.Repaint()
+}
+
+func (a *app) drawShelfPicker() {
+	title := ink.OpenFont(ink.DefaultFontBold, 64, true)
+	defer title.Close()
+	title.SetActive(ink.Black)
+	ink.DrawString(image.Point{X: a.layout.margin, Y: 140}, "Select filter")
+
+	body := ink.OpenFont(ink.DefaultFont, 32, true)
+	defer body.Close()
+	body.SetActive(ink.Black)
+
+	btnFont := ink.OpenFont(ink.DefaultFontBold, 44, true)
+	defer btnFont.Close()
+	btnFont.SetActive(ink.Black)
+
+	a.picker.mu.Lock()
+	loading := a.picker.loading
+	shelves := append([]Shelf(nil), a.picker.shelves...)
+	pickerErr := a.picker.err
+	a.picker.mu.Unlock()
+
+	if loading {
+		body.SetActive(ink.Black)
+		ink.DrawString(image.Point{X: a.layout.margin, Y: 260}, "Loading shelves...")
+		ink.ShowHourglassAt(image.Point{X: a.layout.margin, Y: 340})
+	} else if pickerErr != nil {
+		body.SetActive(ink.Black)
+		ink.DrawString(image.Point{X: a.layout.margin, Y: 260}, "Could not load shelves:")
+		ink.DrawString(image.Point{X: a.layout.margin, Y: 310}, truncate(pickerErr.Error(), 60))
+	} else {
+		// Render rows: "All books" first, then each shelf, each in a bordered
+		// box the user can tap. Compute row rects and stash them on the state
+		// so the pointer handler can hit-test.
+		rowH := 90
+		areaTop := a.layout.pickerAreaTop
+		areaBottom := a.layout.pickerAreaBottom
+		availableH := areaBottom - areaTop
+		maxRows := availableH/rowH - 1
+		total := 1 + len(shelves) // +1 for "All books"
+		visible := total
+		if visible > maxRows {
+			visible = maxRows
+		}
+
+		rects := make([]image.Rectangle, 0, visible)
+		for i := 0; i < visible; i++ {
+			y1 := areaTop + i*rowH
+			rect := image.Rect(a.layout.margin, y1, a.layout.screen.X-a.layout.margin, y1+rowH-20)
+			rects = append(rects, rect)
+			ink.DrawRect(rect, ink.Black)
+			var text string
+			if i == 0 {
+				text = "All books"
+			} else {
+				text = shelves[i-1].Name
+			}
+			btnFont.SetActive(ink.Black)
+			drawCenteredText(btnFont, rect, truncate(text, 40), 44)
+		}
+		// Note if truncated
+		if total > visible {
+			body.SetActive(ink.Black)
+			ink.DrawString(
+				image.Point{X: a.layout.margin, Y: areaBottom - 30},
+				fmt.Sprintf("Showing %d of %d. Rename shelves in CWA to reorder.", visible, total),
+			)
+		}
+
+		a.picker.mu.Lock()
+		a.picker.rowRects = rects
+		a.picker.mu.Unlock()
+	}
+
+	ink.DrawRect(a.layout.backButton, ink.Black)
+	btnFont.SetActive(ink.Black)
+	drawCenteredText(btnFont, a.layout.backButton, "Back", 44)
+}
+
+func (a *app) shelfPickerKey(e ink.KeyEvent) bool {
+	if e.Key == ink.KeyOk {
+		a.screen = screenSettings
+		ink.Repaint()
+		return true
+	}
+	return false
+}
+
+func (a *app) shelfPickerPointer(e ink.PointerEvent) bool {
+	if e.State != ink.PointerDown {
+		return false
+	}
+	if e.Point.In(a.layout.backButton) {
+		a.screen = screenSettings
+		ink.Repaint()
+		return true
+	}
+	a.picker.mu.Lock()
+	rects := a.picker.rowRects
+	shelves := a.picker.shelves
+	a.picker.mu.Unlock()
+	for i, r := range rects {
+		if e.Point.In(r) {
+			if i == 0 {
+				a.setFilter(0, "")
+			} else if i-1 < len(shelves) {
+				s := shelves[i-1]
+				a.setFilter(s.ID, s.Name)
+			}
+			a.screen = screenSettings
+			ink.HideHourglass()
+			ink.Repaint()
+			return true
+		}
+	}
+	return false
+}
+
+// setFilter updates the in-memory config, persists it, and updates the open
+// Client so the next sync uses the new filter.
+func (a *app) setFilter(shelfID int, shelfName string) {
+	a.cfg.ShelfID = shelfID
+	a.cfg.ShelfName = shelfName
+	_ = SaveConfig(a.cfgPath, a.cfg)
 }
