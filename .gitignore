@@ -1,0 +1,6 @@
+bookbeam
+bookbeam.app
+*.test
+*.out
+.idea/
+.vscode/
