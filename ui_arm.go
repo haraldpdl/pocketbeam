@@ -45,24 +45,97 @@ type wizardState struct {
 // syncState holds live progress from a running sync. Written by the progress
 // callback (goroutine), read by Draw (event loop). Protected by mu.
 type syncState struct {
-	mu     sync.Mutex
-	active bool
-	index  int
-	total  int
-	title  string
-	author string
-	err    error
+	mu        sync.Mutex
+	active    bool
+	index     int
+	total     int
+	title     string
+	author    string
+	err       error
+	bookStart time.Time // when the current book's download began
 }
 
-// Button rectangles on the main and settings screens. Package-level so
-// hit-test uses the same values as the draw methods.
-var (
-	mainSyncButton       = image.Rect(202, 520, 1202, 720)
-	mainSettingsButton   = image.Rect(100, 1720, 500, 1820)
-	mainQuitButton       = image.Rect(900, 1720, 1300, 1820)
-	settingsChangeButton = image.Rect(202, 480, 1202, 640)
-	settingsBackButton   = image.Rect(100, 1720, 500, 1820)
+// layout holds screen-relative rectangles for every clickable element and for
+// the progress strip. Computed once in Init from the actual ScreenSize so the
+// UI adapts to whatever resolution the device reports.
+type layout struct {
+	screen image.Point
+	margin int
+
+	// main screen
+	syncButton     image.Rectangle
+	networkButton  image.Rectangle
+	settingsButton image.Rectangle
+	quitButton     image.Rectangle
+	progressArea   image.Rectangle // the strip refreshed via PartialUpdate
+	progressBar    image.Rectangle
+
+	// settings screen
+	changeButton image.Rectangle
+	backButton   image.Rectangle
+}
+
+// connectivity records the last known network state, derived from the outcome
+// of the most recent probe or sync attempt.
+type connectivity int
+
+const (
+	connUnknown connectivity = iota
+	connOnline
+	connOffline
 )
+
+// computeLayout lays out the UI relative to the given screen size. Positions
+// are derived from the usable area after stripping generous safety margins
+// that guard against a PocketBook status bar at top and nav bar at bottom
+// (ScreenSize does not account for either).
+func computeLayout(sz image.Point) layout {
+	w, h := sz.X, sz.Y
+	sideMargin := 60
+	topSafe := 100
+	bottomSafe := 180
+	if w > 0 && w < 1200 {
+		sideMargin = 40
+	}
+	contentW := w - 2*sideMargin
+
+	// Main Sync Now button: centered, below the last-sync summary area.
+	syncY1 := topSafe + 420
+	syncBtn := image.Rect(sideMargin, syncY1, sideMargin+contentW, syncY1+200)
+
+	// Progress strip: fixed position below the Sync button, above the bottom
+	// row. Covers counter + bar + current-book line.
+	progY1 := syncBtn.Max.Y + 60
+	progArea := image.Rect(sideMargin, progY1, sideMargin+contentW, progY1+240)
+	progBar := image.Rect(sideMargin, progY1+80, sideMargin+contentW, progY1+130)
+
+	// Bottom button row: Network | Settings | Quit, anchored from the bottom.
+	btnH := 100
+	btnY2 := h - bottomSafe
+	btnY1 := btnY2 - btnH
+	btnW := (contentW - 2*40) / 3 // 3 buttons with two 40-px gaps between them
+	networkBtn := image.Rect(sideMargin, btnY1, sideMargin+btnW, btnY2)
+	settingsBtn := image.Rect(networkBtn.Max.X+40, btnY1, networkBtn.Max.X+40+btnW, btnY2)
+	quitBtn := image.Rect(w-sideMargin-btnW, btnY1, w-sideMargin, btnY2)
+
+	// Settings screen: single change-info button mid-upper; Back in the
+	// bottom-left mirroring the main screen.
+	changeY1 := topSafe + 320
+	changeBtn := image.Rect(sideMargin, changeY1, sideMargin+contentW, changeY1+160)
+
+	return layout{
+		screen:         sz,
+		margin:         sideMargin,
+		syncButton:     syncBtn,
+		networkButton:  networkBtn,
+		settingsButton: settingsBtn,
+		quitButton:     quitBtn,
+		progressArea:   progArea,
+		progressBar:    progBar,
+		changeButton:   changeBtn,
+		backButton:     networkBtn,
+	}
+}
 
 // app implements ink.App for the bookbeam device UI.
 type app struct {
@@ -77,6 +150,8 @@ type app struct {
 	hasLastSync bool
 	bookCount   int
 	netStop     func()
+	layout      layout
+	connState   connectivity
 }
 
 func newApp() *app {
@@ -88,6 +163,8 @@ func newApp() *app {
 // Init is called once when the app launches.
 func (a *app) Init() error {
 	_ = os.Chdir(filepath.Dir(os.Args[0]))
+
+	a.layout = computeLayout(ink.ScreenSize())
 
 	if err := ink.InitCerts(); err != nil {
 		log.Printf("InitCerts: %v", err)
@@ -217,6 +294,30 @@ func (a *app) drawWizard() {
 		ink.DrawString(image.Point{X: 120, Y: 520}, "- Password")
 		ink.DrawString(image.Point{X: 80, Y: 620}, "Press OK or tap the screen to begin.")
 
+	case stepURL, stepUser, stepPass:
+		title.SetActive(ink.Black)
+		ink.DrawString(image.Point{X: 80, Y: 200}, "bookbeam setup")
+		body.SetActive(ink.Black)
+		var prompt string
+		switch a.wizard.step {
+		case stepURL:
+			prompt = "Step 1 of 3: enter your server URL"
+		case stepUser:
+			prompt = "Step 2 of 3: enter your username"
+		case stepPass:
+			prompt = "Step 3 of 3: enter your password"
+		}
+		ink.DrawString(image.Point{X: 80, Y: 300}, prompt)
+		ink.DrawString(image.Point{X: 80, Y: 360}, "Tap the screen or press OK if the keyboard is not visible.")
+		y := 500
+		if a.wizard.url != "" {
+			ink.DrawString(image.Point{X: 80, Y: y}, "Server: "+a.wizard.url)
+			y += 50
+		}
+		if a.wizard.user != "" {
+			ink.DrawString(image.Point{X: 80, Y: y}, "User: "+a.wizard.user)
+		}
+
 	case stepTesting:
 		title.SetActive(ink.Black)
 		ink.DrawString(image.Point{X: 80, Y: 300}, "Testing connection...")
@@ -244,6 +345,11 @@ func (a *app) wizardKey(e ink.KeyEvent) bool {
 			a.startURLEntry()
 			return true
 		}
+	case stepURL, stepUser, stepPass:
+		if e.Key == ink.KeyOk {
+			a.reopenKeyboardForStep()
+			return true
+		}
 	}
 	return false
 }
@@ -256,8 +362,26 @@ func (a *app) wizardPointer(e ink.PointerEvent) bool {
 	case stepWelcome, stepError:
 		a.startURLEntry()
 		return true
+	case stepURL, stepUser, stepPass:
+		a.reopenKeyboardForStep()
+		return true
 	}
 	return false
+}
+
+// reopenKeyboardForStep pops the right keyboard for the current wizard step.
+// Used when OpenKeyboard called directly from a keyboard handler races and
+// the chained keyboard does not actually appear, so the user taps the screen
+// or presses OK to request it explicitly.
+func (a *app) reopenKeyboardForStep() {
+	switch a.wizard.step {
+	case stepURL:
+		ink.OpenKeyboard("https://cwa.example.com:8083", 512)
+	case stepUser:
+		ink.OpenKeyboard("Username", 128)
+	case stepPass:
+		ink.OpenKeyboard("Password", 128)
+	}
 }
 
 func (a *app) startURLEntry() {
@@ -352,31 +476,61 @@ func (a *app) drawMain() {
 
 	// Header
 	title.SetActive(ink.Black)
-	ink.DrawString(image.Point{X: 80, Y: 140}, "bookbeam")
+	ink.DrawString(image.Point{X: a.layout.margin, Y: 120}, "bookbeam")
 
 	// Connection info
 	body.SetActive(ink.Black)
-	ink.DrawString(image.Point{X: 80, Y: 240}, a.cfg.Host)
+	ink.DrawString(image.Point{X: a.layout.margin, Y: 220}, a.cfg.Host)
+
+	// Connection status
+	body.SetActive(ink.Black)
+	var connText string
+	switch a.connState {
+	case connOnline:
+		connText = "Status: connected"
+	case connOffline:
+		connText = "Status: offline"
+	default:
+		connText = "Status: not yet tested"
+	}
+	ink.DrawString(image.Point{X: a.layout.margin, Y: 270}, connText)
 
 	// Last-sync summary
 	body.SetActive(ink.Black)
 	if a.hasLastSync {
-		ink.DrawString(image.Point{X: 80, Y: 340}, fmt.Sprintf("Last synced: %s", humanAgo(a.lastSync.At)))
-		ink.DrawString(image.Point{X: 80, Y: 390}, fmt.Sprintf("%d books in library", a.bookCount))
+		ink.DrawString(image.Point{X: a.layout.margin, Y: 340}, fmt.Sprintf("Last synced: %s", humanAgo(a.lastSync.At)))
+		ink.DrawString(image.Point{X: a.layout.margin, Y: 390}, fmt.Sprintf("%d books in library", a.bookCount))
 		if a.lastSync.Failed > 0 {
-			ink.DrawString(image.Point{X: 80, Y: 440}, fmt.Sprintf("%d failed (will retry next sync)", a.lastSync.Failed))
+			ink.DrawString(image.Point{X: a.layout.margin, Y: 440}, fmt.Sprintf("%d failed (will retry next sync)", a.lastSync.Failed))
 		}
 	} else {
-		ink.DrawString(image.Point{X: 80, Y: 340}, "Not yet synced. Tap Sync Now to begin.")
+		ink.DrawString(image.Point{X: a.layout.margin, Y: 340}, "Not yet synced. Tap Sync Now to begin.")
 	}
 
 	// Sync Now button
-	ink.DrawRect(mainSyncButton, ink.Black)
-	ink.DrawRect(mainSyncButton.Inset(2), ink.Black)
+	ink.DrawRect(a.layout.syncButton, ink.Black)
+	ink.DrawRect(a.layout.syncButton.Inset(2), ink.Black)
 	btnFont.SetActive(ink.Black)
-	ink.DrawString(image.Point{X: 560, Y: 640}, "Sync Now")
+	drawCenteredText(btnFont, a.layout.syncButton, "Sync Now", 44)
 
-	// Live progress (during sync)
+	// Live progress area (drawn fully here on idle-to-sync transition; during
+	// the sync it is refreshed in-place via drawMainProgress + PartialUpdate).
+	a.drawMainProgressContent(body)
+
+	// Bottom buttons: Network, Settings, Quit
+	ink.DrawRect(a.layout.networkButton, ink.Black)
+	ink.DrawRect(a.layout.settingsButton, ink.Black)
+	ink.DrawRect(a.layout.quitButton, ink.Black)
+	btnFont.SetActive(ink.Black)
+	drawCenteredText(btnFont, a.layout.networkButton, "Network", 44)
+	drawCenteredText(btnFont, a.layout.settingsButton, "Settings", 44)
+	drawCenteredText(btnFont, a.layout.quitButton, "Quit", 44)
+}
+
+// drawMainProgressContent renders the progress strip (counter, bar, current
+// book line) without touching the rest of the main screen. Caller must have
+// the appropriate fonts set up; we do not own them here.
+func (a *app) drawMainProgressContent(body *ink.Font) {
 	a.sync.mu.Lock()
 	active := a.sync.active
 	idx := a.sync.index
@@ -384,31 +538,53 @@ func (a *app) drawMain() {
 	curTitle := a.sync.title
 	curAuthor := a.sync.author
 	syncErr := a.sync.err
+	bookStart := a.sync.bookStart
 	a.sync.mu.Unlock()
+
+	ink.FillArea(a.layout.progressArea, ink.White)
 
 	if active {
 		body.SetActive(ink.Black)
-		ink.DrawString(image.Point{X: 80, Y: 820}, fmt.Sprintf("%d / %d", idx, total))
-		// Progress bar
-		barOuter := image.Rect(80, 870, 1320, 920)
-		ink.DrawRect(barOuter, ink.Black)
-		if total > 0 {
-			fillW := (barOuter.Dx() - 6) * idx / total
-			ink.FillArea(image.Rect(barOuter.Min.X+3, barOuter.Min.Y+3, barOuter.Min.X+3+fillW, barOuter.Max.Y-3), ink.DarkGray)
+		counter := fmt.Sprintf("%d / %d", idx, total)
+		if !bookStart.IsZero() {
+			counter += "  (" + formatElapsed(time.Since(bookStart)) + ")"
 		}
-		ink.DrawString(image.Point{X: 80, Y: 970}, truncate(curAuthor+": "+curTitle, 60))
+		ink.DrawString(image.Point{X: 80, Y: a.layout.progressArea.Min.Y + 30}, counter)
+		ink.DrawRect(a.layout.progressBar, ink.Black)
+		if total > 0 {
+			fillW := (a.layout.progressBar.Dx() - 6) * idx / total
+			ink.FillArea(image.Rect(
+				a.layout.progressBar.Min.X+3,
+				a.layout.progressBar.Min.Y+3,
+				a.layout.progressBar.Min.X+3+fillW,
+				a.layout.progressBar.Max.Y-3,
+			), ink.DarkGray)
+		}
+		ink.DrawString(image.Point{X: 80, Y: a.layout.progressArea.Min.Y + 180}, truncate(curAuthor+": "+curTitle, 60))
 	} else if syncErr != nil {
 		body.SetActive(ink.Black)
-		ink.DrawString(image.Point{X: 80, Y: 820}, "Last error:")
-		ink.DrawString(image.Point{X: 80, Y: 870}, truncate(syncErr.Error(), 60))
+		ink.DrawString(image.Point{X: 80, Y: a.layout.progressArea.Min.Y + 30}, "Last error:")
+		ink.DrawString(image.Point{X: 80, Y: a.layout.progressArea.Min.Y + 80}, truncate(syncErr.Error(), 60))
 	}
+}
 
-	// Bottom buttons
-	ink.DrawRect(mainSettingsButton, ink.Black)
-	ink.DrawRect(mainQuitButton, ink.Black)
-	btnFont.SetActive(ink.Black)
-	ink.DrawString(image.Point{X: 180, Y: 1785}, "Settings")
-	ink.DrawString(image.Point{X: 1050, Y: 1785}, "Quit")
+// refreshProgress redraws only the progress strip and pushes it with a
+// partial e-ink update, so the rest of the main screen stays stable.
+func (a *app) refreshProgress() {
+	body := ink.OpenFont(ink.DefaultFont, 32, true)
+	defer body.Close()
+	a.drawMainProgressContent(body)
+	ink.PartialUpdate(a.layout.progressArea)
+}
+
+// drawCenteredText writes s centered inside rect using the given font. fontPx
+// is the font's pixel height (used for vertical centering since DrawString
+// interprets Y as the top-left corner).
+func drawCenteredText(f *ink.Font, rect image.Rectangle, s string, fontPx int) {
+	w := ink.StringWidth(s)
+	x := rect.Min.X + (rect.Dx()-w)/2
+	y := rect.Min.Y + (rect.Dy()-fontPx)/2
+	ink.DrawString(image.Point{X: x, Y: y}, s)
 }
 
 func (a *app) mainKey(e ink.KeyEvent) bool {
@@ -436,14 +612,17 @@ func (a *app) mainPointer(e ink.PointerEvent) bool {
 	}
 	p := e.Point
 	switch {
-	case p.In(mainSyncButton):
+	case p.In(a.layout.syncButton):
 		a.startSync()
 		return true
-	case p.In(mainSettingsButton):
+	case p.In(a.layout.networkButton):
+		ink.OpenNetworkInfo()
+		return true
+	case p.In(a.layout.settingsButton):
 		a.screen = screenSettings
 		ink.Repaint()
 		return true
-	case p.In(mainQuitButton):
+	case p.In(a.layout.quitButton):
 		ink.Exit()
 		return true
 	}
@@ -471,14 +650,39 @@ func (a *app) startSync() {
 }
 
 func (a *app) runSync() {
+	// Wake the Wi-Fi before we try anything. ConnectDefault returns an error
+	// only if there is no usable interface or the user declines a picker.
+	if err := ink.ConnectDefault(); err != nil {
+		a.finishSyncWithError(fmt.Errorf("No Wi-Fi connection. Open Network to configure."))
+		a.connState = connOffline
+		ink.Repaint()
+		return
+	}
+
+	// Probe first. ProbeCWA returns user-facing error messages.
+	if err := ProbeCWA(context.Background(), a.cfg.Host, a.cfg.User, a.cfg.Pass); err != nil {
+		a.finishSyncWithError(err)
+		a.connState = connOffline
+		ink.Repaint()
+		return
+	}
+	a.connState = connOnline
+
+	// Tick the progress strip once a second so the elapsed-time counter
+	// advances even while a single (large) book download is streaming.
+	tickerDone := make(chan struct{})
+	go a.progressTicker(tickerDone)
+	defer close(tickerDone)
+
 	progress := func(i, total int, b Book) {
 		a.sync.mu.Lock()
 		a.sync.index = i
 		a.sync.total = total
 		a.sync.title = b.Title
 		a.sync.author = b.Author
+		a.sync.bookStart = time.Now()
 		a.sync.mu.Unlock()
-		ink.Repaint()
+		a.refreshProgress()
 	}
 	dl, skip, fail, firstErr := Sync(a.client, a.store, a.cfg.Library, progress)
 
@@ -496,6 +700,44 @@ func (a *app) runSync() {
 	})
 	a.refreshMainStats()
 	ink.Repaint()
+}
+
+// finishSyncWithError sets the sync state to inactive with the given error.
+// Used when the sync bails before calling Sync() (no network, probe fail).
+func (a *app) finishSyncWithError(err error) {
+	a.sync.mu.Lock()
+	a.sync.active = false
+	a.sync.err = err
+	a.sync.mu.Unlock()
+}
+
+// progressTicker refreshes the progress strip once a second while the sync
+// is active, so the elapsed-time counter visibly advances even when the
+// book counter / progress bar does not (e.g. a single large download).
+func (a *app) progressTicker(done <-chan struct{}) {
+	t := time.NewTicker(time.Second)
+	defer t.Stop()
+	for {
+		select {
+		case <-done:
+			return
+		case <-t.C:
+			if !a.syncActive() {
+				return
+			}
+			a.refreshProgress()
+		}
+	}
+}
+
+// formatElapsed renders a duration as "m:ss" or "h:mm:ss" for display next
+// to the in-progress book counter.
+func formatElapsed(d time.Duration) string {
+	s := int(d.Seconds())
+	if s < 3600 {
+		return fmt.Sprintf("%d:%02d", s/60, s%60)
+	}
+	return fmt.Sprintf("%d:%02d:%02d", s/3600, (s%3600)/60, s%60)
 }
 
 // truncate shortens s to at most n runes, adding "..." if cut.
@@ -542,18 +784,18 @@ func (a *app) drawSettings() {
 	ink.DrawString(image.Point{X: 80, Y: 320}, "User:   "+a.cfg.User)
 
 	// Change-info button
-	ink.DrawRect(settingsChangeButton, ink.Black)
-	ink.DrawRect(settingsChangeButton.Inset(2), ink.Black)
+	ink.DrawRect(a.layout.changeButton, ink.Black)
+	ink.DrawRect(a.layout.changeButton.Inset(2), ink.Black)
 	btnFont.SetActive(ink.Black)
-	ink.DrawString(image.Point{X: 450, Y: 580}, "Change server info")
+	drawCenteredText(btnFont, a.layout.changeButton, "Change server info", 44)
 
 	// Footer: version + Back
 	small.SetActive(ink.Black)
 	ink.DrawString(image.Point{X: 80, Y: 1700}, "bookbeam "+version)
 
-	ink.DrawRect(settingsBackButton, ink.Black)
+	ink.DrawRect(a.layout.backButton, ink.Black)
 	btnFont.SetActive(ink.Black)
-	ink.DrawString(image.Point{X: 230, Y: 1785}, "Back")
+	drawCenteredText(btnFont, a.layout.backButton, "Back", 44)
 }
 
 func (a *app) settingsKey(e ink.KeyEvent) bool {
@@ -575,10 +817,10 @@ func (a *app) settingsPointer(e ink.PointerEvent) bool {
 	}
 	p := e.Point
 	switch {
-	case p.In(settingsChangeButton):
+	case p.In(a.layout.changeButton):
 		a.startChangeInfo()
 		return true
-	case p.In(settingsBackButton):
+	case p.In(a.layout.backButton):
 		a.screen = screenMain
 		ink.Repaint()
 		return true
