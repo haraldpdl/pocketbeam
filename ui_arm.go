@@ -6,6 +6,7 @@ import (
 	"image"
 	"log"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sync"
 	"time"
@@ -742,6 +743,38 @@ func (a *app) runSync() {
 	})
 	a.refreshMainStats()
 	ink.Repaint()
+
+	// If any book changed on disk, kick the PocketBook library scanner so
+	// titles, authors, and thumbnails refresh without the user having to
+	// poke the Library app manually.
+	if dl > 0 {
+		triggerLibraryScan()
+	}
+}
+
+// triggerLibraryScan launches the PocketBook scanner binary which walks
+// /mnt/ext1/Books and updates the device's library database. Tries the user
+// binary first, falls back to the system one. Fire-and-forget: errors are
+// logged and swallowed because a failed scan is a degraded UX, not a fatal.
+func triggerLibraryScan() {
+	candidates := []string{
+		"/mnt/ext1/system/bin/scanner.app",
+		"/ebrmain/bin/scanner.app",
+	}
+	for _, p := range candidates {
+		if _, err := os.Stat(p); err != nil {
+			continue
+		}
+		cmd := exec.Command(p)
+		if err := cmd.Start(); err != nil {
+			log.Printf("library scan (%s): %v", p, err)
+			return
+		}
+		// Reap the child asynchronously so it doesn't zombie on the app exit.
+		go func() { _ = cmd.Wait() }()
+		return
+	}
+	log.Printf("library scan: no scanner binary found")
 }
 
 // finishSyncWithError sets the sync state to inactive with the given error.
