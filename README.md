@@ -46,9 +46,9 @@ On success, the main sync screen appears. On failure, the wizard shows a specifi
 
 The main screen has four actions:
 
-- **Sync Now** — connects the Wi-Fi (wakes the radio if asleep), probes the server, then pulls the full OPDS catalog and downloads everything that is new or updated since the last sync. Progress shows the current book counter, a live elapsed-time indicator, and the book title being downloaded. Already-synced books skip instantly.
+- **Sync Now** — connects the Wi-Fi (wakes the radio if asleep), probes the server, then pulls the configured catalog (all books by default, or a single shelf if you set one) and downloads everything that is new or updated since the last sync. Progress shows the current book counter, a live elapsed-time indicator, and the book title being downloaded. Already-synced books skip instantly.
 - **Network** — opens the PocketBook system network dialog so you can switch Wi-Fi networks or re-enable Wi-Fi if you had it off.
-- **Settings** — lets you change the server URL, username, or password (re-runs the first-run wizard).
+- **Settings** — change the server URL, username, or password, or pick a **sync filter** (All books, or any shelf you have configured in CWA's web UI). A typical workflow is to create a `to-pocketbook` shelf in CWA and add the books you want on the device, then select that shelf as the filter.
 - **Quit** — back to the Applications menu.
 
 Books land under `/mnt/ext1/Books/CWA/<Author>/<Title>.<ext>` and show up in the device's library after the next library refresh.
@@ -96,7 +96,7 @@ go test -tags=live -run TestLive
 - **App name shows as `@bookbeam`** in the PocketBook launcher with a generic icon. This is the PocketBook firmware's default presentation for any sideloaded app and matches KOReader's `@koreader` presentation. Customising it requires editing `/mnt/ext1/system/config/desktop/view.json` and placing BMP icons under `/mnt/ext1/applications/icons/`; that is a per-user polish step, not part of the default install.
 - **Password entry is visible** on the on-screen keyboard. The PocketBook InkView keyboard has no masked-input mode exposed through the SDK. Use a stance that blocks onlookers or set a throwaway password in CWA for device use.
 - **Single source only.** bookbeam syncs one CWA server at a time. Multiple-library support is a v2 item.
-- **Full catalog pull, no filter.** Every book CWA exposes is pulled; no shelf, tag, or search-term filter yet.
+- **Filter is shelf-only.** bookbeam can filter by a single CWA shelf; other filter types (tag, series, author, smart shelves) are a v2 item.
 - **No delete on remote-removal.** Books deleted from CWA are not removed from the device.
 - **Sync cannot be cancelled mid-run.** Interrupting (Back key or force-quit) is safe but leaves a partial download as a `.part` file that the next sync retries cleanly.
 
