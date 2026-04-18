@@ -52,3 +52,37 @@ func TestLiveProbe_ConnectionRefused(t *testing.T) {
 		t.Errorf("got %v, want 'refused' or 'reach'", err)
 	}
 }
+
+func TestLiveListShelves(t *testing.T) {
+	c, err := NewClient(liveHost, liveUser, livePass)
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	shelves, err := c.ListShelves()
+	if err != nil {
+		t.Fatalf("ListShelves: %v", err)
+	}
+	if len(shelves) == 0 {
+		t.Log("no shelves on the test CWA; create one via the web UI or DB insert to exercise")
+	}
+	for _, s := range shelves {
+		t.Logf("shelf %d: %q", s.ID, s.Name)
+	}
+}
+
+func TestLiveWalkShelf(t *testing.T) {
+	c, err := NewClient(liveHost, liveUser, livePass)
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	shelves, err := c.ListShelves()
+	if err != nil || len(shelves) == 0 {
+		t.Skip("no shelves on test CWA, skipping")
+	}
+	id := shelves[0].ID
+	books, err := c.WalkShelf(id)
+	if err != nil {
+		t.Fatalf("WalkShelf(%d): %v", id, err)
+	}
+	t.Logf("shelf %d has %d books", id, len(books))
+}

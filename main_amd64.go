@@ -34,7 +34,7 @@ func main() {
 		}
 	}
 
-	dl, skip, fail, firstErr := Sync(client, store, cfg.Library, progress)
+	dl, skip, fail, firstErr := Sync(client, store, cfg.Library, cfg.ShelfID, progress)
 	fmt.Printf("done: %d downloaded, %d skipped, %d failed\n", dl, skip, fail)
 	if firstErr != nil {
 		fmt.Fprintf(os.Stderr, "first error: %v\n", firstErr)

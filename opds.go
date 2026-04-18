@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -146,11 +147,55 @@ func (c *Client) Fetch(rawurl string) (io.ReadCloser, error) {
 	return resp.Body, nil
 }
 
+// Shelf is a user-curated collection of books in CWA.
+type Shelf struct {
+	ID   int
+	Name string
+}
+
 // WalkAll fetches the alphabetical "All books" catalog and returns every
 // acquirable book as a flat slice. CWA exposes /opds/books/letter/00 as the
 // full list; pagination is followed via rel="next" links.
 func (c *Client) WalkAll() ([]Book, error) {
 	return c.walk("/opds/books/letter/00")
+}
+
+// WalkShelf returns every acquirable book in the given CWA shelf.
+func (c *Client) WalkShelf(id int) ([]Book, error) {
+	return c.walk(fmt.Sprintf("/opds/shelf/%d", id))
+}
+
+// ListShelves returns the user's shelves as they appear in CWA's shelfindex
+// OPDS feed. Sorted by the feed's natural order (typically recency).
+func (c *Client) ListShelves() ([]Shelf, error) {
+	body, err := c.get("/opds/shelfindex")
+	if err != nil {
+		return nil, err
+	}
+	var f feed
+	if err := xml.Unmarshal(body, &f); err != nil {
+		return nil, fmt.Errorf("parse shelfindex: %w", err)
+	}
+	out := make([]Shelf, 0, len(f.Entries))
+	for _, e := range f.Entries {
+		if id, ok := shelfIDFromEntry(e); ok {
+			out = append(out, Shelf{ID: id, Name: strings.TrimSpace(e.Title)})
+		}
+	}
+	return out, nil
+}
+
+// shelfIDFromEntry parses "/opds/shelf/<N>" from a shelfindex entry's <id>.
+func shelfIDFromEntry(e entry) (int, bool) {
+	const prefix = "/opds/shelf/"
+	if !strings.HasPrefix(e.ID, prefix) {
+		return 0, false
+	}
+	id, err := strconv.Atoi(strings.TrimPrefix(e.ID, prefix))
+	if err != nil {
+		return 0, false
+	}
+	return id, true
 }
 
 func (c *Client) walk(start string) ([]Book, error) {

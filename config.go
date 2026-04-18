@@ -5,15 +5,18 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 )
 
 type Config struct {
-	Host    string // base URL, e.g. http://cwa.example.internal:8083
-	User    string // CWA user
-	Pass    string // CWA password
-	Library string // local target dir, e.g. /mnt/ext1/Books/CWA
-	StateDB string // sqlite path, e.g. /mnt/ext1/system/config/bookbeam.db
+	Host      string // base URL, e.g. http://cwa.example.internal:8083
+	User      string // CWA user
+	Pass      string // CWA password
+	Library   string // local target dir, e.g. /mnt/ext1/Books/CWA
+	StateDB   string // sqlite path, e.g. /mnt/ext1/system/config/bookbeam.db
+	ShelfID   int    // 0 = sync all books; otherwise sync only this shelf
+	ShelfName string // last-known shelf name (display cache; refreshed on settings open)
 }
 
 // LoadConfig reads a flat key=value file. Comments begin with #. Whitespace
@@ -48,6 +51,14 @@ func LoadConfig(path string) (*Config, error) {
 			c.Library = strings.TrimSpace(v)
 		case "state_db":
 			c.StateDB = strings.TrimSpace(v)
+		case "shelf_id":
+			id, err := strconv.Atoi(strings.TrimSpace(v))
+			if err != nil {
+				return nil, fmt.Errorf("%s:%d: bad shelf_id %q: %w", path, n, v, err)
+			}
+			c.ShelfID = id
+		case "shelf_name":
+			c.ShelfName = strings.TrimSpace(v)
 		default:
 			return nil, fmt.Errorf("%s:%d: unknown key %q", path, n, k)
 		}
@@ -70,12 +81,20 @@ func SaveConfig(path string, c *Config) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
-	body := fmt.Sprintf(
-		"host = %s\nuser = %s\npassword = %s\nlibrary = %s\nstate_db = %s\n",
-		c.Host, c.User, c.Pass, c.Library, c.StateDB,
-	)
+	var b strings.Builder
+	fmt.Fprintf(&b, "host = %s\n", c.Host)
+	fmt.Fprintf(&b, "user = %s\n", c.User)
+	fmt.Fprintf(&b, "password = %s\n", c.Pass)
+	fmt.Fprintf(&b, "library = %s\n", c.Library)
+	fmt.Fprintf(&b, "state_db = %s\n", c.StateDB)
+	if c.ShelfID > 0 {
+		fmt.Fprintf(&b, "shelf_id = %d\n", c.ShelfID)
+		if c.ShelfName != "" {
+			fmt.Fprintf(&b, "shelf_name = %s\n", c.ShelfName)
+		}
+	}
 	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, []byte(body), 0o600); err != nil {
+	if err := os.WriteFile(tmp, []byte(b.String()), 0o600); err != nil {
 		return err
 	}
 	return os.Rename(tmp, path)

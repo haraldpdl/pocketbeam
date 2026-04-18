@@ -24,8 +24,16 @@ type Progress func(index, total int, b Book)
 // returns counts of (downloaded, skipped, failed) and the first error
 // encountered (subsequent errors are still attempted but only the first is
 // returned, so a single bad entry doesn't abort the whole sync).
-func Sync(client *Client, store *Store, library string, progress Progress) (downloaded, skipped, failed int, firstErr error) {
-	books, err := client.WalkAll()
+//
+// If shelfID > 0, only that shelf is synced; otherwise the full catalog.
+func Sync(client *Client, store *Store, library string, shelfID int, progress Progress) (downloaded, skipped, failed int, firstErr error) {
+	var books []Book
+	var err error
+	if shelfID > 0 {
+		books, err = client.WalkShelf(shelfID)
+	} else {
+		books, err = client.WalkAll()
+	}
 	if err != nil {
 		return 0, 0, 0, fmt.Errorf("walk catalog: %w", err)
 	}
