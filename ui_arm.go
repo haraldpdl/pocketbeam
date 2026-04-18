@@ -702,23 +702,11 @@ func (a *app) startSync() {
 }
 
 func (a *app) runSync() {
-	// Wake the Wi-Fi before we try anything. ConnectDefault returns an error
-	// only if there is no usable interface or the user declines a picker.
-	if err := ink.ConnectDefault(); err != nil {
-		a.finishSyncWithError(fmt.Errorf("No Wi-Fi connection. Open Network to configure."))
-		a.connState = connOffline
-		ink.Repaint()
-		return
-	}
-
-	// Probe first. ProbeCWA returns user-facing error messages.
-	if err := ProbeCWA(context.Background(), a.cfg.Host, a.cfg.User, a.cfg.Pass); err != nil {
+	if err := a.ensureConnected(); err != nil {
 		a.finishSyncWithError(err)
-		a.connState = connOffline
 		ink.Repaint()
 		return
 	}
-	a.connState = connOnline
 
 	// Tick the progress strip once a second so the elapsed-time counter
 	// advances even while a single (large) book download is streaming.
@@ -761,6 +749,24 @@ func (a *app) finishSyncWithError(err error) {
 	a.sync.active = false
 	a.sync.err = err
 	a.sync.mu.Unlock()
+}
+
+// ensureConnected wakes the Wi-Fi and verifies the CWA server is reachable
+// with the configured credentials. Updates a.connState based on the outcome.
+// Returns a user-facing error on failure; nil on success. All UI actions
+// that issue HTTP requests to CWA should call this first so the user gets
+// a consistent, readable error instead of a raw Go transport dump.
+func (a *app) ensureConnected() error {
+	if err := ink.ConnectDefault(); err != nil {
+		a.connState = connOffline
+		return fmt.Errorf("No Wi-Fi connection. Open Network to configure.")
+	}
+	if err := ProbeCWA(context.Background(), a.cfg.Host, a.cfg.User, a.cfg.Pass); err != nil {
+		a.connState = connOffline
+		return err
+	}
+	a.connState = connOnline
+	return nil
 }
 
 // progressTicker refreshes the progress strip once a second while the sync
@@ -925,6 +931,14 @@ func (a *app) openShelfPicker() {
 }
 
 func (a *app) fetchShelves() {
+	if err := a.ensureConnected(); err != nil {
+		a.picker.mu.Lock()
+		a.picker.loading = false
+		a.picker.err = err
+		a.picker.mu.Unlock()
+		ink.Repaint()
+		return
+	}
 	shelves, err := a.client.ListShelves()
 	a.picker.mu.Lock()
 	a.picker.loading = false
