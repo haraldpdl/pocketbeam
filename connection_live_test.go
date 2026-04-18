@@ -75,6 +75,9 @@ func TestLiveWalkShelf(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewClient: %v", err)
 	}
+	if err := c.DetectType(); err != nil {
+		t.Fatalf("DetectType: %v", err)
+	}
 	shelves, err := c.ListShelves()
 	if err != nil || len(shelves) == 0 {
 		t.Skip("no shelves on test CWA, skipping")
@@ -85,4 +88,36 @@ func TestLiveWalkShelf(t *testing.T) {
 		t.Fatalf("WalkShelf(%d): %v", id, err)
 	}
 	t.Logf("shelf %d has %d books", id, len(books))
+}
+
+func TestLiveDetectType(t *testing.T) {
+	c, err := NewClient(liveHost, liveUser, livePass)
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	if err := c.DetectType(); err != nil {
+		t.Fatalf("DetectType: %v", err)
+	}
+	if !c.IsCWA {
+		t.Errorf("DetectType returned IsCWA=false against a real CWA; root feed inspection should have caught it")
+	}
+}
+
+func TestLiveWalkGeneric(t *testing.T) {
+	// Force the generic recursive walker against our CWA to verify it
+	// also returns books (comparable count to the fast path). This is the
+	// code path used against non-CWA OPDS servers.
+	c, err := NewClient(liveHost, liveUser, livePass)
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	// IsCWA deliberately left false so WalkAll falls through to walkGeneric
+	books, err := c.WalkAll()
+	if err != nil {
+		t.Fatalf("WalkAll (generic): %v", err)
+	}
+	if len(books) == 0 {
+		t.Errorf("generic walker returned 0 books; CWA exposes plenty")
+	}
+	t.Logf("generic walker found %d books", len(books))
 }

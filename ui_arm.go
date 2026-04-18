@@ -332,9 +332,9 @@ func (a *app) drawWizard() {
 		title.SetActive(ink.Black)
 		ink.DrawString(image.Point{X: 80, Y: 200}, "bookbeam")
 		body.SetActive(ink.Black)
-		ink.DrawString(image.Point{X: 80, Y: 280}, "Wireless sync for your Calibre-Web library.")
+		ink.DrawString(image.Point{X: 80, Y: 280}, "Wireless sync from an OPDS server.")
 		ink.DrawString(image.Point{X: 80, Y: 360}, "You will be asked for:")
-		ink.DrawString(image.Point{X: 120, Y: 420}, "- Your server URL")
+		ink.DrawString(image.Point{X: 120, Y: 420}, "- Your OPDS server URL")
 		ink.DrawString(image.Point{X: 120, Y: 470}, "- Username")
 		ink.DrawString(image.Point{X: 120, Y: 520}, "- Password")
 		ink.DrawString(image.Point{X: 80, Y: 620}, "Press OK or tap the screen to begin.")
@@ -421,7 +421,7 @@ func (a *app) wizardPointer(e ink.PointerEvent) bool {
 func (a *app) reopenKeyboardForStep() {
 	switch a.wizard.step {
 	case stepURL:
-		ink.OpenKeyboard("https://cwa.example.com:8083", 512)
+		ink.OpenKeyboard("https://library.example.com:8083", 512)
 	case stepUser:
 		ink.OpenKeyboard("Username", 128)
 	case stepPass:
@@ -432,7 +432,7 @@ func (a *app) reopenKeyboardForStep() {
 func (a *app) startURLEntry() {
 	a.wizard.step = stepURL
 	a.wizard.err = nil
-	ink.OpenKeyboard("https://cwa.example.com:8083", 512)
+	ink.OpenKeyboard("https://library.example.com:8083", 512)
 }
 
 // onKeyboardInput routes based on current wizard step.
@@ -751,11 +751,13 @@ func (a *app) finishSyncWithError(err error) {
 	a.sync.mu.Unlock()
 }
 
-// ensureConnected wakes the Wi-Fi and verifies the CWA server is reachable
-// with the configured credentials. Updates a.connState based on the outcome.
-// Returns a user-facing error on failure; nil on success. All UI actions
-// that issue HTTP requests to CWA should call this first so the user gets
-// a consistent, readable error instead of a raw Go transport dump.
+// ensureConnected wakes the Wi-Fi and verifies the server is reachable with
+// the configured credentials. Updates a.connState based on the outcome and
+// refreshes the client's server-type detection so the next WalkAll picks the
+// right path (CWA fast path vs generic recursive walk). Returns a user-facing
+// error on failure; nil on success. All UI actions that issue HTTP requests
+// to the server should call this first so the user gets a consistent,
+// readable error instead of a raw Go transport dump.
 func (a *app) ensureConnected() error {
 	if err := ink.ConnectDefault(); err != nil {
 		a.connState = connOffline
@@ -765,6 +767,7 @@ func (a *app) ensureConnected() error {
 		a.connState = connOffline
 		return err
 	}
+	_ = a.client.DetectType() // non-fatal: falls back to generic walk
 	a.connState = connOnline
 	return nil
 }
@@ -911,7 +914,7 @@ func (a *app) startChangeInfo() {
 	a.wizard.user = ""
 	a.wizard.pass = ""
 	a.screen = screenFirstRun
-	ink.OpenKeyboard("https://cwa.example.com:8083", 512)
+	ink.OpenKeyboard("https://library.example.com:8083", 512)
 }
 
 // ---------- Shelf picker ----------
@@ -976,6 +979,19 @@ func (a *app) drawShelfPicker() {
 		body.SetActive(ink.Black)
 		ink.DrawString(image.Point{X: a.layout.margin, Y: 260}, "Could not load shelves:")
 		ink.DrawString(image.Point{X: a.layout.margin, Y: 310}, truncate(pickerErr.Error(), 60))
+	} else if len(shelves) == 0 {
+		body.SetActive(ink.Black)
+		ink.DrawString(image.Point{X: a.layout.margin, Y: 260}, "This server does not expose shelves.")
+		ink.DrawString(image.Point{X: a.layout.margin, Y: 310}, "Select All books to continue.")
+		// Still render the All books row so the user can confirm.
+		rowH := 90
+		rect := image.Rect(a.layout.margin, a.layout.pickerAreaTop+60, a.layout.screen.X-a.layout.margin, a.layout.pickerAreaTop+60+rowH-20)
+		ink.DrawRect(rect, ink.Black)
+		btnFont.SetActive(ink.Black)
+		drawCenteredText(btnFont, rect, "All books", 44)
+		a.picker.mu.Lock()
+		a.picker.rowRects = []image.Rectangle{rect}
+		a.picker.mu.Unlock()
 	} else {
 		// Render rows: "All books" first, then each shelf, each in a bordered
 		// box the user can tap. Compute row rects and stash them on the state

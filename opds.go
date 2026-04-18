@@ -26,6 +26,7 @@ var preferredFormats = []string{
 
 type feed struct {
 	XMLName xml.Name `xml:"feed"`
+	Title   string   `xml:"title"`
 	Entries []entry  `xml:"entry"`
 	Links   []link   `xml:"link"`
 }
@@ -62,6 +63,11 @@ type Client struct {
 	User string
 	Pass string
 	HTTP *http.Client
+
+	// IsCWA is true when the server exposes Calibre-Web / Calibre-Web
+	// Automated-specific navigation (shelfindex, alphabetical letter list).
+	// Set by DetectType. When false the generic recursive walker is used.
+	IsCWA bool
 }
 
 func NewClient(base, user, pass string) (*Client, error) {
@@ -147,27 +153,70 @@ func (c *Client) Fetch(rawurl string) (io.ReadCloser, error) {
 	return resp.Body, nil
 }
 
-// Shelf is a user-curated collection of books in CWA.
+// Shelf is a user-curated collection of books, exposed by CWA under
+// /opds/shelfindex. Generic OPDS servers do not share this concept.
 type Shelf struct {
 	ID   int
 	Name string
 }
 
-// WalkAll fetches the alphabetical "All books" catalog and returns every
-// acquirable book as a flat slice. CWA exposes /opds/books/letter/00 as the
-// full list; pagination is followed via rel="next" links.
-func (c *Client) WalkAll() ([]Book, error) {
-	return c.walk("/opds/books/letter/00")
+// DetectType fetches the root /opds feed once and sets c.IsCWA based on
+// subsections it finds. CWA-signatures we accept: a subsection link pointing
+// at /opds/books/letter/ or /opds/shelfindex, or a title containing
+// Calibre-Web. Generic OPDS servers pass through with IsCWA=false and the
+// recursive walker takes over.
+func (c *Client) DetectType() error {
+	body, err := c.get("/opds")
+	if err != nil {
+		return err
+	}
+	var f feed
+	if err := xml.Unmarshal(body, &f); err != nil {
+		return fmt.Errorf("parse opds root: %w", err)
+	}
+	if strings.Contains(strings.ToLower(f.Title), "calibre-web") {
+		c.IsCWA = true
+		return nil
+	}
+	for _, e := range f.Entries {
+		for _, l := range e.Links {
+			if l.Rel == "subsection" &&
+				(strings.Contains(l.Href, "/opds/books/letter/") ||
+					strings.Contains(l.Href, "/opds/shelfindex")) {
+				c.IsCWA = true
+				return nil
+			}
+		}
+	}
+	return nil
 }
 
-// WalkShelf returns every acquirable book in the given CWA shelf.
+// WalkAll returns every acquirable book exposed by the server. On CWA it
+// takes the fast path (/opds/books/letter/00 is a single paginated feed).
+// On any other OPDS server it falls through to a recursive walker that
+// follows subsection links from the root.
+func (c *Client) WalkAll() ([]Book, error) {
+	if c.IsCWA {
+		return c.walk("/opds/books/letter/00")
+	}
+	return c.walkGeneric("/opds")
+}
+
+// WalkShelf returns every acquirable book in the given CWA shelf. Only
+// meaningful on CWA; an error is returned if the client is not in CWA mode.
 func (c *Client) WalkShelf(id int) ([]Book, error) {
+	if !c.IsCWA {
+		return nil, fmt.Errorf("shelves are a Calibre-Web feature; server did not advertise them")
+	}
 	return c.walk(fmt.Sprintf("/opds/shelf/%d", id))
 }
 
 // ListShelves returns the user's shelves as they appear in CWA's shelfindex
-// OPDS feed. Sorted by the feed's natural order (typically recency).
+// OPDS feed. Returns nil on non-CWA servers (not an error; just no shelves).
 func (c *Client) ListShelves() ([]Shelf, error) {
+	if !c.IsCWA {
+		return nil, nil
+	}
 	body, err := c.get("/opds/shelfindex")
 	if err != nil {
 		return nil, err
@@ -185,6 +234,77 @@ func (c *Client) ListShelves() ([]Shelf, error) {
 	return out, nil
 }
 
+// walkGeneric recursively walks an OPDS catalog from start, following
+// navigation links and collecting every acquisition entry as a Book.
+// Visited URLs are deduplicated to prevent loops; walking is capped at
+// maxWalkDepth levels deep to bound work on pathological catalogs. Books
+// are deduplicated by UUID at the end since generic catalogs often expose
+// the same book under multiple navigation sections (e.g. by-author and
+// by-series).
+const maxWalkDepth = 5
+
+func (c *Client) walkGeneric(start string) ([]Book, error) {
+	visited := make(map[string]bool)
+	books, err := c.walkGenericRec(start, visited, 0)
+	if err != nil {
+		return nil, err
+	}
+	seen := make(map[string]bool, len(books))
+	unique := books[:0]
+	for _, b := range books {
+		if b.UUID != "" && seen[b.UUID] {
+			continue
+		}
+		if b.UUID != "" {
+			seen[b.UUID] = true
+		}
+		unique = append(unique, b)
+	}
+	return unique, nil
+}
+
+func (c *Client) walkGenericRec(path string, visited map[string]bool, depth int) ([]Book, error) {
+	if depth > maxWalkDepth {
+		return nil, nil
+	}
+	abs, err := c.Base.Parse(path)
+	if err != nil {
+		return nil, err
+	}
+	key := abs.String()
+	if visited[key] {
+		return nil, nil
+	}
+	visited[key] = true
+
+	var out []Book
+	href := path
+	for href != "" {
+		body, err := c.get(href)
+		if err != nil {
+			return nil, err
+		}
+		var f feed
+		if err := xml.Unmarshal(body, &f); err != nil {
+			return nil, fmt.Errorf("parse %s: %w", href, err)
+		}
+		for _, e := range f.Entries {
+			if b, ok := bookFromEntry(c.Base, e); ok {
+				out = append(out, b)
+				continue
+			}
+			if sub := navigationHref(e.Links); sub != "" {
+				child, err := c.walkGenericRec(sub, visited, depth+1)
+				if err == nil {
+					out = append(out, child...)
+				}
+			}
+		}
+		href = nextLink(f.Links)
+	}
+	return out, nil
+}
+
 // shelfIDFromEntry parses "/opds/shelf/<N>" from a shelfindex entry's <id>.
 func shelfIDFromEntry(e entry) (int, bool) {
 	const prefix = "/opds/shelf/"
@@ -196,6 +316,24 @@ func shelfIDFromEntry(e entry) (int, bool) {
 		return 0, false
 	}
 	return id, true
+}
+
+// navigationHref returns the first link that points at another OPDS feed,
+// treating it as a navigation child to recurse into. Prefers explicit
+// rel="subsection"; falls back to any atom+xml link since not all OPDS
+// servers set rel on navigation entries (CWA's root feed is an example).
+func navigationHref(links []link) string {
+	for _, l := range links {
+		if l.Rel == "subsection" {
+			return l.Href
+		}
+	}
+	for _, l := range links {
+		if strings.Contains(l.Type, "atom+xml") {
+			return l.Href
+		}
+	}
+	return ""
 }
 
 func (c *Client) walk(start string) ([]Book, error) {
