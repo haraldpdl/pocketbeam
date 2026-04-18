@@ -58,4 +58,4 @@ Copy `bookbeam.app` to `/mnt/ext1/applications/` on the PocketBook over USB, the
 
 ## License
 
-TBD.
+MIT. See [LICENSE](LICENSE).
