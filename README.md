@@ -12,15 +12,45 @@ Scaffolding — no working sync yet.
 
 The stock OPDS catalog browser is regionally gated and not present in the UI on German-market PocketBook firmware. The regional lock disables only the stock UI, not the network stack, so a custom app can talk to OPDS endpoints directly. Even where stock OPDS is available, it's manual pull-on-demand; bookbeam is built around scheduled / one-tap sync.
 
-## Build
+## Configuration
 
-The repository expects to be built inside a container running [`sunsung/pocketbook-go-sdk`](https://hub.docker.com/r/sunsung/pocketbook-go-sdk) (Go 1.24 + ARMv7 cross-compile toolchain pre-configured).
+A flat `key = value` file. Default path on the device: `/mnt/ext1/system/config/bookbeam.cfg`.
 
-```sh
-go build -o bookbeam.app .
+```ini
+host     = http://cwa.lan:8083
+user     = your-cwa-username
+password = your-cwa-password
+library  = /mnt/ext1/Books/CWA
+state_db = /mnt/ext1/system/config/bookbeam.db
 ```
 
-The toolchain env is preset: `GOOS=linux GOARCH=arm GOARM=7 CGO_ENABLED=1`.
+## Build
+
+The repository expects to be built inside the [`sunsung/pocketbook-go-sdk`](https://hub.docker.com/r/sunsung/pocketbook-go-sdk) image (Go 1.24 + ARMv7 cross-compile toolchain).
+
+```sh
+# device build (env preset by the image)
+go build -o bookbeam.app .
+
+# dev build for testing on the build host
+GOOS=linux GOARCH=amd64 GOARM= CC= go build -o bookbeam-amd64 .
+```
+
+CGO is enabled in both cases (SQLite via `mattn/go-sqlite3`).
+
+## Run
+
+```sh
+bookbeam                                  # uses default config path
+bookbeam -config /path/to/bookbeam.cfg    # explicit config
+bookbeam -v                               # log every book processed
+```
+
+## Test
+
+```sh
+go test ./...
+```
 
 ## Install on device
 

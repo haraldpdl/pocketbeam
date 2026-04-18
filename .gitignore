@@ -1,6 +1,8 @@
 bookbeam
 bookbeam.app
+bookbeam-amd64
 *.test
 *.out
 .idea/
 .vscode/
+.test/
