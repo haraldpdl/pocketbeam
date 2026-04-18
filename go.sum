@@ -1,2 +1,4 @@
+github.com/dennwc/inkview v0.3.14 h1:fNqg9xKOU/hVc74pkytIdP0rw9DfAC3rpYXHtZqnXAc=
+github.com/dennwc/inkview v0.3.14/go.mod h1:fTNHfljD86KbVfl0MMZIPjfAE1/AtoLxYJiGBKwypSM=
 github.com/mattn/go-sqlite3 v1.14.42 h1:MigqEP4ZmHw3aIdIT7T+9TLa90Z6smwcthx+Azv4Cgo=
 github.com/mattn/go-sqlite3 v1.14.42/go.mod h1:pjEuOr8IwzLJP2MfGeTb0A35jauH+C2kbHKBr7yXKVQ=

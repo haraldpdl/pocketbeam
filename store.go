@@ -2,10 +2,20 @@ package main
 
 import (
 	"database/sql"
+	"encoding/json"
 	"time"
 
 	_ "github.com/mattn/go-sqlite3"
 )
+
+// SyncSummary captures the outcome of a sync run, used to show the main screen
+// the last-sync info after an app restart.
+type SyncSummary struct {
+	At         time.Time `json:"at"`
+	Downloaded int       `json:"downloaded"`
+	Skipped    int       `json:"skipped"`
+	Failed     int       `json:"failed"`
+}
 
 // Store tracks which books we've already downloaded, keyed on the OPDS UUID.
 // The `updated` column lets us detect when a remote book has been re-imported
@@ -29,7 +39,50 @@ func OpenStore(path string) (*Store, error) {
 		db.Close()
 		return nil, err
 	}
+	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS meta (
+		key   TEXT PRIMARY KEY,
+		value TEXT NOT NULL
+	)`); err != nil {
+		db.Close()
+		return nil, err
+	}
 	return &Store{db: db}, nil
+}
+
+// BookCount returns the number of books tracked locally.
+func (s *Store) BookCount() (int, error) {
+	var n int
+	err := s.db.QueryRow(`SELECT COUNT(*) FROM books`).Scan(&n)
+	return n, err
+}
+
+// SetLastSync persists the outcome of the most recent sync run.
+func (s *Store) SetLastSync(sum SyncSummary) error {
+	b, err := json.Marshal(sum)
+	if err != nil {
+		return err
+	}
+	_, err = s.db.Exec(`INSERT INTO meta (key, value) VALUES ('last_sync', ?)
+		ON CONFLICT(key) DO UPDATE SET value = excluded.value`, string(b))
+	return err
+}
+
+// LastSync returns the last-sync summary. The bool is false if no sync has
+// run yet.
+func (s *Store) LastSync() (SyncSummary, bool, error) {
+	var raw string
+	err := s.db.QueryRow(`SELECT value FROM meta WHERE key = 'last_sync'`).Scan(&raw)
+	if err == sql.ErrNoRows {
+		return SyncSummary{}, false, nil
+	}
+	if err != nil {
+		return SyncSummary{}, false, err
+	}
+	var sum SyncSummary
+	if err := json.Unmarshal([]byte(raw), &sum); err != nil {
+		return SyncSummary{}, false, err
+	}
+	return sum, true, nil
 }
 
 func (s *Store) Close() error { return s.db.Close() }

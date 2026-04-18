@@ -6,8 +6,6 @@ import (
 	"os"
 )
 
-const version = "0.0.1-dev"
-
 func main() {
 	cfgPath := flag.String("config", "/mnt/ext1/system/config/bookbeam.cfg", "path to config file")
 	verbose := flag.Bool("v", false, "verbose: log every book considered")
@@ -27,12 +25,12 @@ func main() {
 	}
 	defer store.Close()
 
-	fmt.Printf("bookbeam %s — syncing %s → %s\n", version, cfg.Host, cfg.Library)
+	fmt.Printf("bookbeam %s: syncing %s to %s\n", version, cfg.Host, cfg.Library)
 
 	var progress Progress
 	if *verbose {
 		progress = func(i, total int, b Book) {
-			fmt.Printf("[%d/%d] %s — %s\n", i, total, b.Author, b.Title)
+			fmt.Printf("[%d/%d] %s: %s\n", i, total, b.Author, b.Title)
 		}
 	}
 
@@ -42,9 +40,4 @@ func main() {
 		fmt.Fprintf(os.Stderr, "first error: %v\n", firstErr)
 		os.Exit(1)
 	}
-}
-
-func die(format string, args ...any) {
-	fmt.Fprintf(os.Stderr, format+"\n", args...)
-	os.Exit(2)
 }

@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 )
 
@@ -60,4 +61,22 @@ func LoadConfig(path string) (*Config, error) {
 		}
 	}
 	return c, nil
+}
+
+// SaveConfig writes the config atomically to path. Parent directories are
+// created as needed. The file is created with mode 0600 because it contains
+// credentials.
+func SaveConfig(path string, c *Config) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	body := fmt.Sprintf(
+		"host = %s\nuser = %s\npassword = %s\nlibrary = %s\nstate_db = %s\n",
+		c.Host, c.User, c.Pass, c.Library, c.StateDB,
+	)
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, []byte(body), 0o600); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
 }
