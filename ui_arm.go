@@ -1661,24 +1661,12 @@ func (a *app) drawShelfPicker() {
 		// page buttons only when the list overflows a single page.
 		visibleArea := areaBottom - areaTop
 		maxRows := (visibleArea - pageBtnH - 20) / rowH
-		if maxRows < 1 {
-			maxRows = 1
-		}
 		if maxRows >= len(rows) {
 			maxRows = len(rows)
 		}
-		// Clamp offset so a shorter list after drilling / scrolling can't
-		// leave a stale offset pointing past the end.
-		if offset > len(rows)-maxRows {
-			offset = len(rows) - maxRows
-		}
-		if offset < 0 {
-			offset = 0
-		}
-		end := offset + maxRows
-		if end > len(rows) {
-			end = len(rows)
-		}
+		p := paginate(len(rows), maxRows, offset)
+		offset = p.offset
+		end := p.end
 
 		rects := make([]image.Rectangle, 0, end-offset)
 		for i := offset; i < end; i++ {
@@ -1715,6 +1703,11 @@ func (a *app) drawShelfPicker() {
 		}
 
 		a.picker.mu.Lock()
+		// Persist the clamped offset back to state. Without this the
+		// pointer handler reads the stored (possibly-overshot) offset
+		// and indexes past what the user actually sees, which manifests
+		// as taps landing on the wrong row after Next reaches the end.
+		a.picker.offset = offset
 		a.picker.rowRects = rects
 		a.picker.prevPageRect = prevPageRect
 		a.picker.nextPageRect = nextPageRect
@@ -2061,22 +2054,12 @@ func (a *app) drawDirPicker() {
 
 		visibleArea := areaBottom - areaTop
 		maxRows := (visibleArea - pageBtnH - 20) / rowH
-		if maxRows < 1 {
-			maxRows = 1
-		}
 		if maxRows >= len(rows) {
 			maxRows = len(rows)
 		}
-		if offset > len(rows)-maxRows {
-			offset = len(rows) - maxRows
-		}
-		if offset < 0 {
-			offset = 0
-		}
-		end := offset + maxRows
-		if end > len(rows) {
-			end = len(rows)
-		}
+		p := paginate(len(rows), maxRows, offset)
+		offset = p.offset
+		end := p.end
 
 		rects := make([]image.Rectangle, 0, end-offset)
 		for i := offset; i < end; i++ {
@@ -2110,6 +2093,9 @@ func (a *app) drawDirPicker() {
 		}
 
 		a.dirPicker.mu.Lock()
+		// Same clamp-to-state fix as the feed picker: keep the pointer
+		// handler and the rendered rects using the same offset.
+		a.dirPicker.offset = offset
 		a.dirPicker.rowRects = rects
 		a.dirPicker.prevPageRect = prevPageRect
 		a.dirPicker.nextPageRect = nextPageRect
