@@ -92,12 +92,13 @@ func (c *Config) FilterLabel() string {
 // are shared across profiles; each [name] section carries one
 // profile's fields as a flat key=value block.
 type fileDoc struct {
-	active       string
-	stateDB      string
-	checkUpdates bool
-	updateURL    string
-	order        []string            // section names in file order, for stable serialisation
-	sections     map[string][]kvLine // per-section ordered key/value pairs
+	active           string
+	stateDB          string
+	checkUpdates     bool
+	checkUpdatesSeen bool // distinguishes absent-from-file (default true) from explicit "off"
+	updateURL        string
+	order            []string            // section names in file order, for stable serialisation
+	sections         map[string][]kvLine // per-section ordered key/value pairs
 }
 
 // kvLine preserves insertion order when we rewrite a section so the file
@@ -127,10 +128,17 @@ func LoadConfig(path string) (*Config, error) {
 	if !ok {
 		return nil, fmt.Errorf("%s: active profile %q has no section", path, active)
 	}
+	// CheckUpdates defaults to true so existing configs (written before
+	// the key existed, or migrated from the pre-rename bookbeam.cfg)
+	// opt in by default. An explicit `check_updates = off` still wins.
+	checkUpdates := true
+	if doc.checkUpdatesSeen {
+		checkUpdates = doc.checkUpdates
+	}
 	c := &Config{
 		Profile:      active,
 		StateDB:      doc.stateDB,
-		CheckUpdates: doc.checkUpdates,
+		CheckUpdates: checkUpdates,
 		UpdateURL:    doc.updateURL,
 	}
 	if err := applyProfile(c, path, rows); err != nil {
@@ -283,6 +291,7 @@ func parseDoc(path string) (*fileDoc, error) {
 				doc.stateDB = val
 			case "check_updates":
 				doc.checkUpdates = parseBool(val)
+				doc.checkUpdatesSeen = true
 			case "update_url":
 				doc.updateURL = val
 			default:
@@ -320,8 +329,12 @@ func writeDoc(path string, doc *fileDoc) error {
 	if doc.stateDB != "" {
 		fmt.Fprintf(&b, "state_db = %s\n", doc.stateDB)
 	}
+	// Always write check_updates explicitly so a false value survives a
+	// save / reload round-trip (absent-from-file now means "default on").
 	if doc.checkUpdates {
 		fmt.Fprintf(&b, "check_updates = on\n")
+	} else {
+		fmt.Fprintf(&b, "check_updates = off\n")
 	}
 	if doc.updateURL != "" {
 		fmt.Fprintf(&b, "update_url = %s\n", doc.updateURL)
