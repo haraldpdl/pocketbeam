@@ -25,6 +25,7 @@ const (
 	screenDirPicker
 	screenDeleteConfirm
 	screenProfileList
+	screenProfileDetail
 	screenUpdate
 )
 
@@ -131,18 +132,32 @@ type updateState struct {
 	backBtn      image.Rectangle
 }
 
-// profileListState holds the snapshot shown on the profile-list screen
-// and the tap targets for each row plus the Add-new / Delete buttons.
-// confirmDelete is true after the first tap on Delete; a second tap
-// actually deletes. Any other interaction resets it.
+// profileListState holds the snapshot shown on the profile-list screen.
+// Every row (including the active profile) is now a tap target that
+// opens a per-profile detail panel; per-profile destructive actions
+// live there, not on the list.
 type profileListState struct {
+	mu       sync.Mutex
+	names    []string
+	active   string
+	err      error
+	rowRects []image.Rectangle
+	addRect  image.Rectangle
+}
+
+// profileDetailState is the per-profile panel opened by tapping a row
+// in the profile list. It shows the profile's backend + host and
+// exposes Make-active and Delete actions. confirmDelete arms the
+// delete button: the first tap changes the label, the second commits.
+type profileDetailState struct {
 	mu            sync.Mutex
-	names         []string
-	active        string
-	err           error
-	rowRects      []image.Rectangle
-	addRect       image.Rectangle
-	delRect       image.Rectangle
+	name          string
+	backend       string
+	host          string
+	isActive      bool
+	loadErr       error
+	makeActiveBtn image.Rectangle
+	deleteBtn     image.Rectangle
 	confirmDelete bool
 }
 
@@ -340,9 +355,10 @@ type app struct {
 	sync        syncState
 	picker      feedPickerState
 	dirPicker   dirPickerState
-	delConfirm  deleteConfirmState
-	profileList profileListState
-	update      updateState
+	delConfirm    deleteConfirmState
+	profileList   profileListState
+	profileDetail profileDetailState
+	update        updateState
 	lastSync    SyncSummary
 	hasLastSync bool
 	bookCount   int
@@ -494,6 +510,8 @@ func (a *app) Draw() {
 		a.drawDeleteConfirm()
 	case screenProfileList:
 		a.drawProfileList()
+	case screenProfileDetail:
+		a.drawProfileDetail()
 	case screenUpdate:
 		a.drawUpdate()
 	}
@@ -511,6 +529,10 @@ func (a *app) Key(e ink.KeyEvent) bool {
 			return true
 		case screenShelfPicker, screenDirPicker, screenProfileList, screenUpdate:
 			a.screen = screenSettings
+			ink.Repaint()
+			return true
+		case screenProfileDetail:
+			a.screen = screenProfileList
 			ink.Repaint()
 			return true
 		case screenDeleteConfirm:
@@ -538,6 +560,8 @@ func (a *app) Key(e ink.KeyEvent) bool {
 		return a.deleteConfirmKey(e)
 	case screenProfileList:
 		return a.profileListKey(e)
+	case screenProfileDetail:
+		return a.profileDetailKey(e)
 	case screenUpdate:
 		return a.updateKey(e)
 	}
@@ -560,6 +584,8 @@ func (a *app) Pointer(e ink.PointerEvent) bool {
 		return a.deleteConfirmPointer(e)
 	case screenProfileList:
 		return a.profileListPointer(e)
+	case screenProfileDetail:
+		return a.profileDetailPointer(e)
 	case screenUpdate:
 		return a.updatePointer(e)
 	}
@@ -2399,7 +2425,6 @@ func (a *app) drawProfileList() {
 	names := append([]string(nil), a.profileList.names...)
 	active := a.profileList.active
 	perr := a.profileList.err
-	confirming := a.profileList.confirmDelete
 	a.profileList.mu.Unlock()
 
 	ink.DrawString(image.Point{X: a.layout.margin, Y: 140}, "Server profiles")
@@ -2413,65 +2438,39 @@ func (a *app) drawProfileList() {
 		return
 	}
 
-	// Rows: one per profile. The active profile is a state indicator
-	// rather than a tappable action, so it's drawn as plain text
-	// without a button border. Switch-to targets (non-active rows) keep
-	// the border to read as interactive.
+	// Every profile is a tap target; tapping opens the per-profile
+	// detail panel where Make-active and Delete live. The active
+	// profile carries a "• ... (active)" marker so the user can tell
+	// at a glance which one is current, but it's still a full button
+	// so the detail panel is reachable for e.g. deleting it directly.
 	rowH := 90
 	areaTop := a.layout.pickerAreaTop
 	rects := make([]image.Rectangle, 0, len(names))
 	for i, n := range names {
 		y1 := areaTop + i*rowH
 		rect := image.Rect(a.layout.margin, y1, a.layout.screen.X-a.layout.margin, y1+rowH-20)
-		if n == active {
-			// No tap target; parallel slot preserves index alignment.
-			rects = append(rects, image.Rectangle{})
-			drawCenteredText(btnFont, rect, truncate("• "+n+"  (active)", 40), a.layout.fpx(44))
-			continue
-		}
 		rects = append(rects, rect)
 		ink.DrawRect(rect, ink.Black)
-		drawCenteredText(btnFont, rect, truncate(n, 40), a.layout.fpx(44))
+		label := n
+		if n == active {
+			label = "• " + n + "  (active)"
+		}
+		drawCenteredText(btnFont, rect, truncate(label, 40), a.layout.fpx(44))
 	}
 
-	// Add new + Delete current stacked above Back. Delete only when there
-	// is more than one profile on disk.
+	// Only Add-new sits on the list now; per-profile actions moved to
+	// the detail panel.
 	btnH := 100
-	backMin := a.layout.backButton.Min.Y
-	delY2 := backMin - 40
-	delY1 := delY2 - btnH
-	addY2 := delY1 - 30
+	addY2 := a.layout.backButton.Min.Y - 40
 	addY1 := addY2 - btnH
-
 	addRect := image.Rect(a.layout.margin, addY1, a.layout.screen.X-a.layout.margin, addY2)
 	ink.DrawRect(addRect, ink.Black)
 	ink.DrawRect(addRect.Inset(2), ink.Black)
 	drawCenteredText(btnFont, addRect, "Add new server", a.layout.fpx(44))
 
-	// Delete button is always shown. Last-profile deletion is allowed
-	// (resets to first-run) so users can reset from inside the app.
-	// Tap-to-confirm: the first tap changes the label; a second tap
-	// commits. Any other interaction resets the confirm state.
-	var delRect image.Rectangle
-	if active != "" {
-		delRect = image.Rect(a.layout.margin, delY1, a.layout.screen.X-a.layout.margin, delY2)
-		ink.DrawRect(delRect, ink.Black)
-		label := "Delete active profile"
-		if confirming {
-			label = fmt.Sprintf("Tap again to delete \"%s\"", active)
-			if len(names) == 1 {
-				label = fmt.Sprintf("Tap again to reset pocketbeam")
-			}
-			// Double-border to visually emphasize the armed state.
-			ink.DrawRect(delRect.Inset(2), ink.Black)
-		}
-		drawCenteredText(btnFont, delRect, truncate(label, 40), a.layout.fpx(44))
-	}
-
 	a.profileList.mu.Lock()
 	a.profileList.rowRects = rects
 	a.profileList.addRect = addRect
-	a.profileList.delRect = delRect
 	a.profileList.mu.Unlock()
 
 	ink.DrawRect(a.layout.backButton, ink.Black)
@@ -2492,7 +2491,6 @@ func (a *app) profileListPointer(e ink.PointerEvent) bool {
 		return false
 	}
 	if e.Point.In(a.layout.backButton) {
-		a.clearDeleteConfirm()
 		a.screen = screenSettings
 		ink.Repaint()
 		return true
@@ -2500,56 +2498,21 @@ func (a *app) profileListPointer(e ink.PointerEvent) bool {
 	a.profileList.mu.Lock()
 	rects := a.profileList.rowRects
 	names := append([]string(nil), a.profileList.names...)
-	active := a.profileList.active
 	addRect := a.profileList.addRect
-	delRect := a.profileList.delRect
-	confirming := a.profileList.confirmDelete
 	a.profileList.mu.Unlock()
 
 	if e.Point.In(addRect) {
-		a.clearDeleteConfirm()
 		a.startAddProfile()
 		return true
 	}
-	if !delRect.Empty() && e.Point.In(delRect) {
-		if !confirming {
-			a.profileList.mu.Lock()
-			a.profileList.confirmDelete = true
-			a.profileList.mu.Unlock()
-			ink.Repaint()
-			return true
-		}
-		a.profileList.mu.Lock()
-		a.profileList.confirmDelete = false
-		a.profileList.mu.Unlock()
-		a.deleteActiveProfile(active)
-		return true
-	}
-	// Any other tap cancels the armed delete.
-	a.clearDeleteConfirm()
 	for i, r := range rects {
-		if !e.Point.In(r) {
+		if !e.Point.In(r) || i >= len(names) {
 			continue
 		}
-		if i < len(names) && names[i] != active {
-			a.switchProfile(names[i])
-		}
+		a.openProfileDetail(names[i])
 		return true
 	}
 	return false
-}
-
-// clearDeleteConfirm resets the two-tap-to-delete state so a stale
-// "armed" condition can't carry over into an unrelated interaction.
-func (a *app) clearDeleteConfirm() {
-	a.profileList.mu.Lock()
-	if a.profileList.confirmDelete {
-		a.profileList.confirmDelete = false
-		a.profileList.mu.Unlock()
-		ink.Repaint()
-		return
-	}
-	a.profileList.mu.Unlock()
 }
 
 // switchProfile marks the chosen profile active, reloads the config,
@@ -2567,15 +2530,17 @@ func (a *app) switchProfile(name string) {
 	ink.Repaint()
 }
 
-// deleteActiveProfile removes the active profile. fileDoc promotes
-// another profile to active automatically when one exists; if the
-// deleted profile was the only one, we drop to the first-run wizard
-// so the user can start over from scratch.
-func (a *app) deleteActiveProfile(name string) {
+// deleteProfileByName removes the named profile. When the active
+// profile disappears (either by direct deletion or because it was
+// renamed / wasn't the target), fileDoc promotes another profile to
+// active; reloadActiveConfig picks that up. Deleting the last profile
+// drops to the first-run wizard.
+func (a *app) deleteProfileByName(name string) {
+	wasActive := a.cfg != nil && a.cfg.Profile == name
 	if err := DeleteProfile(a.cfgPath, name); err != nil {
-		a.profileList.mu.Lock()
-		a.profileList.err = err
-		a.profileList.mu.Unlock()
+		a.profileDetail.mu.Lock()
+		a.profileDetail.loadErr = err
+		a.profileDetail.mu.Unlock()
 		ink.Repaint()
 		return
 	}
@@ -2596,7 +2561,9 @@ func (a *app) deleteActiveProfile(name string) {
 		ink.Repaint()
 		return
 	}
-	a.reloadActiveConfig()
+	if wasActive {
+		a.reloadActiveConfig()
+	}
 	a.openProfileList()
 }
 
@@ -2631,6 +2598,170 @@ func (a *app) startAddProfile() {
 	a.wizard = wizardState{step: stepProfileName, addProfile: true}
 	a.screen = screenFirstRun
 	ink.OpenKeyboard("new-profile-name", 40)
+}
+
+// ---------- Profile detail ----------
+
+// openProfileDetail loads the named profile's fields and switches to
+// its detail panel. Falls back to a name-only display if the profile
+// can't be read (e.g. mid-edit file).
+func (a *app) openProfileDetail(name string) {
+	p, err := LoadProfileByName(a.cfgPath, name)
+	active := ""
+	if a.cfg != nil {
+		active = a.cfg.Profile
+	}
+	a.profileDetail.mu.Lock()
+	a.profileDetail.name = name
+	a.profileDetail.loadErr = err
+	a.profileDetail.confirmDelete = false
+	a.profileDetail.isActive = (name == active)
+	if err == nil {
+		a.profileDetail.backend = p.Backend
+		a.profileDetail.host = p.Host
+	} else {
+		a.profileDetail.backend = ""
+		a.profileDetail.host = ""
+	}
+	a.profileDetail.mu.Unlock()
+	a.screen = screenProfileDetail
+	ink.Repaint()
+}
+
+func (a *app) drawProfileDetail() {
+	title := ink.OpenFont(ink.DefaultFontBold, a.layout.fpx(64), true)
+	defer title.Close()
+	title.SetActive(ink.Black)
+
+	body := ink.OpenFont(ink.DefaultFont, a.layout.fpx(32), true)
+	defer body.Close()
+	body.SetActive(ink.Black)
+
+	btnFont := ink.OpenFont(ink.DefaultFontBold, a.layout.fpx(44), true)
+	defer btnFont.Close()
+	btnFont.SetActive(ink.Black)
+
+	a.profileDetail.mu.Lock()
+	name := a.profileDetail.name
+	backend := a.profileDetail.backend
+	host := a.profileDetail.host
+	isActive := a.profileDetail.isActive
+	loadErr := a.profileDetail.loadErr
+	confirming := a.profileDetail.confirmDelete
+	a.profileDetail.mu.Unlock()
+
+	header := "Profile: " + name
+	if isActive {
+		header += "  (active)"
+	}
+	ink.DrawString(image.Point{X: a.layout.margin, Y: 140}, truncate(header, 40))
+
+	body.SetActive(ink.Black)
+	y := 240
+	if loadErr != nil {
+		ink.DrawString(image.Point{X: a.layout.margin, Y: y}, "Could not load profile:")
+		ink.DrawString(image.Point{X: a.layout.margin, Y: y + 50}, truncate(loadErr.Error(), 60))
+	} else {
+		ink.DrawString(image.Point{X: a.layout.margin, Y: y}, "Backend: "+backend)
+		ink.DrawString(image.Point{X: a.layout.margin, Y: y + 50}, "Server:  "+truncate(host, 55))
+	}
+
+	// Action stack anchored above Back: Delete (always) + Make active
+	// (only when this profile isn't the active one).
+	btnH := 100
+	backMin := a.layout.backButton.Min.Y
+	delY2 := backMin - 40
+	delY1 := delY2 - btnH
+	makeActiveY2 := delY1 - 30
+	makeActiveY1 := makeActiveY2 - btnH
+	contentW := a.layout.screen.X - 2*a.layout.margin
+
+	var makeActiveBtn image.Rectangle
+	if !isActive && loadErr == nil {
+		makeActiveBtn = image.Rect(a.layout.margin, makeActiveY1, a.layout.margin+contentW, makeActiveY2)
+		ink.DrawRect(makeActiveBtn, ink.Black)
+		ink.DrawRect(makeActiveBtn.Inset(2), ink.Black)
+		drawCenteredText(btnFont, makeActiveBtn, "Make active", a.layout.fpx(44))
+	}
+
+	deleteBtn := image.Rect(a.layout.margin, delY1, a.layout.margin+contentW, delY2)
+	ink.DrawRect(deleteBtn, ink.Black)
+	delLabel := "Delete this profile"
+	if confirming {
+		if isActive {
+			names, _, _ := ListProfiles(a.cfgPath)
+			if len(names) == 1 {
+				delLabel = "Tap again to reset pocketbeam"
+			} else {
+				delLabel = fmt.Sprintf("Tap again to delete \"%s\"", name)
+			}
+		} else {
+			delLabel = fmt.Sprintf("Tap again to delete \"%s\"", name)
+		}
+		ink.DrawRect(deleteBtn.Inset(2), ink.Black)
+	}
+	drawCenteredText(btnFont, deleteBtn, truncate(delLabel, 40), a.layout.fpx(44))
+
+	a.profileDetail.mu.Lock()
+	a.profileDetail.makeActiveBtn = makeActiveBtn
+	a.profileDetail.deleteBtn = deleteBtn
+	a.profileDetail.mu.Unlock()
+
+	ink.DrawRect(a.layout.backButton, ink.Black)
+	drawCenteredText(btnFont, a.layout.backButton, "Back", a.layout.fpx(44))
+}
+
+func (a *app) profileDetailKey(e ink.KeyEvent) bool {
+	if e.Key == ink.KeyBack {
+		a.screen = screenProfileList
+		ink.Repaint()
+		return true
+	}
+	return false
+}
+
+func (a *app) profileDetailPointer(e ink.PointerEvent) bool {
+	if e.State != ink.PointerDown {
+		return false
+	}
+	if e.Point.In(a.layout.backButton) {
+		a.screen = screenProfileList
+		ink.Repaint()
+		return true
+	}
+	a.profileDetail.mu.Lock()
+	makeActiveBtn := a.profileDetail.makeActiveBtn
+	deleteBtn := a.profileDetail.deleteBtn
+	confirming := a.profileDetail.confirmDelete
+	name := a.profileDetail.name
+	a.profileDetail.mu.Unlock()
+
+	if !makeActiveBtn.Empty() && e.Point.In(makeActiveBtn) {
+		a.switchProfile(name)
+		return true
+	}
+	if e.Point.In(deleteBtn) {
+		if !confirming {
+			a.profileDetail.mu.Lock()
+			a.profileDetail.confirmDelete = true
+			a.profileDetail.mu.Unlock()
+			ink.Repaint()
+			return true
+		}
+		a.profileDetail.mu.Lock()
+		a.profileDetail.confirmDelete = false
+		a.profileDetail.mu.Unlock()
+		a.deleteProfileByName(name)
+		return true
+	}
+	// Tap elsewhere disarms the delete.
+	if confirming {
+		a.profileDetail.mu.Lock()
+		a.profileDetail.confirmDelete = false
+		a.profileDetail.mu.Unlock()
+		ink.Repaint()
+	}
+	return false
 }
 
 // ---------- Self-update ----------
