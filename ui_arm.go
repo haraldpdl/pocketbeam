@@ -2820,7 +2820,11 @@ func (a *app) drawUpdate() {
 		ink.DrawRect(installBtn, ink.Black)
 		ink.DrawRect(installBtn.Inset(2), ink.Black)
 		drawCenteredText(btnFont, installBtn, "Install now", a.layout.fpx(44))
-	} else if !downloading && !installed {
+	} else if !downloading && !installed && !checking {
+		// Suppress the manual check button while a check is already in
+		// flight; the status line above reads "Checking for updates..."
+		// which would otherwise fight the button's "Check for updates"
+		// label and confuse users about whether the check is happening.
 		checkBtn = primary
 		ink.DrawRect(checkBtn, ink.Black)
 		drawCenteredText(btnFont, checkBtn, "Check for updates", a.layout.fpx(44))
