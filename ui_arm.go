@@ -1650,16 +1650,18 @@ func (a *app) drawShelfPicker() {
 			visibleSubs = append(visibleSubs, sub)
 		}
 
-		// ".. (up)" is a fixed row above the paginated window so the
-		// user can always tap to go up, including from page 2+. It
-		// occupies one rowH at the top of the list area; the subsection
-		// window starts below it.
+		// Up-row: fixed above the paginated window so the user can go
+		// up from any page. Styled deliberately unlike the content rows
+		// (narrower, left-aligned, "←" prefix) so it doesn't look like
+		// just another tappable subsection.
 		listTop := areaTop
 		var upRect image.Rectangle
 		if !atRoot {
-			upRect = image.Rect(a.layout.margin, listTop, a.layout.screen.X-a.layout.margin, listTop+rowH-20)
+			upW := (a.layout.screen.X - 2*a.layout.margin) / 3
+			upH := rowH - 20
+			upRect = image.Rect(a.layout.margin, listTop, a.layout.margin+upW, listTop+upH)
 			ink.DrawRect(upRect, ink.Black)
-			drawCenteredText(btnFont, upRect, ".. (up)", a.layout.fpx(44))
+			drawCenteredText(btnFont, upRect, "← back", a.layout.fpx(44))
 			listTop += rowH
 		}
 
@@ -2051,14 +2053,16 @@ func (a *app) drawDirPicker() {
 
 		atRoot := path == "/" || path == ""
 
-		// Fixed ".. (up)" row at the top, above the paginated subdir
-		// rows, so it's reachable from any page.
+		// Up-row: narrow, left-aligned, "←" prefix so it doesn't look
+		// like another tappable subdirectory.
 		listTop := areaTop
 		var upRect image.Rectangle
 		if !atRoot {
-			upRect = image.Rect(a.layout.margin, listTop, a.layout.screen.X-a.layout.margin, listTop+rowH-20)
+			upW := (a.layout.screen.X - 2*a.layout.margin) / 3
+			upH := rowH - 20
+			upRect = image.Rect(a.layout.margin, listTop, a.layout.margin+upW, listTop+upH)
 			ink.DrawRect(upRect, ink.Black)
-			drawCenteredText(btnFont, upRect, ".. (up)", a.layout.fpx(44))
+			drawCenteredText(btnFont, upRect, "← back", a.layout.fpx(44))
 			listTop += rowH
 		}
 
