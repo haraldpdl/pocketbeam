@@ -2611,7 +2611,10 @@ func (a *app) backgroundUpdateCheck() {
 
 // runUpdateCheck performs one check against the configured endpoint.
 // Safe to call from any goroutine; repaint is triggered when state
-// changes so the main-screen banner appears.
+// changes so the main-screen banner appears. Wakes Wi-Fi via
+// ink.ConnectDefault before the HTTP call so a check fired at app
+// launch (before Wi-Fi has finished associating) does not silently
+// fail with "network unreachable".
 func (a *app) runUpdateCheck() {
 	a.update.mu.Lock()
 	if a.update.checking {
@@ -2621,6 +2624,15 @@ func (a *app) runUpdateCheck() {
 	a.update.checking = true
 	a.update.checkErr = nil
 	a.update.mu.Unlock()
+
+	if err := ink.ConnectDefault(); err != nil {
+		a.update.mu.Lock()
+		a.update.checking = false
+		a.update.checkErr = fmt.Errorf("no Wi-Fi: %w", err)
+		a.update.mu.Unlock()
+		ink.Repaint()
+		return
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
