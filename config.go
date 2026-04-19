@@ -158,6 +158,28 @@ func LoadConfig(path string) (*Config, error) {
 	return c, nil
 }
 
+// LoadProfileByName reads one profile's fields without making it the
+// active profile. Useful for UI screens that show another profile's
+// server / backend alongside the active one.
+func LoadProfileByName(path, name string) (*Config, error) {
+	doc, err := parseDoc(path)
+	if err != nil {
+		return nil, err
+	}
+	rows, ok := doc.sections[name]
+	if !ok {
+		return nil, fmt.Errorf("profile %q does not exist", name)
+	}
+	c := &Config{Profile: name, StateDB: doc.stateDB}
+	if err := applyProfile(c, path, rows); err != nil {
+		return nil, err
+	}
+	if c.Backend == "" {
+		c.Backend = BackendOPDS
+	}
+	return c, nil
+}
+
 // ListProfiles returns the names of all profiles in the file, plus the
 // name of the active one.
 func ListProfiles(path string) (names []string, active string, err error) {
