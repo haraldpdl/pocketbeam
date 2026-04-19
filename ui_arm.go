@@ -919,7 +919,7 @@ func (a *app) drawMain() {
 	btnFont.SetActive(ink.Black)
 	btnLabel := "Sync Now"
 	if a.syncActive() {
-		btnLabel = "Cancel"
+		btnLabel = "Stop"
 	}
 	drawCenteredText(btnFont, a.layout.syncButton, btnLabel, a.layout.fpx(44))
 
@@ -1144,7 +1144,7 @@ func (a *app) runSync() {
 	wasCancelled := a.sync.cancelled
 	a.sync.cancelled = false
 	if wasCancelled {
-		a.sync.err = fmt.Errorf("Sync cancelled.")
+		a.sync.err = fmt.Errorf("Sync stopped.")
 	} else {
 		a.sync.err = res.FirstErr
 	}

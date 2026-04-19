@@ -48,7 +48,7 @@ For OPDS servers, pocketbeam auto-detects whether the endpoint is Calibre-Web / 
 
 The main screen has four actions:
 
-- **Sync Now**: connects the Wi-Fi (wakes the radio if asleep), probes the server, then pulls the configured catalog (all books by default, or one or more filters / folders that you picked) and downloads everything that is new or updated since the last sync. Progress shows the current book counter, a live elapsed-time indicator, and the book title being downloaded. Already-synced books skip instantly. While a sync is in flight the same button reads **Cancel**; tapping it stops the run cleanly (partial downloads are left as `.part` files and cleaned up on the next sync).
+- **Sync Now**: connects the Wi-Fi (wakes the radio if asleep), probes the server, then pulls the configured catalog (all books by default, or one or more filters / folders that you picked) and downloads everything that is new or updated since the last sync. Progress shows the current book counter, a live elapsed-time indicator, and the book title being downloaded. Already-synced books skip instantly. While a sync is in flight the same button reads **Stop**; tapping it halts the run cleanly (books already downloaded stay, the in-flight `.part` file is left for the next sync's stale-sweep to remove).
 - **Network**: opens the PocketBook system network dialog so you can switch Wi-Fi networks or re-enable Wi-Fi if you had it off.
 - **Settings**: change the server URL / credentials, pick sync filters, toggle delete-missing, or switch between server profiles. Four buttons:
     - **Change server info**: re-runs the wizard for the active profile.
