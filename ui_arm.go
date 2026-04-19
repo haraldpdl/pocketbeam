@@ -1302,20 +1302,8 @@ func formatElapsed(d time.Duration) string {
 	return fmt.Sprintf("%d:%02d:%02d", s/3600, (s%3600)/60, s%60)
 }
 
-// truncate shortens s to at most n runes, adding "..." if cut.
-func truncate(s string, n int) string {
-	if n <= 0 {
-		return ""
-	}
-	r := []rune(s)
-	if len(r) <= n {
-		return s
-	}
-	if n <= 3 {
-		return string(r[:n])
-	}
-	return string(r[:n-3]) + "..."
-}
+// breadcrumbPath + truncate live in breadcrumb.go / util.go so both
+// the InkView UI and the amd64 tests can reach them.
 
 // ---------- Settings screen ----------
 
@@ -1614,12 +1602,17 @@ func (a *app) drawShelfPicker() {
 	offset := a.picker.offset
 	a.picker.mu.Unlock()
 
-	// Breadcrumb / current-level label.
+	// Breadcrumb path: every ancestor title joined by " / ", current
+	// level last. Collapses middle segments when the full path is too
+	// wide for the header.
 	body.SetActive(ink.Black)
-	crumb := "Currently in: " + truncate(curTitle, 50)
-	if stackLen > 0 {
-		crumb += fmt.Sprintf("  (%d up)", stackLen)
+	a.picker.mu.Lock()
+	stackTitles := make([]string, 0, stackLen)
+	for _, f := range a.picker.stack {
+		stackTitles = append(stackTitles, f.Title)
 	}
+	a.picker.mu.Unlock()
+	crumb := breadcrumbPath(append(stackTitles, curTitle), 55)
 	ink.DrawString(image.Point{X: a.layout.margin, Y: 220}, crumb)
 
 	// Reserve space at bottom for "Sync this level" + Back.
