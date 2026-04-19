@@ -146,11 +146,22 @@ func Download(ctx context.Context, rel Release, destPath string, progress func(w
 // file at stagedPath. On Linux the running binary's inode stays alive
 // for the current process, so this is safe to call from the app
 // updating itself; the user must relaunch for the new version to run.
+//
+// Chmod is best-effort: PocketBook's /mnt/ext1 is a vfat filesystem on
+// many models, and vfat takes per-file mode bits from the mount options
+// rather than from chmod syscalls. A chmod EPERM on vfat is meaningless;
+// the executable bit is already set by the mount's fmask, so we proceed
+// to the rename regardless of chmod's return.
 func Install(stagedPath, targetPath string) error {
-	if err := os.Chmod(stagedPath, 0o755); err != nil {
+	_ = os.Chmod(stagedPath, 0o755)
+	if err := os.Rename(stagedPath, targetPath); err != nil {
+		// Don't leak the staged file; the next sync's stale sweep would
+		// eventually remove it, but cleaning up here keeps the filesystem
+		// tidy after a failed install.
+		_ = os.Remove(stagedPath)
 		return err
 	}
-	return os.Rename(stagedPath, targetPath)
+	return nil
 }
 
 // countingReader wraps an io.Reader and invokes cb with the running
