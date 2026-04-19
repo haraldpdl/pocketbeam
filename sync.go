@@ -81,17 +81,23 @@ const metaLastScope = "last_scope"
 
 // Sync reconciles the remote catalog with the local library and store.
 // The source carries any backend-specific scoping (OPDS filter, WebDAV
-// root directory) chosen at construction time.
-func Sync(src Source, store *Store, library string, progress Progress, opts SyncOptions) SyncResult {
+// root directory) chosen at construction time. The context cancels both
+// the List call and any in-flight download; on cancellation the partial
+// file is left as a .part for the next sync to clean up.
+func Sync(ctx context.Context, src Source, store *Store, library string, progress Progress, opts SyncOptions) SyncResult {
 	var res SyncResult
 	sweepStalePartFiles(library, stalePartAge)
-	books, err := src.List(context.Background())
+	books, err := src.List(ctx)
 	if err != nil {
 		res.FirstErr = fmt.Errorf("list remote: %w", err)
 		return res
 	}
 	total := len(books)
 	for i, b := range books {
+		if err := ctx.Err(); err != nil {
+			res.FirstErr = err
+			return res
+		}
 		if progress != nil {
 			progress(i+1, total, b)
 		}
@@ -107,8 +113,12 @@ func Sync(src Source, store *Store, library string, progress Progress, opts Sync
 			res.Skipped++
 			continue
 		}
-		path, err := download(src, library, b)
+		path, err := download(ctx, src, library, b)
 		if err != nil {
+			if ctx.Err() != nil {
+				res.FirstErr = ctx.Err()
+				return res
+			}
 			res.Failed++
 			if res.FirstErr == nil {
 				res.FirstErr = fmt.Errorf("download %q: %w", b.Title, err)
@@ -223,7 +233,7 @@ func ScopeFor(cfg *Config) string {
 	return fmt.Sprintf("%s|%s|%s|%s|%s", cfg.Profile, cfg.Backend, cfg.Host, strings.Join(filters, ","), cfg.Path)
 }
 
-func download(src Source, library string, b Book) (string, error) {
+func download(parent context.Context, src Source, library string, b Book) (string, error) {
 	ext := formatExt[b.Format]
 	if ext == "" {
 		return "", fmt.Errorf("no extension known for %s", b.Format)
@@ -234,7 +244,7 @@ func download(src Source, library string, b Book) (string, error) {
 	}
 	path := filepath.Join(dir, sanitize(b.Title)+ext)
 
-	ctx, cancel := context.WithTimeout(context.Background(), downloadBodyTimeout)
+	ctx, cancel := context.WithTimeout(parent, downloadBodyTimeout)
 	defer cancel()
 	body, err := src.Fetch(ctx, b)
 	if err != nil {

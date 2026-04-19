@@ -70,7 +70,9 @@ type syncState struct {
 	title     string
 	author    string
 	err       error
-	bookStart time.Time // when the current book's download began
+	bookStart time.Time          // when the current book's download began
+	cancel    context.CancelFunc // populated while active; nil otherwise
+	cancelled bool               // true when the user tapped Cancel so the summary can say so
 }
 
 // feedPickerFrame is one level of the nested-navigation stack. Pushed when
@@ -909,11 +911,17 @@ func (a *app) drawMain() {
 		ink.DrawString(image.Point{X: a.layout.margin, Y: 360}, "Not yet synced. Tap Sync Now to begin.")
 	}
 
-	// Sync Now button
+	// Sync Now / Cancel button. The rect is the same either way so the
+	// user always finds the primary action in the same spot; only the
+	// label + handler swap while sync is active.
 	ink.DrawRect(a.layout.syncButton, ink.Black)
 	ink.DrawRect(a.layout.syncButton.Inset(2), ink.Black)
 	btnFont.SetActive(ink.Black)
-	drawCenteredText(btnFont, a.layout.syncButton, "Sync Now", a.layout.fpx(44))
+	btnLabel := "Sync Now"
+	if a.syncActive() {
+		btnLabel = "Cancel"
+	}
+	drawCenteredText(btnFont, a.layout.syncButton, btnLabel, a.layout.fpx(44))
 
 	// Live progress area (drawn fully here on idle-to-sync transition; during
 	// the sync it is refreshed in-place via drawMainProgress + PartialUpdate).
@@ -1009,10 +1017,16 @@ func (a *app) mainPointer(e ink.PointerEvent) bool {
 	if !a.acceptTap(e) {
 		return false
 	}
+	p := e.Point
+	// During an active sync the only tap target is the Sync button,
+	// which doubles as Cancel.
 	if a.syncActive() {
+		if p.In(a.layout.syncButton) {
+			a.cancelSync()
+			return true
+		}
 		return false
 	}
-	p := e.Point
 	switch {
 	case p.In(a.layout.syncButton):
 		a.startSync()
@@ -1029,6 +1043,19 @@ func (a *app) mainPointer(e ink.PointerEvent) bool {
 		return true
 	}
 	return false
+}
+
+// cancelSync signals the in-flight Sync to abort. The sync goroutine
+// will return shortly afterwards; the UI flips back to the idle screen
+// at that point.
+func (a *app) cancelSync() {
+	a.sync.mu.Lock()
+	cancel := a.sync.cancel
+	a.sync.cancelled = true
+	a.sync.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
 }
 
 // startSync kicks off a sync in a goroutine and wires progress + completion
@@ -1102,11 +1129,25 @@ func (a *app) runSync() {
 	if a.cfg.DeleteMissing {
 		opts.Confirm = a.confirmDeletions
 	}
-	res := Sync(src, a.store, a.cfg.Library, progress, opts)
+	ctx, cancel := context.WithCancel(context.Background())
+	a.sync.mu.Lock()
+	a.sync.cancel = cancel
+	a.sync.cancelled = false
+	a.sync.mu.Unlock()
+	defer cancel()
+
+	res := Sync(ctx, src, a.store, a.cfg.Library, progress, opts)
 
 	a.sync.mu.Lock()
 	a.sync.active = false
-	a.sync.err = res.FirstErr
+	a.sync.cancel = nil
+	wasCancelled := a.sync.cancelled
+	a.sync.cancelled = false
+	if wasCancelled {
+		a.sync.err = fmt.Errorf("Sync cancelled.")
+	} else {
+		a.sync.err = res.FirstErr
+	}
 	a.sync.mu.Unlock()
 
 	// Persist summary + refresh screen stats. Deleted is not currently

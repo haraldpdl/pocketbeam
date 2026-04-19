@@ -46,6 +46,74 @@ func openTempStore(t *testing.T) (*Store, string) {
 	return s, dir
 }
 
+// cancellingSource pretends to have many books and deliberately blocks
+// in Fetch so the context can be cancelled mid-download. Used to verify
+// Sync exits promptly once the caller cancels.
+type cancellingSource struct {
+	books   []Book
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (c *cancellingSource) List(ctx context.Context) ([]Book, error) {
+	return c.books, nil
+}
+func (c *cancellingSource) Fetch(ctx context.Context, b Book) (io.ReadCloser, error) {
+	// Signal that the first fetch has started, then block until either
+	// the context is cancelled or the test releases us.
+	select {
+	case c.entered <- struct{}{}:
+	default:
+	}
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-c.release:
+		return io.NopCloser(strings.NewReader("late")), nil
+	}
+}
+
+func TestSync_CancellationReturnsQuickly(t *testing.T) {
+	store, dir := openTempStore(t)
+	defer store.Close()
+	library := filepath.Join(dir, "lib")
+
+	src := &cancellingSource{
+		books: []Book{
+			makeBook("uuid-a", "Author", "A", "http://x/a"),
+			makeBook("uuid-b", "Author", "B", "http://x/b"),
+		},
+		entered: make(chan struct{}, 1),
+		release: make(chan struct{}),
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := make(chan SyncResult, 1)
+	go func() {
+		done <- Sync(ctx, src, store, library, nil, SyncOptions{})
+	}()
+
+	select {
+	case <-src.entered:
+	case <-time.After(time.Second):
+		t.Fatal("Sync never called Fetch")
+	}
+	cancel()
+
+	select {
+	case res := <-done:
+		if res.FirstErr == nil {
+			t.Errorf("expected cancellation error, got %+v", res)
+		}
+		if res.Downloaded != 0 {
+			t.Errorf("Downloaded = %d, want 0", res.Downloaded)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Sync did not return within 2s of cancel")
+	}
+}
+
 func TestSync_DeleteMissing_ConfirmsAndRemoves(t *testing.T) {
 	store, dir := openTempStore(t)
 	defer store.Close()
@@ -59,7 +127,7 @@ func TestSync_DeleteMissing_ConfirmsAndRemoves(t *testing.T) {
 		},
 	}
 	opts := SyncOptions{Scope: "opds|x|||"}
-	res := Sync(srcFull, store, library, nil, opts)
+	res := Sync(context.Background(), srcFull, store, library, nil, opts)
 	if res.Downloaded != 2 || res.FirstErr != nil {
 		t.Fatalf("first sync: got %+v", res)
 	}
@@ -79,7 +147,7 @@ func TestSync_DeleteMissing_ConfirmsAndRemoves(t *testing.T) {
 			return true
 		},
 	}
-	res = Sync(srcPartial, store, library, nil, opts2)
+	res = Sync(context.Background(), srcPartial, store, library, nil, opts2)
 	if res.Deleted != 1 {
 		t.Errorf("Deleted = %d, want 1", res.Deleted)
 	}
@@ -107,7 +175,7 @@ func TestSync_DeleteMissing_ScopeChangeSkips(t *testing.T) {
 			makeBook("uuid-b", "Author", "B", "http://x/b"),
 		},
 	}
-	res := Sync(srcFull, store, library, nil, SyncOptions{Scope: "scope-one"})
+	res := Sync(context.Background(), srcFull, store, library, nil, SyncOptions{Scope: "scope-one"})
 	if res.Downloaded != 2 {
 		t.Fatalf("first sync: %+v", res)
 	}
@@ -125,7 +193,7 @@ func TestSync_DeleteMissing_ScopeChangeSkips(t *testing.T) {
 	srcOther := &fakeSource{
 		books: []Book{makeBook("uuid-c", "Author", "C", "http://x/c")},
 	}
-	res = Sync(srcOther, store, library, nil, opts)
+	res = Sync(context.Background(), srcOther, store, library, nil, opts)
 	if confirmed {
 		t.Errorf("Confirm was called despite scope change")
 	}
@@ -133,7 +201,7 @@ func TestSync_DeleteMissing_ScopeChangeSkips(t *testing.T) {
 		t.Errorf("Deleted = %d, want 0 on scope change", res.Deleted)
 	}
 	// Next run with the same scope should now proceed with deletion.
-	res = Sync(srcOther, store, library, nil, opts)
+	res = Sync(context.Background(), srcOther, store, library, nil, opts)
 	if !confirmed {
 		t.Errorf("Confirm should have fired once scope stabilised")
 	}
@@ -149,11 +217,11 @@ func TestSync_DeleteMissing_EmptyRemoteSkips(t *testing.T) {
 
 	// Seed one book.
 	srcFull := &fakeSource{books: []Book{makeBook("uuid-a", "Author", "A", "http://x/a")}}
-	_ = Sync(srcFull, store, library, nil, SyncOptions{Scope: "s1"})
+	_ = Sync(context.Background(), srcFull, store, library, nil, SyncOptions{Scope: "s1"})
 
 	empty := &fakeSource{books: nil}
 	called := false
-	res := Sync(empty, store, library, nil, SyncOptions{
+	res := Sync(context.Background(), empty, store, library, nil, SyncOptions{
 		DeleteMissing: true,
 		Scope:         "s1",
 		Confirm: func(d []LocalBook) bool {
@@ -180,10 +248,10 @@ func TestSync_DeleteMissing_ConfirmDecline(t *testing.T) {
 			makeBook("uuid-b", "Author", "B", "http://x/b"),
 		},
 	}
-	_ = Sync(srcFull, store, library, nil, SyncOptions{Scope: "s"})
+	_ = Sync(context.Background(), srcFull, store, library, nil, SyncOptions{Scope: "s"})
 
 	srcPartial := &fakeSource{books: []Book{makeBook("uuid-a", "Author", "A", "http://x/a")}}
-	res := Sync(srcPartial, store, library, nil, SyncOptions{
+	res := Sync(context.Background(), srcPartial, store, library, nil, SyncOptions{
 		DeleteMissing: true,
 		Scope:         "s",
 		Confirm:       func(d []LocalBook) bool { return false },
@@ -208,14 +276,14 @@ func TestSync_DeleteMissing_RemovesFileOnDisk(t *testing.T) {
 			makeBook("uuid-b", "Author", "Goner", "http://x/b"),
 		},
 	}
-	_ = Sync(srcFull, store, library, nil, SyncOptions{Scope: "s"})
+	_ = Sync(context.Background(), srcFull, store, library, nil, SyncOptions{Scope: "s"})
 	goner := filepath.Join(library, "Author", "Goner.epub")
 	if _, err := os.Stat(goner); err != nil {
 		t.Fatalf("expected file at %s: %v", goner, err)
 	}
 
 	srcPartial := &fakeSource{books: []Book{makeBook("uuid-a", "Author", "Keeper", "http://x/a")}}
-	_ = Sync(srcPartial, store, library, nil, SyncOptions{
+	_ = Sync(context.Background(), srcPartial, store, library, nil, SyncOptions{
 		DeleteMissing: true,
 		Scope:         "s",
 		Confirm:       func(d []LocalBook) bool { return true },

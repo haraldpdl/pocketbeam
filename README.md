@@ -48,7 +48,7 @@ For OPDS servers, pocketbeam auto-detects whether the endpoint is Calibre-Web / 
 
 The main screen has four actions:
 
-- **Sync Now**: connects the Wi-Fi (wakes the radio if asleep), probes the server, then pulls the configured catalog (all books by default, or one or more filters / folders that you picked) and downloads everything that is new or updated since the last sync. Progress shows the current book counter, a live elapsed-time indicator, and the book title being downloaded. Already-synced books skip instantly.
+- **Sync Now**: connects the Wi-Fi (wakes the radio if asleep), probes the server, then pulls the configured catalog (all books by default, or one or more filters / folders that you picked) and downloads everything that is new or updated since the last sync. Progress shows the current book counter, a live elapsed-time indicator, and the book title being downloaded. Already-synced books skip instantly. While a sync is in flight the same button reads **Cancel**; tapping it stops the run cleanly (partial downloads are left as `.part` files and cleaned up on the next sync).
 - **Network**: opens the PocketBook system network dialog so you can switch Wi-Fi networks or re-enable Wi-Fi if you had it off.
 - **Settings**: change the server URL / credentials, pick sync filters, toggle delete-missing, or switch between server profiles. Four buttons:
     - **Change server info**: re-runs the wizard for the active profile.
@@ -120,7 +120,7 @@ go test -tags=live -run TestLive
 
 - **App name shows as `@pocketbeam`** in the PocketBook launcher with a generic icon. This is the PocketBook firmware's default presentation for any sideloaded app and matches KOReader's `@koreader` presentation. Customising it requires editing `/mnt/ext1/system/config/desktop/view.json` and placing BMP icons under `/mnt/ext1/applications/icons/`; that is a per-user polish step, not part of the default install.
 - **Password entry is visible** on the on-screen keyboard. The PocketBook InkView keyboard has no masked-input mode exposed through the SDK. Use a stance that blocks onlookers or set a throwaway password for device use.
-- **Sync cannot be cancelled mid-run.** Interrupting (Back key or force-quit) is safe but leaves a partial download as a `.part` file that the next sync retries cleanly.
+- **Interrupting a sync leaves a partial download** as a `.part` file. The next sync's stale-sweep removes anything older than one hour, so no manual cleanup is needed.
 - **Library rescan not triggered automatically.** After sync, new covers and titles appear when the PocketBook library app is opened; pocketbeam does not force an immediate rescan because the stock `scanner.app` steals foreground focus and makes pocketbeam look frozen.
 - **Only tested on firmware 6.x.** Older firmware may lack the `NetMgrPing` keepalive API; sync will still work but the radio may drop during long runs.
 

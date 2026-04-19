@@ -2,10 +2,13 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"flag"
 	"fmt"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 )
 
 func main() {
@@ -45,7 +48,22 @@ func main() {
 		opts.Confirm = cliConfirm(*yes)
 	}
 
-	res := Sync(src, store, cfg.Library, progress, opts)
+	// Translate the first SIGINT / SIGTERM into a context cancel so a
+	// Ctrl+C mid-sync stops cleanly (the partial file is left as a .part
+	// for the next run's stale-sweep). A second signal falls through to
+	// the default handler and kills the process.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	go func() {
+		<-sigCh
+		fmt.Fprintln(os.Stderr, "\ncancelling sync; next signal will terminate")
+		cancel()
+		signal.Stop(sigCh)
+	}()
+
+	res := Sync(ctx, src, store, cfg.Library, progress, opts)
 	fmt.Printf("done: %d downloaded, %d skipped, %d failed, %d deleted\n",
 		res.Downloaded, res.Skipped, res.Failed, res.Deleted)
 	if res.FirstErr != nil {
