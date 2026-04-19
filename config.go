@@ -183,8 +183,10 @@ func SetActiveProfile(path, name string) error {
 }
 
 // DeleteProfile removes a profile from the file. If it was the active
-// profile, the first remaining profile is promoted. Errors if the target
-// is the last remaining profile (pocketbeam needs at least one).
+// profile, the first remaining profile is promoted. Deleting the last
+// profile leaves the file empty of sections and with no active marker;
+// the next LoadConfig will fail cleanly, which the caller should
+// translate into a first-run wizard.
 func DeleteProfile(path, name string) error {
 	doc, err := parseDoc(path)
 	if err != nil {
@@ -192,9 +194,6 @@ func DeleteProfile(path, name string) error {
 	}
 	if _, ok := doc.sections[name]; !ok {
 		return fmt.Errorf("profile %q does not exist", name)
-	}
-	if len(doc.sections) <= 1 {
-		return fmt.Errorf("cannot delete the only remaining profile")
 	}
 	delete(doc.sections, name)
 	filtered := doc.order[:0]
@@ -205,7 +204,11 @@ func DeleteProfile(path, name string) error {
 	}
 	doc.order = filtered
 	if doc.active == name {
-		doc.active = doc.order[0]
+		if len(doc.order) > 0 {
+			doc.active = doc.order[0]
+		} else {
+			doc.active = ""
+		}
 	}
 	return writeDoc(path, doc)
 }
