@@ -18,15 +18,16 @@ const (
 )
 
 type Config struct {
-	Backend    string // "opds" (default) or "webdav"
-	Host       string // base URL, e.g. http://cwa.example.internal:8083
-	User       string // server user
-	Pass       string // server password
-	Library    string // local target dir, e.g. /mnt/ext1/Books/CWA
-	StateDB    string // sqlite path, e.g. /mnt/ext1/system/config/pocketbeam.db
-	FilterHref string // OPDS only: path to sync (empty = all books). Works for CWA shelves AND generic subsections.
-	FilterName string // last-known display name of the filter (cache; refreshed in the picker)
-	Path       string // WebDAV only: absolute directory on the server to mirror, e.g. "/Books/Fiction"
+	Backend       string // "opds" (default) or "webdav"
+	Host          string // base URL, e.g. http://cwa.example.internal:8083
+	User          string // server user
+	Pass          string // server password
+	Library       string // local target dir, e.g. /mnt/ext1/Books/CWA
+	StateDB       string // sqlite path, e.g. /mnt/ext1/system/config/pocketbeam.db
+	FilterHref    string // OPDS only: path to sync (empty = all books). Works for CWA shelves AND generic subsections.
+	FilterName    string // last-known display name of the filter (cache; refreshed in the picker)
+	Path          string // WebDAV only: absolute directory on the server to mirror, e.g. "/Books/Fiction"
+	DeleteMissing bool   // when true, sync removes local books absent from the current remote listing (opt-in; prompts for confirmation on device / stdin in CLI)
 }
 
 // LoadConfig reads a flat key=value file. Comments begin with #. Whitespace
@@ -69,6 +70,8 @@ func LoadConfig(path string) (*Config, error) {
 			c.FilterName = strings.TrimSpace(v)
 		case "path":
 			c.Path = strings.TrimSpace(v)
+		case "delete_missing":
+			c.DeleteMissing = parseBool(v)
 		case "shelf_id":
 			// Back-compat: old configs wrote shelf_id. Convert to filter_href.
 			id, err := strconv.Atoi(strings.TrimSpace(v))
@@ -131,9 +134,24 @@ func SaveConfig(path string, c *Config) error {
 	if backend == BackendWebDAV && c.Path != "" {
 		fmt.Fprintf(&b, "path = %s\n", c.Path)
 	}
+	if c.DeleteMissing {
+		fmt.Fprintf(&b, "delete_missing = on\n")
+	}
 	tmp := path + ".tmp"
 	if err := os.WriteFile(tmp, []byte(b.String()), 0o600); err != nil {
 		return err
 	}
 	return os.Rename(tmp, path)
+}
+
+// parseBool accepts the human-friendly spellings of true/false commonly
+// typed into config files: on/off, true/false, yes/no, 1/0. Unknown
+// values parse as false so a typo cannot silently enable a destructive
+// flag.
+func parseBool(v string) bool {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "on", "true", "yes", "1":
+		return true
+	}
+	return false
 }

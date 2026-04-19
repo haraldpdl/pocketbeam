@@ -22,6 +22,7 @@ const (
 	screenSettings
 	screenShelfPicker
 	screenDirPicker
+	screenDeleteConfirm
 )
 
 // wizardStep tracks where the user is in the first-run flow.
@@ -86,6 +87,17 @@ type feedPickerState struct {
 	upRect     image.Rectangle   // ".. (up)" button, empty when at root
 }
 
+// deleteConfirmState holds the deletion set awaiting user confirmation
+// and the channel the sync goroutine blocks on. ch is non-nil only while
+// a prompt is pending.
+type deleteConfirmState struct {
+	mu       sync.Mutex
+	pending  []LocalBook
+	ch       chan bool
+	yesRect  image.Rectangle
+	noRect   image.Rectangle
+}
+
 // dirPickerState holds the current WebDAV directory the user is drilling
 // through. path is the currently-browsed directory (always absolute, always
 // starts with "/"); dirs is the list of subdirectories to display.
@@ -115,9 +127,10 @@ type layout struct {
 	progressBar    image.Rectangle
 
 	// settings screen
-	changeButton image.Rectangle
-	filterButton image.Rectangle
-	backButton   image.Rectangle
+	changeButton    image.Rectangle
+	filterButton    image.Rectangle
+	deleteTglButton image.Rectangle
+	backButton      image.Rectangle
 
 	// shelf picker: per-row tap rects computed dynamically in draw.
 	pickerAreaTop    int
@@ -167,12 +180,15 @@ func computeLayout(sz image.Point) layout {
 	settingsBtn := image.Rect(networkBtn.Max.X+40, btnY1, networkBtn.Max.X+40+btnW, btnY2)
 	quitBtn := image.Rect(w-sideMargin-btnW, btnY1, w-sideMargin, btnY2)
 
-	// Settings screen: two stacked big buttons (change server info, change
-	// filter); Back in the bottom-left mirroring the main screen.
+	// Settings screen: three stacked big buttons (change server info,
+	// change filter, toggle delete-missing); Back in the bottom-left
+	// mirroring the main screen.
 	changeY1 := topSafe + 320
 	changeBtn := image.Rect(sideMargin, changeY1, sideMargin+contentW, changeY1+160)
 	filterY1 := changeY1 + 200
 	filterBtn := image.Rect(sideMargin, filterY1, sideMargin+contentW, filterY1+160)
+	deleteTglY1 := filterY1 + 200
+	deleteTglBtn := image.Rect(sideMargin, deleteTglY1, sideMargin+contentW, deleteTglY1+120)
 
 	// Shelf picker: rows live between the header (below topSafe) and the
 	// Back button (same position as bottom btnY1).
@@ -190,6 +206,7 @@ func computeLayout(sz image.Point) layout {
 		progressBar:      progBar,
 		changeButton:     changeBtn,
 		filterButton:     filterBtn,
+		deleteTglButton:  deleteTglBtn,
 		backButton:       networkBtn,
 		pickerAreaTop:    pickerTop,
 		pickerAreaBottom: pickerBottom,
@@ -207,6 +224,7 @@ type app struct {
 	sync        syncState
 	picker      feedPickerState
 	dirPicker   dirPickerState
+	delConfirm  deleteConfirmState
 	lastSync    SyncSummary
 	hasLastSync bool
 	bookCount   int
@@ -314,6 +332,8 @@ func (a *app) Draw() {
 		a.drawShelfPicker()
 	case screenDirPicker:
 		a.drawDirPicker()
+	case screenDeleteConfirm:
+		a.drawDeleteConfirm()
 	}
 	ink.FullUpdate()
 }
@@ -331,6 +351,11 @@ func (a *app) Key(e ink.KeyEvent) bool {
 			a.screen = screenSettings
 			ink.Repaint()
 			return true
+		case screenDeleteConfirm:
+			// Back key on the prompt is equivalent to "No": keep books,
+			// release the sync goroutine.
+			a.answerDelete(false)
+			return true
 		default:
 			ink.Exit()
 			return true
@@ -347,6 +372,8 @@ func (a *app) Key(e ink.KeyEvent) bool {
 		return a.shelfPickerKey(e)
 	case screenDirPicker:
 		return a.dirPickerKey(e)
+	case screenDeleteConfirm:
+		return a.deleteConfirmKey(e)
 	}
 	return false
 }
@@ -363,6 +390,8 @@ func (a *app) Pointer(e ink.PointerEvent) bool {
 		return a.shelfPickerPointer(e)
 	case screenDirPicker:
 		return a.dirPickerPointer(e)
+	case screenDeleteConfirm:
+		return a.deleteConfirmPointer(e)
 	}
 	return false
 }
@@ -905,21 +934,33 @@ func (a *app) runSync() {
 		ink.Repaint()
 		return
 	}
-	dl, skip, fail, firstErr := Sync(src, a.store, a.cfg.Library, progress)
+	opts := SyncOptions{
+		DeleteMissing: a.cfg.DeleteMissing,
+		Scope:         ScopeFor(a.cfg),
+	}
+	if a.cfg.DeleteMissing {
+		opts.Confirm = a.confirmDeletions
+	}
+	res := Sync(src, a.store, a.cfg.Library, progress, opts)
 
 	a.sync.mu.Lock()
 	a.sync.active = false
-	a.sync.err = firstErr
+	a.sync.err = res.FirstErr
 	a.sync.mu.Unlock()
 
-	// Persist summary + refresh screen stats.
+	// Persist summary + refresh screen stats. Deleted is not currently
+	// shown on the main screen; the count is visible through the log
+	// channel once the PR wires that up.
 	_ = a.store.SetLastSync(SyncSummary{
 		At:         time.Now(),
-		Downloaded: dl,
-		Skipped:    skip,
-		Failed:     fail,
+		Downloaded: res.Downloaded,
+		Skipped:    res.Skipped,
+		Failed:     res.Failed,
 	})
 	a.refreshMainStats()
+	// In case the confirm screen is still up (e.g. user closed the device
+	// with the prompt showing), flip back to main.
+	a.screen = screenMain
 	ink.Repaint()
 
 	// We deliberately do NOT auto-exec /mnt/ext1/system/bin/scanner.app here:
@@ -1076,6 +1117,16 @@ func (a *app) drawSettings() {
 	ink.DrawRect(a.layout.filterButton.Inset(2), ink.Black)
 	drawCenteredText(btnFont, a.layout.filterButton, filterBtnText, 44)
 
+	// Delete-missing toggle: drawn as a single tap-to-cycle button whose
+	// label reflects the current state. Single border (not inset) to read
+	// as lighter-weight than the two primary actions.
+	delLabel := "Delete missing: off  (tap to enable)"
+	if a.cfg.DeleteMissing {
+		delLabel = "Delete missing: on  (tap to disable)"
+	}
+	ink.DrawRect(a.layout.deleteTglButton, ink.Black)
+	drawCenteredText(btnFont, a.layout.deleteTglButton, delLabel, 44)
+
 	// Footer: version + Back
 	small.SetActive(ink.Black)
 	ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.backButton.Min.Y - 40}, "pocketbeam "+version)
@@ -1116,6 +1167,11 @@ func (a *app) settingsPointer(e ink.PointerEvent) bool {
 		} else {
 			a.openShelfPicker()
 		}
+		return true
+	case p.In(a.layout.deleteTglButton):
+		a.cfg.DeleteMissing = !a.cfg.DeleteMissing
+		_ = SaveConfig(a.cfgPath, a.cfg)
+		ink.Repaint()
 		return true
 	case p.In(a.layout.backButton):
 		a.screen = screenMain
@@ -1631,4 +1687,130 @@ func (a *app) setFilter(href, name string) {
 	a.cfg.FilterHref = href
 	a.cfg.FilterName = name
 	_ = SaveConfig(a.cfgPath, a.cfg)
+}
+
+// ---------- Delete-missing confirmation ----------
+
+// confirmDeletions is invoked by the sync goroutine when delete-missing
+// finds books absent from the remote. It parks the deletions on the UI,
+// flips to the confirm screen, and blocks until the user answers.
+func (a *app) confirmDeletions(deletions []LocalBook) bool {
+	a.delConfirm.mu.Lock()
+	a.delConfirm.pending = deletions
+	a.delConfirm.ch = make(chan bool, 1)
+	ch := a.delConfirm.ch
+	a.delConfirm.mu.Unlock()
+	a.screen = screenDeleteConfirm
+	ink.Repaint()
+	return <-ch
+}
+
+// answerDelete replies to an in-flight confirmation prompt. Safe to call
+// when no prompt is pending; it is a no-op.
+func (a *app) answerDelete(ok bool) {
+	a.delConfirm.mu.Lock()
+	ch := a.delConfirm.ch
+	a.delConfirm.ch = nil
+	a.delConfirm.pending = nil
+	a.delConfirm.mu.Unlock()
+	if ch == nil {
+		return
+	}
+	ch <- ok
+	// The sync goroutine will flip back to screenMain once Sync returns;
+	// until then the screen stays on a transient "processing" visual.
+	a.screen = screenMain
+	ink.Repaint()
+}
+
+func (a *app) drawDeleteConfirm() {
+	title := ink.OpenFont(ink.DefaultFontBold, 64, true)
+	defer title.Close()
+	title.SetActive(ink.Black)
+
+	body := ink.OpenFont(ink.DefaultFont, 32, true)
+	defer body.Close()
+	body.SetActive(ink.Black)
+
+	btnFont := ink.OpenFont(ink.DefaultFontBold, 44, true)
+	defer btnFont.Close()
+	btnFont.SetActive(ink.Black)
+
+	a.delConfirm.mu.Lock()
+	pending := append([]LocalBook(nil), a.delConfirm.pending...)
+	a.delConfirm.mu.Unlock()
+
+	ink.DrawString(image.Point{X: a.layout.margin, Y: 140}, "Confirm deletion")
+
+	body.SetActive(ink.Black)
+	ink.DrawString(image.Point{X: a.layout.margin, Y: 230},
+		fmt.Sprintf("%d book(s) are no longer on the server.", len(pending)))
+	ink.DrawString(image.Point{X: a.layout.margin, Y: 280}, "Delete them from this device?")
+
+	// Preview up to 5 titles, indented.
+	const preview = 5
+	y := 360
+	for i, b := range pending {
+		if i == preview {
+			ink.DrawString(image.Point{X: a.layout.margin + 40, Y: y},
+				fmt.Sprintf("... and %d more", len(pending)-preview))
+			break
+		}
+		label := b.Author + ": " + b.Title
+		ink.DrawString(image.Point{X: a.layout.margin + 40, Y: y}, truncate(label, 60))
+		y += 50
+	}
+
+	// Yes / No buttons side by side, above the bottom safe margin.
+	btnH := 100
+	btnY2 := a.layout.backButton.Max.Y
+	btnY1 := btnY2 - btnH
+	contentW := a.layout.screen.X - 2*a.layout.margin
+	half := (contentW - 40) / 2
+	yesRect := image.Rect(a.layout.margin, btnY1, a.layout.margin+half, btnY2)
+	noRect := image.Rect(a.layout.screen.X-a.layout.margin-half, btnY1, a.layout.screen.X-a.layout.margin, btnY2)
+
+	ink.DrawRect(yesRect, ink.Black)
+	ink.DrawRect(yesRect.Inset(2), ink.Black)
+	drawCenteredText(btnFont, yesRect, "Delete", 44)
+
+	ink.DrawRect(noRect, ink.Black)
+	ink.DrawRect(noRect.Inset(2), ink.Black)
+	drawCenteredText(btnFont, noRect, "Keep", 44)
+
+	a.delConfirm.mu.Lock()
+	a.delConfirm.yesRect = yesRect
+	a.delConfirm.noRect = noRect
+	a.delConfirm.mu.Unlock()
+}
+
+func (a *app) deleteConfirmKey(e ink.KeyEvent) bool {
+	switch e.Key {
+	case ink.KeyOk:
+		a.answerDelete(true)
+		return true
+	case ink.KeyBack:
+		a.answerDelete(false)
+		return true
+	}
+	return false
+}
+
+func (a *app) deleteConfirmPointer(e ink.PointerEvent) bool {
+	if e.State != ink.PointerDown {
+		return false
+	}
+	a.delConfirm.mu.Lock()
+	yes := a.delConfirm.yesRect
+	no := a.delConfirm.noRect
+	a.delConfirm.mu.Unlock()
+	if e.Point.In(yes) {
+		a.answerDelete(true)
+		return true
+	}
+	if e.Point.In(no) {
+		a.answerDelete(false)
+		return true
+	}
+	return false
 }

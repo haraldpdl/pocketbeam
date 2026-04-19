@@ -1,6 +1,7 @@
-bookbeam
-bookbeam.app
-bookbeam-amd64
+pocketbeam
+pocketbeam.app
+pocketbeam-amd64
+dist/
 *.test
 *.out
 .idea/

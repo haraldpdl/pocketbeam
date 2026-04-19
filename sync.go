@@ -39,18 +39,55 @@ var formatExt = map[string]string{
 // 1-based. Pass nil to disable progress reporting.
 type Progress func(index, total int, b Book)
 
-// Sync reconciles the remote catalog with the local library and store. It
-// returns counts of (downloaded, skipped, failed) and the first error
-// encountered (subsequent errors are still attempted but only the first is
-// returned, so a single bad entry doesn't abort the whole sync).
-//
+// Confirm asks the caller (UI or CLI) whether to proceed with deleting
+// the given local books that are no longer present on the remote. Return
+// true to delete, false to skip. Called at most once per sync, and only
+// when the deletion set is non-empty.
+type Confirm func(deletions []LocalBook) bool
+
+// SyncOptions groups the backend-agnostic inputs for a sync run.
+type SyncOptions struct {
+	// DeleteMissing enables the post-download reconciliation step that
+	// removes local books whose UUID is absent from the fresh remote list.
+	DeleteMissing bool
+
+	// Scope is an opaque identity of the remote scope (backend + filter +
+	// path). When the stored last-sync scope differs from this one, the
+	// delete step is skipped for this run: a scope change is interpreted
+	// as the user narrowing or widening what they sync, not a signal to
+	// prune the device.
+	Scope string
+
+	// Confirm is invoked before any deletion happens. If nil, the delete
+	// step is skipped even when DeleteMissing is true.
+	Confirm Confirm
+}
+
+// SyncResult captures counts for a sync run plus the first non-fatal
+// error encountered (subsequent errors are still attempted but only the
+// first is returned, so a single bad entry doesn't abort the whole sync).
+type SyncResult struct {
+	Downloaded int
+	Skipped    int
+	Failed     int
+	Deleted    int
+	FirstErr   error
+}
+
+// metaLastScope is the key under which Sync persists the Scope of the
+// most recent run, used to skip the delete step when scope changes.
+const metaLastScope = "last_scope"
+
+// Sync reconciles the remote catalog with the local library and store.
 // The source carries any backend-specific scoping (OPDS filter, WebDAV
 // root directory) chosen at construction time.
-func Sync(src Source, store *Store, library string, progress Progress) (downloaded, skipped, failed int, firstErr error) {
+func Sync(src Source, store *Store, library string, progress Progress, opts SyncOptions) SyncResult {
+	var res SyncResult
 	sweepStalePartFiles(library, stalePartAge)
 	books, err := src.List(context.Background())
 	if err != nil {
-		return 0, 0, 0, fmt.Errorf("list remote: %w", err)
+		res.FirstErr = fmt.Errorf("list remote: %w", err)
+		return res
 	}
 	total := len(books)
 	for i, b := range books {
@@ -59,21 +96,21 @@ func Sync(src Source, store *Store, library string, progress Progress) (download
 		}
 		local, oldPath, exists, err := store.LocalEntry(b.UUID)
 		if err != nil {
-			failed++
-			if firstErr == nil {
-				firstErr = err
+			res.Failed++
+			if res.FirstErr == nil {
+				res.FirstErr = err
 			}
 			continue
 		}
 		if exists && !b.Updated.After(local) {
-			skipped++
+			res.Skipped++
 			continue
 		}
 		path, err := download(src, library, b)
 		if err != nil {
-			failed++
-			if firstErr == nil {
-				firstErr = fmt.Errorf("download %q: %w", b.Title, err)
+			res.Failed++
+			if res.FirstErr == nil {
+				res.FirstErr = fmt.Errorf("download %q: %w", b.Title, err)
 			}
 			continue
 		}
@@ -87,15 +124,98 @@ func Sync(src Source, store *Store, library string, progress Progress) (download
 			}
 		}
 		if err := store.Upsert(b, path); err != nil {
-			failed++
-			if firstErr == nil {
-				firstErr = fmt.Errorf("store %q: %w", b.Title, err)
+			res.Failed++
+			if res.FirstErr == nil {
+				res.FirstErr = fmt.Errorf("store %q: %w", b.Title, err)
 			}
 			continue
 		}
-		downloaded++
+		res.Downloaded++
 	}
-	return downloaded, skipped, failed, firstErr
+
+	// Delete-missing reconciliation runs after downloads so a user whose
+	// sync is interrupted gets the new books regardless.
+	if opts.DeleteMissing && opts.Confirm != nil {
+		res.Deleted = reconcileDeletions(store, books, opts, &res)
+	}
+
+	// Record this run's scope even when we didn't delete, so the next
+	// sync with the same scope can proceed with deletion.
+	if opts.Scope != "" {
+		_ = store.SetMeta(metaLastScope, opts.Scope)
+	}
+	return res
+}
+
+// reconcileDeletions computes the set of tracked books that are absent
+// from the current remote listing, asks the caller for confirmation, and
+// deletes the confirmed items (file on disk + store row). Several safety
+// guards short-circuit before we call Confirm; a guard tripping is not
+// an error, the sync run simply keeps those books.
+func reconcileDeletions(store *Store, remote []Book, opts SyncOptions, res *SyncResult) int {
+	// Empty-remote guard: a misconfigured feed or wrong credentials often
+	// returns zero items. Treat that as "I can't trust this listing" and
+	// keep everything.
+	if len(remote) == 0 {
+		return 0
+	}
+	// Scope-change guard: if the user narrowed/widened what they sync,
+	// the diff against the previous scope's books would mass-delete.
+	lastScope, _, _ := store.GetMeta(metaLastScope)
+	if lastScope != opts.Scope {
+		return 0
+	}
+	present := make(map[string]struct{}, len(remote))
+	for _, b := range remote {
+		present[b.UUID] = struct{}{}
+	}
+	entries, err := store.AllEntries()
+	if err != nil {
+		if res.FirstErr == nil {
+			res.FirstErr = fmt.Errorf("list local entries: %w", err)
+		}
+		return 0
+	}
+	var missing []LocalBook
+	for _, e := range entries {
+		if _, ok := present[e.UUID]; !ok {
+			missing = append(missing, e)
+		}
+	}
+	if len(missing) == 0 {
+		return 0
+	}
+	if !opts.Confirm(missing) {
+		return 0
+	}
+	deleted := 0
+	for _, m := range missing {
+		if m.LocalPath != "" {
+			if err := os.Remove(m.LocalPath); err != nil && !os.IsNotExist(err) {
+				if res.FirstErr == nil {
+					res.FirstErr = fmt.Errorf("delete %q: %w", m.Title, err)
+				}
+				continue
+			}
+			// Prune the author directory if it's now empty; ignore errors.
+			_ = os.Remove(filepath.Dir(m.LocalPath))
+		}
+		if err := store.Delete(m.UUID); err != nil {
+			if res.FirstErr == nil {
+				res.FirstErr = fmt.Errorf("forget %q: %w", m.Title, err)
+			}
+			continue
+		}
+		deleted++
+	}
+	return deleted
+}
+
+// ScopeFor returns the opaque scope string for a config. Change in any
+// of the identity-bearing fields invalidates the scope, disabling the
+// delete step for that run.
+func ScopeFor(cfg *Config) string {
+	return fmt.Sprintf("%s|%s|%s|%s", cfg.Backend, cfg.Host, cfg.FilterHref, cfg.Path)
 }
 
 func download(src Source, library string, b Book) (string, error) {

@@ -113,3 +113,62 @@ func (s *Store) Upsert(b Book, localPath string) error {
 		b.UUID, b.Title, b.Author, b.Updated.Unix(), localPath)
 	return err
 }
+
+// LocalBook is the local view of a previously-synced book: identity,
+// human display fields, and the path on disk. Used by the delete-missing
+// path and the confirmation prompt.
+type LocalBook struct {
+	UUID      string
+	Title     string
+	Author    string
+	LocalPath string
+}
+
+// AllEntries returns every tracked book. Used to compute which local
+// entries are missing from the current remote listing.
+func (s *Store) AllEntries() ([]LocalBook, error) {
+	rows, err := s.db.Query(`SELECT uuid, title, author, local_path FROM books`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []LocalBook
+	for rows.Next() {
+		var b LocalBook
+		if err := rows.Scan(&b.UUID, &b.Title, &b.Author, &b.LocalPath); err != nil {
+			return nil, err
+		}
+		out = append(out, b)
+	}
+	return out, rows.Err()
+}
+
+// Delete removes the tracked entry for a UUID. The file on disk is the
+// caller's responsibility.
+func (s *Store) Delete(uuid string) error {
+	_, err := s.db.Exec(`DELETE FROM books WHERE uuid = ?`, uuid)
+	return err
+}
+
+// SetMeta stores a small string under key in the meta table. Used for
+// per-install bookkeeping that doesn't warrant its own column (e.g. the
+// scope of the most recent sync).
+func (s *Store) SetMeta(key, value string) error {
+	_, err := s.db.Exec(`INSERT INTO meta (key, value) VALUES (?, ?)
+		ON CONFLICT(key) DO UPDATE SET value = excluded.value`, key, value)
+	return err
+}
+
+// GetMeta returns the value previously stored via SetMeta. The bool is
+// false when the key has never been set.
+func (s *Store) GetMeta(key string) (string, bool, error) {
+	var v string
+	err := s.db.QueryRow(`SELECT value FROM meta WHERE key = ?`, key).Scan(&v)
+	if err == sql.ErrNoRows {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	return v, true, nil
+}
