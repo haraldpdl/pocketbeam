@@ -44,14 +44,13 @@ type Progress func(index, total int, b Book)
 // encountered (subsequent errors are still attempted but only the first is
 // returned, so a single bad entry doesn't abort the whole sync).
 //
-// If filterHref is non-empty, only that OPDS path is synced (a CWA shelf
-// path like /opds/shelf/1 or a generic subsection like /opds/books);
-// otherwise the full catalog.
-func Sync(client *Client, store *Store, library, filterHref string, progress Progress) (downloaded, skipped, failed int, firstErr error) {
+// The source carries any backend-specific scoping (OPDS filter, WebDAV
+// root directory) chosen at construction time.
+func Sync(src Source, store *Store, library string, progress Progress) (downloaded, skipped, failed int, firstErr error) {
 	sweepStalePartFiles(library, stalePartAge)
-	books, err := client.WalkFiltered(filterHref)
+	books, err := src.List(context.Background())
 	if err != nil {
-		return 0, 0, 0, fmt.Errorf("walk catalog: %w", err)
+		return 0, 0, 0, fmt.Errorf("list remote: %w", err)
 	}
 	total := len(books)
 	for i, b := range books {
@@ -70,7 +69,7 @@ func Sync(client *Client, store *Store, library, filterHref string, progress Pro
 			skipped++
 			continue
 		}
-		path, err := download(client, library, b)
+		path, err := download(src, library, b)
 		if err != nil {
 			failed++
 			if firstErr == nil {
@@ -99,7 +98,7 @@ func Sync(client *Client, store *Store, library, filterHref string, progress Pro
 	return downloaded, skipped, failed, firstErr
 }
 
-func download(client *Client, library string, b Book) (string, error) {
+func download(src Source, library string, b Book) (string, error) {
 	ext := formatExt[b.Format]
 	if ext == "" {
 		return "", fmt.Errorf("no extension known for %s", b.Format)
@@ -112,7 +111,7 @@ func download(client *Client, library string, b Book) (string, error) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), downloadBodyTimeout)
 	defer cancel()
-	body, err := client.Fetch(ctx, b.URL)
+	body, err := src.Fetch(ctx, b)
 	if err != nil {
 		return "", err
 	}

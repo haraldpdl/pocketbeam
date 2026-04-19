@@ -28,11 +28,36 @@ func TestConfigBackCompatShelfID(t *testing.T) {
 	}
 }
 
+func TestConfigRoundTripWebDAV(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "webdav.cfg")
+	want := &Config{
+		Backend: BackendWebDAV,
+		Host:    "https://nc.example/remote.php/dav/files/alice",
+		User:    "alice",
+		Pass:    "hunter2",
+		Library: "/mnt/ext1/Books/WebDAV",
+		StateDB: "/mnt/ext1/system/config/bookbeam.db",
+		Path:    "/Books/Fiction",
+	}
+	if err := SaveConfig(path, want); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	got, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if *got != *want {
+		t.Errorf("round-trip mismatch\n got=%+v\nwant=%+v", got, want)
+	}
+}
+
 func TestConfigRoundTrip(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "nested", "bookbeam.cfg")
 
 	want := &Config{
+		Backend:    BackendOPDS,
 		Host:       "http://cwa.lan:8083",
 		User:       "alice",
 		Pass:       "hunter2",

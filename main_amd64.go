@@ -15,9 +15,9 @@ func main() {
 	if err != nil {
 		die("config: %v", err)
 	}
-	client, err := NewClient(cfg.Host, cfg.User, cfg.Pass)
+	src, err := newSource(cfg)
 	if err != nil {
-		die("client: %v", err)
+		die("source: %v", err)
 	}
 	store, err := OpenStore(cfg.StateDB)
 	if err != nil {
@@ -34,7 +34,7 @@ func main() {
 		}
 	}
 
-	dl, skip, fail, firstErr := Sync(client, store, cfg.Library, cfg.FilterHref, progress)
+	dl, skip, fail, firstErr := Sync(src, store, cfg.Library, progress)
 	fmt.Printf("done: %d downloaded, %d skipped, %d failed\n", dl, skip, fail)
 	if firstErr != nil {
 		fmt.Fprintf(os.Stderr, "first error: %v\n", firstErr)

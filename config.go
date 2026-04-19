@@ -9,14 +9,24 @@ import (
 	"strings"
 )
 
+// BackendOPDS and BackendWebDAV are the valid values for Config.Backend.
+// An empty Backend is treated as OPDS for back-compat with configs written
+// before backend support landed.
+const (
+	BackendOPDS   = "opds"
+	BackendWebDAV = "webdav"
+)
+
 type Config struct {
+	Backend    string // "opds" (default) or "webdav"
 	Host       string // base URL, e.g. http://cwa.example.internal:8083
-	User       string // OPDS server user
-	Pass       string // OPDS server password
+	User       string // server user
+	Pass       string // server password
 	Library    string // local target dir, e.g. /mnt/ext1/Books/CWA
 	StateDB    string // sqlite path, e.g. /mnt/ext1/system/config/bookbeam.db
-	FilterHref string // OPDS path to sync (empty = all books). Works for CWA shelves AND generic subsections.
+	FilterHref string // OPDS only: path to sync (empty = all books). Works for CWA shelves AND generic subsections.
 	FilterName string // last-known display name of the filter (cache; refreshed in the picker)
+	Path       string // WebDAV only: absolute directory on the server to mirror, e.g. "/Books/Fiction"
 }
 
 // LoadConfig reads a flat key=value file. Comments begin with #. Whitespace
@@ -41,6 +51,8 @@ func LoadConfig(path string) (*Config, error) {
 			return nil, fmt.Errorf("%s:%d: missing '='", path, n)
 		}
 		switch strings.TrimSpace(k) {
+		case "backend":
+			c.Backend = strings.TrimSpace(v)
 		case "host":
 			c.Host = strings.TrimRight(strings.TrimSpace(v), "/")
 		case "user":
@@ -55,6 +67,8 @@ func LoadConfig(path string) (*Config, error) {
 			c.FilterHref = strings.TrimSpace(v)
 		case "filter_name":
 			c.FilterName = strings.TrimSpace(v)
+		case "path":
+			c.Path = strings.TrimSpace(v)
 		case "shelf_id":
 			// Back-compat: old configs wrote shelf_id. Convert to filter_href.
 			id, err := strconv.Atoi(strings.TrimSpace(v))
@@ -76,6 +90,12 @@ func LoadConfig(path string) (*Config, error) {
 	if err := s.Err(); err != nil {
 		return nil, err
 	}
+	if c.Backend == "" {
+		c.Backend = BackendOPDS
+	}
+	if c.Backend != BackendOPDS && c.Backend != BackendWebDAV {
+		return nil, fmt.Errorf("%s: unknown backend %q (expected opds or webdav)", path, c.Backend)
+	}
 	for k, v := range map[string]string{"host": c.Host, "library": c.Library, "state_db": c.StateDB} {
 		if v == "" {
 			return nil, fmt.Errorf("%s: missing required key %q", path, k)
@@ -92,16 +112,24 @@ func SaveConfig(path string, c *Config) error {
 		return err
 	}
 	var b strings.Builder
+	backend := c.Backend
+	if backend == "" {
+		backend = BackendOPDS
+	}
+	fmt.Fprintf(&b, "backend = %s\n", backend)
 	fmt.Fprintf(&b, "host = %s\n", c.Host)
 	fmt.Fprintf(&b, "user = %s\n", c.User)
 	fmt.Fprintf(&b, "password = %s\n", c.Pass)
 	fmt.Fprintf(&b, "library = %s\n", c.Library)
 	fmt.Fprintf(&b, "state_db = %s\n", c.StateDB)
-	if c.FilterHref != "" {
+	if backend == BackendOPDS && c.FilterHref != "" {
 		fmt.Fprintf(&b, "filter_href = %s\n", c.FilterHref)
 		if c.FilterName != "" {
 			fmt.Fprintf(&b, "filter_name = %s\n", c.FilterName)
 		}
+	}
+	if backend == BackendWebDAV && c.Path != "" {
+		fmt.Fprintf(&b, "path = %s\n", c.Path)
 	}
 	tmp := path + ".tmp"
 	if err := os.WriteFile(tmp, []byte(b.String()), 0o600); err != nil {

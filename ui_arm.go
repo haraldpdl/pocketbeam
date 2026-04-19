@@ -20,6 +20,7 @@ const (
 	screenMain
 	screenSettings
 	screenShelfPicker
+	screenDirPicker
 )
 
 // wizardStep tracks where the user is in the first-run flow.
@@ -27,6 +28,7 @@ type wizardStep int
 
 const (
 	stepWelcome wizardStep = iota
+	stepBackend
 	stepURL
 	stepUser
 	stepPass
@@ -36,11 +38,16 @@ const (
 
 // wizardState holds the in-progress first-run input and result.
 type wizardState struct {
-	step wizardStep
-	url  string
-	user string
-	pass string
-	err  error
+	step    wizardStep
+	backend string // "opds" or "webdav"
+	url     string
+	user    string
+	pass    string
+	err     error
+	// Tap targets for the backend-choice step, captured during draw so the
+	// pointer handler knows where the two buttons live.
+	opdsBtn   image.Rectangle
+	webdavBtn image.Rectangle
 }
 
 // syncState holds live progress from a running sync. Written by the progress
@@ -66,6 +73,19 @@ type shelfPickerState struct {
 	err      error
 	isCWA    bool              // captured at fetch time so the draw function can label the screen
 	rowRects []image.Rectangle // one per visible row (index 0 = "All books")
+}
+
+// dirPickerState holds the current WebDAV directory the user is drilling
+// through. path is the currently-browsed directory (always absolute, always
+// starts with "/"); dirs is the list of subdirectories to display.
+type dirPickerState struct {
+	mu         sync.Mutex
+	loading    bool
+	path       string
+	dirs       []string
+	err        error
+	rowRects   []image.Rectangle // one per visible row (index 0 = "..", 1+ = dirs)
+	selectRect image.Rectangle   // "Sync this folder" button
 }
 
 // layout holds screen-relative rectangles for every clickable element and for
@@ -175,6 +195,7 @@ type app struct {
 	wizard      wizardState
 	sync        syncState
 	picker      shelfPickerState
+	dirPicker   dirPickerState
 	lastSync    SyncSummary
 	hasLastSync bool
 	bookCount   int
@@ -245,6 +266,8 @@ func (a *app) Draw() {
 		a.drawSettings()
 	case screenShelfPicker:
 		a.drawShelfPicker()
+	case screenDirPicker:
+		a.drawDirPicker()
 	}
 	ink.FullUpdate()
 }
@@ -258,7 +281,7 @@ func (a *app) Key(e ink.KeyEvent) bool {
 			a.screen = screenMain
 			ink.Repaint()
 			return true
-		case screenShelfPicker:
+		case screenShelfPicker, screenDirPicker:
 			a.screen = screenSettings
 			ink.Repaint()
 			return true
@@ -276,6 +299,8 @@ func (a *app) Key(e ink.KeyEvent) bool {
 		return a.settingsKey(e)
 	case screenShelfPicker:
 		return a.shelfPickerKey(e)
+	case screenDirPicker:
+		return a.dirPickerKey(e)
 	}
 	return false
 }
@@ -290,6 +315,8 @@ func (a *app) Pointer(e ink.PointerEvent) bool {
 		return a.settingsPointer(e)
 	case screenShelfPicker:
 		return a.shelfPickerPointer(e)
+	case screenDirPicker:
+		return a.dirPickerPointer(e)
 	}
 	return false
 }
@@ -334,12 +361,34 @@ func (a *app) drawWizard() {
 		title.SetActive(ink.Black)
 		ink.DrawString(image.Point{X: 80, Y: 200}, "bookbeam")
 		body.SetActive(ink.Black)
-		ink.DrawString(image.Point{X: 80, Y: 280}, "Wireless sync from an OPDS server.")
-		ink.DrawString(image.Point{X: 80, Y: 360}, "You will be asked for:")
-		ink.DrawString(image.Point{X: 120, Y: 420}, "- Your OPDS server URL")
-		ink.DrawString(image.Point{X: 120, Y: 470}, "- Username")
-		ink.DrawString(image.Point{X: 120, Y: 520}, "- Password")
+		ink.DrawString(image.Point{X: 80, Y: 280}, "Wireless sync from a book server.")
+		ink.DrawString(image.Point{X: 80, Y: 360}, "Supports:")
+		ink.DrawString(image.Point{X: 120, Y: 420}, "- Calibre-Web / any OPDS server")
+		ink.DrawString(image.Point{X: 120, Y: 470}, "- WebDAV (Nextcloud, Synology, ownCloud)")
 		ink.DrawString(image.Point{X: 80, Y: 620}, "Press OK or tap the screen to begin.")
+
+	case stepBackend:
+		title.SetActive(ink.Black)
+		ink.DrawString(image.Point{X: 80, Y: 200}, "Choose server type")
+		body.SetActive(ink.Black)
+		ink.DrawString(image.Point{X: 80, Y: 290}, "Tap the option that matches your server.")
+
+		btnFont := ink.OpenFont(ink.DefaultFontBold, 44, true)
+		defer btnFont.Close()
+		btnFont.SetActive(ink.Black)
+
+		w := a.layout.screen.X
+		btnW := w - 2*a.layout.margin
+		a.wizard.opdsBtn = image.Rect(a.layout.margin, 380, a.layout.margin+btnW, 540)
+		a.wizard.webdavBtn = image.Rect(a.layout.margin, 580, a.layout.margin+btnW, 740)
+
+		ink.DrawRect(a.wizard.opdsBtn, ink.Black)
+		ink.DrawRect(a.wizard.opdsBtn.Inset(2), ink.Black)
+		drawCenteredText(btnFont, a.wizard.opdsBtn, "Calibre-Web / OPDS", 44)
+
+		ink.DrawRect(a.wizard.webdavBtn, ink.Black)
+		ink.DrawRect(a.wizard.webdavBtn.Inset(2), ink.Black)
+		drawCenteredText(btnFont, a.wizard.webdavBtn, "WebDAV / Nextcloud", 44)
 
 	case stepURL, stepUser, stepPass:
 		title.SetActive(ink.Black)
@@ -387,7 +436,24 @@ func (a *app) drawWizard() {
 
 func (a *app) wizardKey(e ink.KeyEvent) bool {
 	switch a.wizard.step {
-	case stepWelcome, stepError:
+	case stepWelcome:
+		if e.Key == ink.KeyOk || e.Key == ink.KeyNext {
+			a.wizard.step = stepBackend
+			ink.Repaint()
+			return true
+		}
+	case stepBackend:
+		// Two options; OK defaults to OPDS (the more common setup), Next
+		// jumps to WebDAV. Users can also tap the button they want.
+		if e.Key == ink.KeyOk {
+			a.pickBackend(BackendOPDS)
+			return true
+		}
+		if e.Key == ink.KeyNext {
+			a.pickBackend(BackendWebDAV)
+			return true
+		}
+	case stepError:
 		if e.Key == ink.KeyOk || e.Key == ink.KeyNext {
 			a.startURLEntry()
 			return true
@@ -406,7 +472,20 @@ func (a *app) wizardPointer(e ink.PointerEvent) bool {
 		return false
 	}
 	switch a.wizard.step {
-	case stepWelcome, stepError:
+	case stepWelcome:
+		a.wizard.step = stepBackend
+		ink.Repaint()
+		return true
+	case stepBackend:
+		if e.Point.In(a.wizard.opdsBtn) {
+			a.pickBackend(BackendOPDS)
+			return true
+		}
+		if e.Point.In(a.wizard.webdavBtn) {
+			a.pickBackend(BackendWebDAV)
+			return true
+		}
+	case stepError:
 		a.startURLEntry()
 		return true
 	case stepURL, stepUser, stepPass:
@@ -416,6 +495,14 @@ func (a *app) wizardPointer(e ink.PointerEvent) bool {
 	return false
 }
 
+// pickBackend records the chosen backend on the wizard state and advances
+// to the URL entry step. OPDS suggests a Calibre-Web URL; WebDAV suggests
+// a Nextcloud-style URL to nudge the user into the right format.
+func (a *app) pickBackend(b string) {
+	a.wizard.backend = b
+	a.startURLEntry()
+}
+
 // reopenKeyboardForStep pops the right keyboard for the current wizard step.
 // Used when OpenKeyboard called directly from a keyboard handler races and
 // the chained keyboard does not actually appear, so the user taps the screen
@@ -423,7 +510,7 @@ func (a *app) wizardPointer(e ink.PointerEvent) bool {
 func (a *app) reopenKeyboardForStep() {
 	switch a.wizard.step {
 	case stepURL:
-		ink.OpenKeyboard("https://library.example.com:8083", 512)
+		ink.OpenKeyboard(a.urlHint(), 512)
 	case stepUser:
 		ink.OpenKeyboard("Username", 128)
 	case stepPass:
@@ -434,7 +521,14 @@ func (a *app) reopenKeyboardForStep() {
 func (a *app) startURLEntry() {
 	a.wizard.step = stepURL
 	a.wizard.err = nil
-	ink.OpenKeyboard("https://library.example.com:8083", 512)
+	ink.OpenKeyboard(a.urlHint(), 512)
+}
+
+func (a *app) urlHint() string {
+	if a.wizard.backend == BackendWebDAV {
+		return "https://nc.example.com/remote.php/dav/files/alice"
+	}
+	return "https://library.example.com:8083"
 }
 
 // onKeyboardInput routes based on current wizard step.
@@ -458,7 +552,17 @@ func (a *app) onKeyboardInput(text string) {
 
 // runProbe probes the server and transitions the UI on success or failure.
 func (a *app) runProbe() {
-	err := ProbeCWA(context.Background(), a.wizard.url, a.wizard.user, a.wizard.pass)
+	backend := a.wizard.backend
+	if backend == "" {
+		backend = BackendOPDS
+	}
+	var err error
+	switch backend {
+	case BackendWebDAV:
+		err = ProbeWebDAV(context.Background(), a.wizard.url, a.wizard.user, a.wizard.pass, "/")
+	default:
+		err = ProbeCWA(context.Background(), a.wizard.url, a.wizard.user, a.wizard.pass)
+	}
 	ink.HideHourglass()
 	if err != nil {
 		a.wizard.err = err
@@ -466,12 +570,20 @@ func (a *app) runProbe() {
 		ink.Repaint()
 		return
 	}
+	libraryDir := "CWA"
+	if backend == BackendWebDAV {
+		libraryDir = "WebDAV"
+	}
 	cfg := &Config{
+		Backend: backend,
 		Host:    a.wizard.url,
 		User:    a.wizard.user,
 		Pass:    a.wizard.pass,
-		Library: filepath.Join(ink.FlashDir, "Books", "CWA"),
+		Library: filepath.Join(ink.FlashDir, "Books", libraryDir),
 		StateDB: filepath.Join(ink.ConfigPath, "bookbeam.db"),
+	}
+	if backend == BackendWebDAV {
+		cfg.Path = "/"
 	}
 	if err := SaveConfig(a.cfgPath, cfg); err != nil {
 		a.wizard.err = err
@@ -737,7 +849,17 @@ func (a *app) runSync() {
 		a.sync.mu.Unlock()
 		a.refreshProgress()
 	}
-	dl, skip, fail, firstErr := Sync(a.client, a.store, a.cfg.Library, a.cfg.FilterHref, progress)
+	src, err := newSource(a.cfg)
+	if err != nil {
+		a.sync.mu.Lock()
+		a.sync.active = false
+		a.sync.err = err
+		a.sync.mu.Unlock()
+		a.refreshMainStats()
+		ink.Repaint()
+		return
+	}
+	dl, skip, fail, firstErr := Sync(src, a.store, a.cfg.Library, progress)
 
 	a.sync.mu.Lock()
 	a.sync.active = false
@@ -782,11 +904,20 @@ func (a *app) ensureConnected() error {
 		a.connState = connOffline
 		return fmt.Errorf("No Wi-Fi connection. Open Network to configure.")
 	}
-	if err := ProbeCWA(context.Background(), a.cfg.Host, a.cfg.User, a.cfg.Pass); err != nil {
+	var err error
+	switch a.cfg.Backend {
+	case BackendWebDAV:
+		err = ProbeWebDAV(context.Background(), a.cfg.Host, a.cfg.User, a.cfg.Pass, a.cfg.Path)
+	default:
+		err = ProbeCWA(context.Background(), a.cfg.Host, a.cfg.User, a.cfg.Pass)
+	}
+	if err != nil {
 		a.connState = connOffline
 		return err
 	}
-	_ = a.client.DetectType() // non-fatal: falls back to generic walk
+	if a.cfg.Backend != BackendWebDAV && a.client != nil {
+		_ = a.client.DetectType() // non-fatal: falls back to generic walk
+	}
 	a.connState = connOnline
 	return nil
 }
@@ -863,15 +994,24 @@ func (a *app) drawSettings() {
 	ink.DrawString(image.Point{X: 80, Y: 260}, "Server: "+a.cfg.Host)
 	ink.DrawString(image.Point{X: 80, Y: 320}, "User:   "+a.cfg.User)
 
-	// Filter status line above the buttons
+	// Filter / folder status line above the buttons
 	body.SetActive(ink.Black)
-	filterLabel := "Filter: All books"
-	if a.cfg.FilterHref != "" {
-		name := a.cfg.FilterName
-		if name == "" {
-			name = a.cfg.FilterHref
+	var filterLabel string
+	if a.cfg.Backend == BackendWebDAV {
+		p := a.cfg.Path
+		if p == "" {
+			p = "/"
 		}
-		filterLabel = "Filter: " + name
+		filterLabel = "Folder: " + p
+	} else {
+		filterLabel = "Filter: All books"
+		if a.cfg.FilterHref != "" {
+			name := a.cfg.FilterName
+			if name == "" {
+				name = a.cfg.FilterHref
+			}
+			filterLabel = "Filter: " + name
+		}
 	}
 	ink.DrawString(image.Point{X: a.layout.margin, Y: 400}, filterLabel)
 
@@ -881,10 +1021,14 @@ func (a *app) drawSettings() {
 	btnFont.SetActive(ink.Black)
 	drawCenteredText(btnFont, a.layout.changeButton, "Change server info", 44)
 
-	// Change-filter button
+	// Change-filter / folder button (label varies by backend).
+	filterBtnText := "Change sync filter"
+	if a.cfg.Backend == BackendWebDAV {
+		filterBtnText = "Change sync folder"
+	}
 	ink.DrawRect(a.layout.filterButton, ink.Black)
 	ink.DrawRect(a.layout.filterButton.Inset(2), ink.Black)
-	drawCenteredText(btnFont, a.layout.filterButton, "Change sync filter", 44)
+	drawCenteredText(btnFont, a.layout.filterButton, filterBtnText, 44)
 
 	// Footer: version + Back
 	small.SetActive(ink.Black)
@@ -900,6 +1044,14 @@ func (a *app) settingsKey(e ink.KeyEvent) bool {
 		a.startChangeInfo()
 		return true
 	}
+	if e.Key == ink.KeyNext {
+		if a.cfg.Backend == BackendWebDAV {
+			a.openDirPicker(a.cfg.Path)
+		} else {
+			a.openShelfPicker()
+		}
+		return true
+	}
 	return false
 }
 
@@ -913,7 +1065,11 @@ func (a *app) settingsPointer(e ink.PointerEvent) bool {
 		a.startChangeInfo()
 		return true
 	case p.In(a.layout.filterButton):
-		a.openShelfPicker()
+		if a.cfg.Backend == BackendWebDAV {
+			a.openDirPicker(a.cfg.Path)
+		} else {
+			a.openShelfPicker()
+		}
 		return true
 	case p.In(a.layout.backButton):
 		a.screen = screenMain
@@ -1100,6 +1256,231 @@ func (a *app) shelfPickerPointer(e ink.PointerEvent) bool {
 		}
 	}
 	return false
+}
+
+// ---------- Directory picker (WebDAV) ----------
+
+// openDirPicker transitions to the directory picker, seeding the current
+// path with startPath. If startPath is empty or invalid it falls back to
+// the server root. The subdirectory listing is fetched in a goroutine.
+func (a *app) openDirPicker(startPath string) {
+	p := startPath
+	if p == "" {
+		p = "/"
+	}
+	a.dirPicker.mu.Lock()
+	a.dirPicker.loading = true
+	a.dirPicker.path = p
+	a.dirPicker.dirs = nil
+	a.dirPicker.err = nil
+	a.dirPicker.rowRects = nil
+	a.dirPicker.mu.Unlock()
+	a.screen = screenDirPicker
+	ink.Repaint()
+	go a.fetchDirEntries(p)
+}
+
+// fetchDirEntries lists subdirectories of path on the configured WebDAV
+// server and stores the result for the picker to render.
+func (a *app) fetchDirEntries(p string) {
+	if err := a.ensureConnected(); err != nil {
+		a.dirPicker.mu.Lock()
+		a.dirPicker.loading = false
+		a.dirPicker.err = err
+		a.dirPicker.mu.Unlock()
+		ink.Repaint()
+		return
+	}
+	src := NewWebDAVSource(a.cfg.Host, a.cfg.User, a.cfg.Pass, p)
+	entries, err := src.Client.ReadDir(normaliseRoot(p))
+	var dirs []string
+	if err == nil {
+		for _, e := range entries {
+			if e.IsDir() {
+				dirs = append(dirs, e.Name())
+			}
+		}
+	}
+	a.dirPicker.mu.Lock()
+	a.dirPicker.loading = false
+	a.dirPicker.dirs = dirs
+	a.dirPicker.err = err
+	a.dirPicker.mu.Unlock()
+	ink.Repaint()
+}
+
+func (a *app) drawDirPicker() {
+	title := ink.OpenFont(ink.DefaultFontBold, 64, true)
+	defer title.Close()
+	title.SetActive(ink.Black)
+
+	body := ink.OpenFont(ink.DefaultFont, 32, true)
+	defer body.Close()
+	body.SetActive(ink.Black)
+
+	btnFont := ink.OpenFont(ink.DefaultFontBold, 44, true)
+	defer btnFont.Close()
+	btnFont.SetActive(ink.Black)
+
+	a.dirPicker.mu.Lock()
+	loading := a.dirPicker.loading
+	path := a.dirPicker.path
+	dirs := append([]string(nil), a.dirPicker.dirs...)
+	pickErr := a.dirPicker.err
+	a.dirPicker.mu.Unlock()
+
+	title.SetActive(ink.Black)
+	ink.DrawString(image.Point{X: a.layout.margin, Y: 140}, "Select folder")
+
+	body.SetActive(ink.Black)
+	ink.DrawString(image.Point{X: a.layout.margin, Y: 220}, "Currently in: "+truncate(path, 60))
+
+	if loading {
+		ink.DrawString(image.Point{X: a.layout.margin, Y: 300}, "Loading...")
+		ink.ShowHourglassAt(image.Point{X: a.layout.margin, Y: 360})
+	} else if pickErr != nil {
+		ink.DrawString(image.Point{X: a.layout.margin, Y: 300}, "Could not list folder:")
+		ink.DrawString(image.Point{X: a.layout.margin, Y: 350}, truncate(pickErr.Error(), 60))
+	} else {
+		rowH := 90
+		areaTop := a.layout.pickerAreaTop
+		// Reserve space at the bottom for the "Sync this folder" button.
+		selectBtnH := 100
+		areaBottom := a.layout.pickerAreaBottom - selectBtnH - 40
+
+		rows := make([]string, 0, 1+len(dirs))
+		atRoot := path == "/" || path == ""
+		if !atRoot {
+			rows = append(rows, ".. (up)")
+		}
+		for _, d := range dirs {
+			rows = append(rows, d+"/")
+		}
+
+		availableH := areaBottom - areaTop
+		maxRows := availableH / rowH
+		visible := len(rows)
+		if visible > maxRows {
+			visible = maxRows
+		}
+
+		rects := make([]image.Rectangle, 0, visible)
+		for i := 0; i < visible; i++ {
+			y1 := areaTop + i*rowH
+			rect := image.Rect(a.layout.margin, y1, a.layout.screen.X-a.layout.margin, y1+rowH-20)
+			rects = append(rects, rect)
+			ink.DrawRect(rect, ink.Black)
+			drawCenteredText(btnFont, rect, truncate(rows[i], 40), 44)
+		}
+		if len(rows) > visible {
+			ink.DrawString(
+				image.Point{X: a.layout.margin, Y: areaBottom - 30},
+				fmt.Sprintf("Showing %d of %d.", visible, len(rows)),
+			)
+		}
+
+		a.dirPicker.mu.Lock()
+		a.dirPicker.rowRects = rects
+		a.dirPicker.mu.Unlock()
+
+		// Select button sits just above the Back button.
+		selectY2 := a.layout.backButton.Min.Y - 40
+		selectY1 := selectY2 - selectBtnH
+		selectRect := image.Rect(a.layout.margin, selectY1, a.layout.screen.X-a.layout.margin, selectY2)
+		ink.DrawRect(selectRect, ink.Black)
+		ink.DrawRect(selectRect.Inset(2), ink.Black)
+		drawCenteredText(btnFont, selectRect, "Sync this folder", 44)
+		a.dirPicker.mu.Lock()
+		a.dirPicker.selectRect = selectRect
+		a.dirPicker.mu.Unlock()
+	}
+
+	ink.DrawRect(a.layout.backButton, ink.Black)
+	drawCenteredText(btnFont, a.layout.backButton, "Back", 44)
+}
+
+func (a *app) dirPickerKey(e ink.KeyEvent) bool {
+	if e.Key == ink.KeyOk {
+		a.dirPicker.mu.Lock()
+		path := a.dirPicker.path
+		a.dirPicker.mu.Unlock()
+		a.setPath(path)
+		a.screen = screenSettings
+		ink.Repaint()
+		return true
+	}
+	return false
+}
+
+func (a *app) dirPickerPointer(e ink.PointerEvent) bool {
+	if e.State != ink.PointerDown {
+		return false
+	}
+	if e.Point.In(a.layout.backButton) {
+		a.screen = screenSettings
+		ink.Repaint()
+		return true
+	}
+	a.dirPicker.mu.Lock()
+	rects := a.dirPicker.rowRects
+	dirs := a.dirPicker.dirs
+	path := a.dirPicker.path
+	selectRect := a.dirPicker.selectRect
+	a.dirPicker.mu.Unlock()
+
+	if e.Point.In(selectRect) {
+		a.setPath(path)
+		a.screen = screenSettings
+		ink.HideHourglass()
+		ink.Repaint()
+		return true
+	}
+
+	atRoot := path == "/" || path == ""
+	for i, r := range rects {
+		if !e.Point.In(r) {
+			continue
+		}
+		if !atRoot && i == 0 {
+			a.openDirPicker(parentDir(path))
+			return true
+		}
+		offset := 0
+		if !atRoot {
+			offset = 1
+		}
+		idx := i - offset
+		if idx >= 0 && idx < len(dirs) {
+			child := dirs[idx]
+			next := normaliseRoot(path) + "/" + child
+			a.openDirPicker(next)
+			return true
+		}
+	}
+	return false
+}
+
+// parentDir returns the parent of p using forward-slash semantics. Root
+// ("/") is its own parent so callers stop drilling up at the top.
+func parentDir(p string) string {
+	p = normaliseRoot(p)
+	if p == "/" {
+		return "/"
+	}
+	i := len(p) - 1
+	for i > 0 && p[i] != '/' {
+		i--
+	}
+	if i == 0 {
+		return "/"
+	}
+	return p[:i]
+}
+
+// setPath updates the in-memory config's WebDAV sync path and persists it.
+func (a *app) setPath(p string) {
+	a.cfg.Path = normaliseRoot(p)
+	_ = SaveConfig(a.cfgPath, a.cfg)
 }
 
 // setFilter updates the in-memory config and persists it.
