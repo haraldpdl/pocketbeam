@@ -93,9 +93,11 @@ func CheckLatest(ctx context.Context, endpoint, currentVersion string) (newer bo
 
 // Download streams rel.BinaryURL into destPath, verifying the SHA-256
 // as it goes. progress (if non-nil) is invoked periodically with the
-// cumulative bytes downloaded. On failure the incomplete file is
-// removed and the stored hash mismatch is reported to the caller.
-func Download(ctx context.Context, rel Release, destPath string, progress func(written int64)) error {
+// cumulative bytes downloaded and the total from Content-Length (-1
+// when the server didn't announce one, so the UI can fall back to a
+// byte-counter). On failure the incomplete file is removed and the
+// hash mismatch is reported to the caller.
+func Download(ctx context.Context, rel Release, destPath string, progress func(written, total int64)) error {
 	if rel.BinaryURL == "" {
 		return errors.New("release has no binary URL")
 	}
@@ -115,13 +117,14 @@ func Download(ctx context.Context, rel Release, destPath string, progress func(w
 	if resp.StatusCode != 200 {
 		return fmt.Errorf("GET %s: %s", rel.BinaryURL, resp.Status)
 	}
+	total := resp.ContentLength
 	f, err := os.Create(destPath)
 	if err != nil {
 		return err
 	}
 	hasher := sha256.New()
 	w := io.MultiWriter(f, hasher)
-	reader := &countingReader{r: resp.Body, cb: progress}
+	reader := &countingReader{r: resp.Body, total: total, cb: progress}
 	if _, err := io.Copy(w, reader); err != nil {
 		f.Close()
 		os.Remove(destPath)
@@ -162,19 +165,21 @@ func Install(stagedPath, targetPath string) error {
 }
 
 // countingReader wraps an io.Reader and invokes cb with the running
-// total after each read. Gives the UI something to display during a
-// download.
+// total + the announced Content-Length (or -1 when unknown) after each
+// read. Gives the UI enough information to show a percentage bar when
+// the server advertised a size and a raw byte counter otherwise.
 type countingReader struct {
 	r     io.Reader
 	n     int64
-	cb    func(int64)
+	total int64
+	cb    func(written, total int64)
 }
 
 func (c *countingReader) Read(p []byte) (int, error) {
 	n, err := c.r.Read(p)
 	c.n += int64(n)
 	if c.cb != nil && n > 0 {
-		c.cb(c.n)
+		c.cb(c.n, c.total)
 	}
 	return n, err
 }

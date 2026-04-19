@@ -121,6 +121,7 @@ type updateState struct {
 	checkErr     error
 	downloading  bool
 	downloaded   int64
+	total        int64 // -1 until the HTTP response's Content-Length is known
 	installErr   error
 	installed    bool // true once the new binary has been written to disk
 	installBtn   image.Rectangle
@@ -2685,6 +2686,7 @@ func (a *app) drawUpdate() {
 	available := a.update.available
 	downloading := a.update.downloading
 	downloaded := a.update.downloaded
+	total := a.update.total
 	installErr := a.update.installErr
 	installed := a.update.installed
 	a.update.mu.Unlock()
@@ -2701,8 +2703,33 @@ func (a *app) drawUpdate() {
 		ink.DrawString(image.Point{X: a.layout.margin, Y: y}, "Install failed:")
 		ink.DrawString(image.Point{X: a.layout.margin, Y: y + 50}, truncate(installErr.Error(), 60))
 	case downloading:
-		ink.DrawString(image.Point{X: a.layout.margin, Y: y}, fmt.Sprintf("Downloading %s...", rel.Version))
-		ink.DrawString(image.Point{X: a.layout.margin, Y: y + 50}, fmt.Sprintf("%d KB received", downloaded/1024))
+		var line string
+		if total > 0 {
+			pct := int(100 * downloaded / total)
+			if pct > 100 {
+				pct = 100
+			}
+			line = fmt.Sprintf("Downloading %s  %d%%  (%d / %d KB)", rel.Version, pct, downloaded/1024, total/1024)
+		} else {
+			line = fmt.Sprintf("Downloading %s  (%d KB received)", rel.Version, downloaded/1024)
+		}
+		ink.DrawString(image.Point{X: a.layout.margin, Y: y}, line)
+		// Progress bar drawn below the status line when a total is known.
+		if total > 0 {
+			barY1 := y + 40
+			barY2 := barY1 + 40
+			barX1 := a.layout.margin
+			barX2 := a.layout.screen.X - a.layout.margin
+			bar := image.Rect(barX1, barY1, barX2, barY2)
+			ink.DrawRect(bar, ink.Black)
+			fillW := int(int64(bar.Dx()-6) * downloaded / total)
+			if fillW > bar.Dx()-6 {
+				fillW = bar.Dx() - 6
+			}
+			if fillW > 0 {
+				ink.FillArea(image.Rect(barX1+3, barY1+3, barX1+3+fillW, barY2-3), ink.DarkGray)
+			}
+		}
 	case checking:
 		ink.DrawString(image.Point{X: a.layout.margin, Y: y}, "Checking for updates...")
 	case checkErr != nil:
@@ -2836,9 +2863,10 @@ func (a *app) runUpdateInstall() {
 	staged := exe + ".new"
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
-	err = Download(ctx, rel, staged, func(n int64) {
+	err = Download(ctx, rel, staged, func(n, total int64) {
 		a.update.mu.Lock()
 		a.update.downloaded = n
+		a.update.total = total
 		a.update.mu.Unlock()
 		ink.Repaint()
 	})

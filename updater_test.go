@@ -107,12 +107,18 @@ func TestDownload_VerifiesSHA(t *testing.T) {
 
 	dir := t.TempDir()
 	staged := filepath.Join(dir, "pocketbeam.app.new")
-	var lastProgress int64
-	if err := Download(context.Background(), rel, staged, func(n int64) { lastProgress = n }); err != nil {
+	var lastWritten, lastTotal int64
+	if err := Download(context.Background(), rel, staged, func(w, tot int64) {
+		lastWritten = w
+		lastTotal = tot
+	}); err != nil {
 		t.Fatalf("Download: %v", err)
 	}
-	if lastProgress != int64(len(body)) {
-		t.Errorf("progress callback saw %d, want %d", lastProgress, len(body))
+	if lastWritten != int64(len(body)) {
+		t.Errorf("progress written = %d, want %d", lastWritten, len(body))
+	}
+	if lastTotal != int64(len(body)) {
+		t.Errorf("progress total = %d, want %d (httptest advertises Content-Length)", lastTotal, len(body))
 	}
 	got, err := os.ReadFile(staged)
 	if err != nil {
