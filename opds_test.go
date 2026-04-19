@@ -157,6 +157,55 @@ func TestFetchLevel_ParsesOPDSCount(t *testing.T) {
 	}
 }
 
+func TestLevelBookCount(t *testing.T) {
+	cases := []struct {
+		name  string
+		lvl   OPDSLevel
+		wantN int
+		wantA bool
+	}{
+		{
+			"leaf_with_exact_books",
+			OPDSLevel{BookCount: 12},
+			12, false,
+		},
+		{
+			"shelfindex_style_all_known",
+			OPDSLevel{
+				BookCount: 0,
+				Subsections: []FilterOption{
+					{Name: "to-pocketbook", Count: 2, CountKnown: true},
+					{Name: "Fantasy", Count: 40, CountKnown: true},
+				},
+			},
+			42, true,
+		},
+		{
+			"any_unknown_falls_back",
+			OPDSLevel{
+				Subsections: []FilterOption{
+					{Name: "Authors", Count: 0, CountKnown: false},
+					{Name: "Tags", Count: 10, CountKnown: true},
+				},
+			},
+			0, false,
+		},
+		{
+			"empty_level",
+			OPDSLevel{},
+			0, false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			n, a := levelBookCount(tc.lvl)
+			if n != tc.wantN || a != tc.wantA {
+				t.Errorf("levelBookCount = (%d, %v), want (%d, %v)", n, a, tc.wantN, tc.wantA)
+			}
+		})
+	}
+}
+
 func TestFetchLevel_EmptyHrefDefaultsToRoot(t *testing.T) {
 	var gotPath string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -235,6 +235,30 @@ type OPDSLevel struct {
 	BookCount   int // total acquisition entries seen across all pages
 }
 
+// levelBookCount returns a best-effort book total for a level. When the
+// feed itself has acquisition entries, the exact BookCount is used.
+// Otherwise, if every visible subsection advertises an opds:count, the
+// sum of those counts is returned flagged as approximate (it can
+// double-count books shared across children, e.g. a book in two
+// shelves). When neither is available the caller should fall back to
+// the plain "Sync this level" label.
+func levelBookCount(lvl OPDSLevel) (n int, approximate bool) {
+	if lvl.BookCount > 0 {
+		return lvl.BookCount, false
+	}
+	if len(lvl.Subsections) == 0 {
+		return 0, false
+	}
+	sum := 0
+	for _, sub := range lvl.Subsections {
+		if !sub.CountKnown {
+			return 0, false
+		}
+		sum += sub.Count
+	}
+	return sum, true
+}
+
 // FetchLevel retrieves the feed at href (walking pagination) and splits
 // its entries into drill-in subsections and acquisition entries. An empty
 // href starts at "/opds".
