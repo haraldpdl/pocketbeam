@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	ink "github.com/dennwc/inkview"
@@ -2683,7 +2684,7 @@ func (a *app) drawUpdate() {
 	switch {
 	case installed:
 		ink.DrawString(image.Point{X: a.layout.margin, Y: y}, "Update installed: "+rel.Version)
-		ink.DrawString(image.Point{X: a.layout.margin, Y: y + 50}, "Quit and relaunch pocketbeam.")
+		ink.DrawString(image.Point{X: a.layout.margin, Y: y + 50}, "Relaunching...")
 	case installErr != nil:
 		ink.DrawString(image.Point{X: a.layout.margin, Y: y}, "Install failed:")
 		ink.DrawString(image.Point{X: a.layout.margin, Y: y + 50}, truncate(installErr.Error(), 60))
@@ -2841,6 +2842,40 @@ func (a *app) runUpdateInstall() {
 	a.update.downloading = false
 	a.update.installed = true
 	a.update.available = false
+	a.update.mu.Unlock()
+	ink.Repaint()
+
+	// Give the user a couple of seconds to read the success line, then
+	// replace the running process with the freshly-installed binary.
+	// syscall.Exec inherits our stdio + env and reads the new image
+	// from disk (the inode the renamed file points at), so the user
+	// sees the main screen again without leaving the Applications menu
+	// themselves. Any InkView cleanup that ink.Run would normally do on
+	// exit is skipped here, but the display subsystem is re-opened by
+	// the new process, so the user doesn't notice.
+	time.Sleep(2 * time.Second)
+	a.relaunch(exe)
+}
+
+// relaunch execs the binary at path, replacing the current process.
+// On success the call doesn't return; on failure the update screen
+// shows a manual-relaunch hint so the user can exit and tap the app
+// icon themselves.
+func (a *app) relaunch(path string) {
+	if a.store != nil {
+		_ = a.store.Close()
+	}
+	if a.netStop != nil {
+		a.netStop()
+	}
+	args := []string{path}
+	if len(os.Args) > 1 {
+		args = append(args, os.Args[1:]...)
+	}
+	err := syscall.Exec(path, args, os.Environ())
+	// Only reached when exec fails (rare; kernel block, missing perms).
+	a.update.mu.Lock()
+	a.update.installErr = fmt.Errorf("auto-relaunch failed: %w. Quit pocketbeam and reopen it from the Applications menu to finish the update.", err)
 	a.update.mu.Unlock()
 	ink.Repaint()
 }
