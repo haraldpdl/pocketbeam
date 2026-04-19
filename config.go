@@ -22,6 +22,12 @@ const (
 // the wizard creates.
 const defaultProfileName = "default"
 
+// defaultUpdateURL is the release endpoint queried when check_updates is
+// on and the config hasn't overridden it. Points at the Gitea instance
+// during dev; the public release will flip this to a project-hosted
+// JSON at build time via ldflags.
+const defaultUpdateURL = "http://gitea.example.internal:3000/api/v1/repos/haraldpdl/pocketbeam/releases/latest"
+
 // Config represents the currently-active profile's fields, plus its name.
 // The on-disk file can hold multiple profiles as [sections]; LoadConfig
 // returns the active one and the on-disk representation is managed
@@ -38,6 +44,8 @@ type Config struct {
 	FilterNames   []string // display labels parallel to FilterHrefs (picker sets these); surplus or missing entries are tolerated.
 	Path          string   // WebDAV only: absolute directory on the server to mirror, e.g. "/Books/Fiction"
 	DeleteMissing bool     // when true, sync removes local books absent from the current remote listing (opt-in; prompts for confirmation on device / stdin in CLI)
+	CheckUpdates  bool     // when true, the app polls UpdateURL on startup (and on manual request) for a newer release
+	UpdateURL     string   // release endpoint (Gitea / GitHub releases API). Empty falls back to defaultUpdateURL.
 }
 
 // FilterHref returns the first filter URL, or "" when no filter is set.
@@ -47,6 +55,15 @@ func (c *Config) FilterHref() string {
 		return ""
 	}
 	return c.FilterHrefs[0]
+}
+
+// EffectiveUpdateURL returns the release endpoint to query, falling
+// back to the compiled-in default when the config didn't override it.
+func (c *Config) EffectiveUpdateURL() string {
+	if c.UpdateURL != "" {
+		return c.UpdateURL
+	}
+	return defaultUpdateURL
 }
 
 // FilterLabel returns a display-friendly description of the current
@@ -71,14 +88,16 @@ func (c *Config) FilterLabel() string {
 }
 
 // fileDoc is the parsed in-memory representation of the whole config
-// file. Top-level keys (active, state_db) are shared across profiles;
-// each [name] section carries one profile's fields as a flat key=value
-// block.
+// file. Top-level keys (active, state_db, check_updates, update_url)
+// are shared across profiles; each [name] section carries one
+// profile's fields as a flat key=value block.
 type fileDoc struct {
-	active   string
-	stateDB  string
-	order    []string            // section names in file order, for stable serialisation
-	sections map[string][]kvLine // per-section ordered key/value pairs
+	active       string
+	stateDB      string
+	checkUpdates bool
+	updateURL    string
+	order        []string            // section names in file order, for stable serialisation
+	sections     map[string][]kvLine // per-section ordered key/value pairs
 }
 
 // kvLine preserves insertion order when we rewrite a section so the file
@@ -108,7 +127,12 @@ func LoadConfig(path string) (*Config, error) {
 	if !ok {
 		return nil, fmt.Errorf("%s: active profile %q has no section", path, active)
 	}
-	c := &Config{Profile: active, StateDB: doc.stateDB}
+	c := &Config{
+		Profile:      active,
+		StateDB:      doc.stateDB,
+		CheckUpdates: doc.checkUpdates,
+		UpdateURL:    doc.updateURL,
+	}
 	if err := applyProfile(c, path, rows); err != nil {
 		return nil, err
 	}
@@ -202,6 +226,10 @@ func SaveConfig(path string, c *Config) error {
 	if c.StateDB != "" {
 		doc.stateDB = c.StateDB
 	}
+	doc.checkUpdates = c.CheckUpdates
+	if c.UpdateURL != "" {
+		doc.updateURL = c.UpdateURL
+	}
 	if doc.active == "" {
 		doc.active = profile
 	}
@@ -253,6 +281,10 @@ func parseDoc(path string) (*fileDoc, error) {
 				doc.active = val
 			case "state_db":
 				doc.stateDB = val
+			case "check_updates":
+				doc.checkUpdates = parseBool(val)
+			case "update_url":
+				doc.updateURL = val
 			default:
 				// Legacy flat-format key; route it to the implicit
 				// default profile so pre-profile configs still load.
@@ -287,6 +319,12 @@ func writeDoc(path string, doc *fileDoc) error {
 	}
 	if doc.stateDB != "" {
 		fmt.Fprintf(&b, "state_db = %s\n", doc.stateDB)
+	}
+	if doc.checkUpdates {
+		fmt.Fprintf(&b, "check_updates = on\n")
+	}
+	if doc.updateURL != "" {
+		fmt.Fprintf(&b, "update_url = %s\n", doc.updateURL)
 	}
 	b.WriteString("\n")
 	for _, name := range doc.order {

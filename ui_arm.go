@@ -24,6 +24,7 @@ const (
 	screenDirPicker
 	screenDeleteConfirm
 	screenProfileList
+	screenUpdate
 )
 
 // wizardStep tracks where the user is in the first-run flow.
@@ -105,6 +106,25 @@ type feedPickerState struct {
 	// picker session; seeded from cfg.FilterHrefs on open, written back
 	// to the config when the user taps Done.
 	selected []FilterOption
+}
+
+// updateState holds the state of the self-update flow: a pending
+// release (if a check found one newer than the running version), the
+// active download's progress, and any terminal message shown once the
+// install succeeds or fails.
+type updateState struct {
+	mu           sync.Mutex
+	checking     bool
+	available    bool
+	release      Release
+	checkErr     error
+	downloading  bool
+	downloaded   int64
+	installErr   error
+	installed    bool // true once the new binary has been written to disk
+	installBtn   image.Rectangle
+	checkBtn     image.Rectangle
+	backBtn      image.Rectangle
 }
 
 // profileListState holds the snapshot shown on the profile-list screen
@@ -313,13 +333,15 @@ type app struct {
 	dirPicker   dirPickerState
 	delConfirm  deleteConfirmState
 	profileList profileListState
+	update      updateState
 	lastSync    SyncSummary
 	hasLastSync bool
 	bookCount   int
-	netStop     func()
-	layout      layout
-	connState   connectivity
-	lastTap     time.Time
+	netStop           func()
+	layout            layout
+	connState         connectivity
+	lastTap           time.Time
+	updateFooterRect  image.Rectangle
 }
 
 // acceptTap returns true if the event should be treated as a tap. Accepts
@@ -411,6 +433,9 @@ func (a *app) Init() error {
 				a.client = client
 				a.store = store
 				a.refreshMainStats()
+				if cfg.CheckUpdates {
+					go a.backgroundUpdateCheck()
+				}
 				a.screen = screenMain
 				return nil
 			}
@@ -448,6 +473,8 @@ func (a *app) Draw() {
 		a.drawDeleteConfirm()
 	case screenProfileList:
 		a.drawProfileList()
+	case screenUpdate:
+		a.drawUpdate()
 	}
 	ink.FullUpdate()
 }
@@ -461,7 +488,7 @@ func (a *app) Key(e ink.KeyEvent) bool {
 			a.screen = screenMain
 			ink.Repaint()
 			return true
-		case screenShelfPicker, screenDirPicker, screenProfileList:
+		case screenShelfPicker, screenDirPicker, screenProfileList, screenUpdate:
 			a.screen = screenSettings
 			ink.Repaint()
 			return true
@@ -490,6 +517,8 @@ func (a *app) Key(e ink.KeyEvent) bool {
 		return a.deleteConfirmKey(e)
 	case screenProfileList:
 		return a.profileListKey(e)
+	case screenUpdate:
+		return a.updateKey(e)
 	}
 	return false
 }
@@ -510,6 +539,8 @@ func (a *app) Pointer(e ink.PointerEvent) bool {
 		return a.deleteConfirmPointer(e)
 	case screenProfileList:
 		return a.profileListPointer(e)
+	case screenUpdate:
+		return a.updatePointer(e)
 	}
 	return false
 }
@@ -809,13 +840,14 @@ func (a *app) runProbe() {
 		profile = defaultProfileName
 	}
 	cfg := &Config{
-		Profile: profile,
-		Backend: backend,
-		Host:    a.wizard.url,
-		User:    a.wizard.user,
-		Pass:    a.wizard.pass,
-		Library: filepath.Join(ink.FlashDir, "Books", libraryDir),
-		StateDB: filepath.Join(ink.ConfigPath, "pocketbeam.db"),
+		Profile:      profile,
+		Backend:      backend,
+		Host:         a.wizard.url,
+		User:         a.wizard.user,
+		Pass:         a.wizard.pass,
+		Library:      filepath.Join(ink.FlashDir, "Books", libraryDir),
+		StateDB:      filepath.Join(ink.ConfigPath, "pocketbeam.db"),
+		CheckUpdates: true,
 	}
 	if backend == BackendWebDAV {
 		cfg.Path = "/"
@@ -909,6 +941,18 @@ func (a *app) drawMain() {
 		}
 	} else {
 		ink.DrawString(image.Point{X: a.layout.margin, Y: 360}, "Not yet synced. Tap Sync Now to begin.")
+	}
+
+	// Update banner: drawn below the last-sync block when a newer
+	// release has been detected. Non-clickable on the main screen to
+	// keep the layout stable; the user opens Settings to install.
+	a.update.mu.Lock()
+	updateAvail := a.update.available
+	updateVer := a.update.release.Version
+	a.update.mu.Unlock()
+	if updateAvail && updateVer != "" {
+		ink.DrawString(image.Point{X: a.layout.margin, Y: 495},
+			"Update available: "+updateVer+"  (Settings → Check for updates)")
 	}
 
 	// Sync Now / Cancel button. The rect is the same either way so the
@@ -1327,9 +1371,21 @@ func (a *app) drawSettings() {
 	ink.DrawRect(a.layout.profilesButton, ink.Black)
 	drawCenteredText(btnFont, a.layout.profilesButton, profileBtnText, a.layout.fpx(44))
 
-	// Footer: version + Back
+	// Footer: version line doubles as "Check for updates". The text
+	// tells the user the current version; tapping it opens the update
+	// screen. A pending update is advertised here in brackets so the
+	// tap target is obvious.
 	small.SetActive(ink.Black)
-	ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.backButton.Min.Y - 40}, "pocketbeam "+version)
+	versionLine := "pocketbeam " + version + "  (tap for updates)"
+	a.update.mu.Lock()
+	if a.update.available && a.update.release.Version != "" {
+		versionLine = "pocketbeam " + version + "  →  " + a.update.release.Version + " available (tap to install)"
+	}
+	a.update.mu.Unlock()
+	versionY := a.layout.backButton.Min.Y - 40
+	ink.DrawString(image.Point{X: a.layout.margin, Y: versionY}, versionLine)
+	// Remember the tappable strip for settingsPointer.
+	a.updateFooterRect = image.Rect(a.layout.margin, versionY-20, a.layout.screen.X-a.layout.margin, versionY+30)
 
 	ink.DrawRect(a.layout.backButton, ink.Black)
 	btnFont.SetActive(ink.Black)
@@ -1375,6 +1431,9 @@ func (a *app) settingsPointer(e ink.PointerEvent) bool {
 		return true
 	case p.In(a.layout.profilesButton):
 		a.openProfileList()
+		return true
+	case p.In(a.updateFooterRect):
+		a.openUpdateScreen()
 		return true
 	case p.In(a.layout.backButton):
 		a.screen = screenMain
@@ -2501,4 +2560,257 @@ func (a *app) startAddProfile() {
 	a.wizard = wizardState{step: stepProfileName, addProfile: true}
 	a.screen = screenFirstRun
 	ink.OpenKeyboard("new-profile-name", 40)
+}
+
+// ---------- Self-update ----------
+
+// updateCheckMinInterval bounds how often the background check hits the
+// release endpoint. Gitea does not rate-limit, but a daily cadence is a
+// better match for how often the user is likely to see a new release.
+const updateCheckMinInterval = 24 * time.Hour
+
+// metaLastUpdateCheck is the store meta key holding the RFC3339
+// timestamp of the most recent successful or failed update check.
+const metaLastUpdateCheck = "last_update_check"
+
+// backgroundUpdateCheck runs at startup when check_updates is on and
+// more than updateCheckMinInterval has passed since the previous check.
+// A newer release is recorded on a.update; the main screen shows a
+// one-line banner when that's set. Failures are swallowed so an
+// offline device never reports a "could not check" banner to the user.
+func (a *app) backgroundUpdateCheck() {
+	if a.store == nil {
+		return
+	}
+	if last, ok, _ := a.store.GetMeta(metaLastUpdateCheck); ok {
+		if t, err := time.Parse(time.RFC3339, last); err == nil {
+			if time.Since(t) < updateCheckMinInterval {
+				return
+			}
+		}
+	}
+	a.runUpdateCheck()
+}
+
+// runUpdateCheck performs one check against the configured endpoint.
+// Safe to call from any goroutine; repaint is triggered when state
+// changes so the main-screen banner appears.
+func (a *app) runUpdateCheck() {
+	a.update.mu.Lock()
+	if a.update.checking {
+		a.update.mu.Unlock()
+		return
+	}
+	a.update.checking = true
+	a.update.checkErr = nil
+	a.update.mu.Unlock()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	newer, rel, err := CheckLatest(ctx, a.cfg.EffectiveUpdateURL(), version)
+
+	a.update.mu.Lock()
+	a.update.checking = false
+	a.update.release = rel
+	a.update.available = newer
+	a.update.checkErr = err
+	a.update.mu.Unlock()
+	if a.store != nil {
+		_ = a.store.SetMeta(metaLastUpdateCheck, time.Now().Format(time.RFC3339))
+	}
+	ink.Repaint()
+}
+
+// openUpdateScreen transitions to the dedicated update screen. If no
+// release is loaded yet (user tapped "Check for updates" from an idle
+// state), trigger a fresh check in the background.
+func (a *app) openUpdateScreen() {
+	a.screen = screenUpdate
+	ink.Repaint()
+	a.update.mu.Lock()
+	haveRelease := a.update.release.Version != ""
+	a.update.mu.Unlock()
+	if !haveRelease {
+		go a.runUpdateCheck()
+	}
+}
+
+func (a *app) drawUpdate() {
+	title := ink.OpenFont(ink.DefaultFontBold, a.layout.fpx(64), true)
+	defer title.Close()
+	title.SetActive(ink.Black)
+	ink.DrawString(image.Point{X: a.layout.margin, Y: 140}, "Updates")
+
+	body := ink.OpenFont(ink.DefaultFont, a.layout.fpx(32), true)
+	defer body.Close()
+	body.SetActive(ink.Black)
+
+	btnFont := ink.OpenFont(ink.DefaultFontBold, a.layout.fpx(44), true)
+	defer btnFont.Close()
+	btnFont.SetActive(ink.Black)
+
+	a.update.mu.Lock()
+	checking := a.update.checking
+	rel := a.update.release
+	checkErr := a.update.checkErr
+	available := a.update.available
+	downloading := a.update.downloading
+	downloaded := a.update.downloaded
+	installErr := a.update.installErr
+	installed := a.update.installed
+	a.update.mu.Unlock()
+
+	body.SetActive(ink.Black)
+	ink.DrawString(image.Point{X: a.layout.margin, Y: 220}, "Installed: "+version)
+
+	y := 280
+	switch {
+	case installed:
+		ink.DrawString(image.Point{X: a.layout.margin, Y: y}, "Update installed: "+rel.Version)
+		ink.DrawString(image.Point{X: a.layout.margin, Y: y + 50}, "Quit and relaunch pocketbeam.")
+	case installErr != nil:
+		ink.DrawString(image.Point{X: a.layout.margin, Y: y}, "Install failed:")
+		ink.DrawString(image.Point{X: a.layout.margin, Y: y + 50}, truncate(installErr.Error(), 60))
+	case downloading:
+		ink.DrawString(image.Point{X: a.layout.margin, Y: y}, fmt.Sprintf("Downloading %s...", rel.Version))
+		ink.DrawString(image.Point{X: a.layout.margin, Y: y + 50}, fmt.Sprintf("%d KB received", downloaded/1024))
+	case checking:
+		ink.DrawString(image.Point{X: a.layout.margin, Y: y}, "Checking for updates...")
+	case checkErr != nil:
+		ink.DrawString(image.Point{X: a.layout.margin, Y: y}, "Could not check:")
+		ink.DrawString(image.Point{X: a.layout.margin, Y: y + 50}, truncate(checkErr.Error(), 60))
+	case available:
+		ink.DrawString(image.Point{X: a.layout.margin, Y: y}, "New version: "+rel.Version)
+		if rel.SHA256 != "" {
+			ink.DrawString(image.Point{X: a.layout.margin, Y: y + 50}, "sha256: "+rel.SHA256[:12]+"...")
+		}
+	default:
+		ink.DrawString(image.Point{X: a.layout.margin, Y: y}, "You are up to date.")
+	}
+
+	// Action buttons. "Install now" is shown only when a newer release
+	// is ready and we're not mid-install; otherwise the user gets the
+	// manual "Check for updates" button for a fresh poll.
+	btnH := 100
+	contentW := a.layout.screen.X - 2*a.layout.margin
+	btnY2 := a.layout.backButton.Min.Y - 40
+	btnY1 := btnY2 - btnH
+	primary := image.Rect(a.layout.margin, btnY1, a.layout.margin+contentW, btnY2)
+
+	var installBtn, checkBtn image.Rectangle
+	if available && !installed && !downloading {
+		installBtn = primary
+		ink.DrawRect(installBtn, ink.Black)
+		ink.DrawRect(installBtn.Inset(2), ink.Black)
+		drawCenteredText(btnFont, installBtn, "Install now", a.layout.fpx(44))
+	} else if !downloading && !installed {
+		checkBtn = primary
+		ink.DrawRect(checkBtn, ink.Black)
+		drawCenteredText(btnFont, checkBtn, "Check for updates", a.layout.fpx(44))
+	}
+	a.update.mu.Lock()
+	a.update.installBtn = installBtn
+	a.update.checkBtn = checkBtn
+	a.update.backBtn = a.layout.backButton
+	a.update.mu.Unlock()
+
+	ink.DrawRect(a.layout.backButton, ink.Black)
+	drawCenteredText(btnFont, a.layout.backButton, "Back", a.layout.fpx(44))
+}
+
+func (a *app) updateKey(e ink.KeyEvent) bool {
+	if e.Key == ink.KeyBack {
+		a.screen = screenSettings
+		ink.Repaint()
+		return true
+	}
+	if e.Key == ink.KeyOk {
+		a.update.mu.Lock()
+		hasInstall := !a.update.installBtn.Empty()
+		a.update.mu.Unlock()
+		if hasInstall {
+			go a.runUpdateInstall()
+		} else {
+			go a.runUpdateCheck()
+		}
+		return true
+	}
+	return false
+}
+
+func (a *app) updatePointer(e ink.PointerEvent) bool {
+	if e.State != ink.PointerDown {
+		return false
+	}
+	a.update.mu.Lock()
+	installBtn := a.update.installBtn
+	checkBtn := a.update.checkBtn
+	backBtn := a.update.backBtn
+	a.update.mu.Unlock()
+	if e.Point.In(backBtn) {
+		a.screen = screenSettings
+		ink.Repaint()
+		return true
+	}
+	if !installBtn.Empty() && e.Point.In(installBtn) {
+		go a.runUpdateInstall()
+		return true
+	}
+	if !checkBtn.Empty() && e.Point.In(checkBtn) {
+		go a.runUpdateCheck()
+		return true
+	}
+	return false
+}
+
+// runUpdateInstall downloads the pending release to a .new file next
+// to the running binary, verifies the SHA, and renames it into place.
+// The user relaunches to pick up the new version; we do not call
+// ink.Exit() automatically so they can read the success message.
+func (a *app) runUpdateInstall() {
+	a.update.mu.Lock()
+	rel := a.update.release
+	a.update.downloading = true
+	a.update.downloaded = 0
+	a.update.installErr = nil
+	a.update.installed = false
+	a.update.mu.Unlock()
+	ink.Repaint()
+
+	exe, err := os.Executable()
+	if err != nil {
+		a.failUpdate(fmt.Errorf("locate running binary: %w", err))
+		return
+	}
+	staged := exe + ".new"
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
+	err = Download(ctx, rel, staged, func(n int64) {
+		a.update.mu.Lock()
+		a.update.downloaded = n
+		a.update.mu.Unlock()
+		ink.Repaint()
+	})
+	if err != nil {
+		a.failUpdate(fmt.Errorf("download: %w", err))
+		return
+	}
+	if err := Install(staged, exe); err != nil {
+		a.failUpdate(fmt.Errorf("install: %w", err))
+		return
+	}
+	a.update.mu.Lock()
+	a.update.downloading = false
+	a.update.installed = true
+	a.update.available = false
+	a.update.mu.Unlock()
+	ink.Repaint()
+}
+
+func (a *app) failUpdate(err error) {
+	a.update.mu.Lock()
+	a.update.downloading = false
+	a.update.installErr = err
+	a.update.mu.Unlock()
+	ink.Repaint()
 }
