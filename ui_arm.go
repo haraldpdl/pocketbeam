@@ -391,36 +391,6 @@ func newApp() *app {
 	}
 }
 
-// migrateLegacyConfig renames pre-rename files into place for existing
-// installs and rewrites the cfg's state_db key so it points at the
-// renamed database. Runs before LoadConfig so the upgrade is invisible to
-// the rest of the app.
-// TODO: remove before public release.
-func migrateLegacyConfig(cfgPath string) {
-	dir := filepath.Dir(cfgPath)
-	pairs := [][2]string{
-		{filepath.Join(dir, "bookbeam.cfg"), cfgPath},
-		{filepath.Join(dir, "bookbeam.db"), filepath.Join(dir, "pocketbeam.db")},
-	}
-	for _, p := range pairs {
-		oldP, newP := p[0], p[1]
-		if _, err := os.Stat(newP); err == nil {
-			continue
-		}
-		if _, err := os.Stat(oldP); err != nil {
-			continue
-		}
-		_ = os.Rename(oldP, newP)
-	}
-	// Rewrite state_db inside the cfg if it still points at the old
-	// filename. os.ReadFile + os.WriteFile is fine for a tiny config.
-	if data, err := os.ReadFile(cfgPath); err == nil {
-		if patched := strings.ReplaceAll(string(data), "bookbeam.db", "pocketbeam.db"); patched != string(data) {
-			_ = os.WriteFile(cfgPath, []byte(patched), 0o600)
-		}
-	}
-}
-
 // Init is called once when the app launches.
 func (a *app) Init() error {
 	_ = os.Chdir(filepath.Dir(os.Args[0]))
@@ -457,11 +427,6 @@ func (a *app) Init() error {
 	}
 
 	ink.SetKeyboardHandler(func(s string) { a.onKeyboardInput(s) })
-
-	// TODO: remove before public release. One-shot migration for the
-	// bookbeam → pocketbeam rename: rename the old config and state DB
-	// into place so existing installs upgrade seamlessly.
-	migrateLegacyConfig(a.cfgPath)
 
 	if cfg, err := LoadConfig(a.cfgPath); err == nil {
 		if client, err := NewClient(cfg.Host, cfg.User, cfg.Pass); err == nil {
