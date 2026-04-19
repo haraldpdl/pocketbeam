@@ -2413,20 +2413,25 @@ func (a *app) drawProfileList() {
 		return
 	}
 
-	// Rows: one per profile. Active profile gets a leading marker.
+	// Rows: one per profile. The active profile is a state indicator
+	// rather than a tappable action, so it's drawn as plain text
+	// without a button border. Switch-to targets (non-active rows) keep
+	// the border to read as interactive.
 	rowH := 90
 	areaTop := a.layout.pickerAreaTop
 	rects := make([]image.Rectangle, 0, len(names))
 	for i, n := range names {
 		y1 := areaTop + i*rowH
 		rect := image.Rect(a.layout.margin, y1, a.layout.screen.X-a.layout.margin, y1+rowH-20)
+		if n == active {
+			// No tap target; parallel slot preserves index alignment.
+			rects = append(rects, image.Rectangle{})
+			drawCenteredText(btnFont, rect, truncate("• "+n+"  (active)", 40), a.layout.fpx(44))
+			continue
+		}
 		rects = append(rects, rect)
 		ink.DrawRect(rect, ink.Black)
-		label := n
-		if n == active {
-			label = "* " + n + "  (active)"
-		}
-		drawCenteredText(btnFont, rect, truncate(label, 40), a.layout.fpx(44))
+		drawCenteredText(btnFont, rect, truncate(n, 40), a.layout.fpx(44))
 	}
 
 	// Add new + Delete current stacked above Back. Delete only when there
