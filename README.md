@@ -134,7 +134,7 @@ pocketbeam checks for new releases so you don't have to re-sideload manually. Th
 
 The update check is a single HTTPS GET to the release endpoint (dev builds: Gitea on your LAN; public builds: a project-hosted JSON endpoint). The request includes a `User-Agent` header of the form `pocketbeam/<version> (<device-model>; <hardware-type>; fw <firmware>; <width>x<height>)` so the release backend can see which PocketBook models and firmware versions are running which release. No personal data, no library contents, no identifiers beyond what you'd leak to any HTTPS server you visit. The backend logs whatever its web-server access log records, which includes your IP address at the time of the request.
 
-To disable all update checks, set `check_updates = off` at the top of `pocketbeam.cfg` or toggle the preference via a future Settings entry. Manual checks remain possible from the update screen.
+To disable all automatic update checks, tap the version line in Settings to open the update screen, then tap the **Automatic weekly checks: on** row to flip it off. Manual "Check for updates" remains available on that screen even when automatic checks are disabled. Power users can also set `check_updates = off` at the top of `pocketbeam.cfg`.
 
 The app does **no other telemetry**: no usage stats, no crash pings, no version beacons outside the update check. The only outbound HTTP traffic pocketbeam ever initiates is (a) OPDS / WebDAV requests to your configured server, (b) the update check described above, (c) the release binary download when you tap Install. KOReader has the same posture minus the weekly check.
 
