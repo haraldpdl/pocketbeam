@@ -22,15 +22,35 @@ type Source interface {
 	Fetch(ctx context.Context, b Book) (io.ReadCloser, error)
 }
 
-// OPDSSource adapts a Client into a Source, binding the filter at
-// construction so the sync loop does not have to pass it through.
+// OPDSSource adapts a Client into a Source, binding the filter(s) at
+// construction so the sync loop does not have to pass them through. An
+// empty FilterHrefs slice means "sync everything". Multiple filter
+// hrefs are walked in order and deduped by UUID.
 type OPDSSource struct {
-	Client     *Client
-	FilterHref string
+	Client      *Client
+	FilterHrefs []string
 }
 
 func (s *OPDSSource) List(ctx context.Context) ([]Book, error) {
-	return s.Client.WalkFiltered(s.FilterHref)
+	if len(s.FilterHrefs) == 0 {
+		return s.Client.WalkAll()
+	}
+	seen := make(map[string]struct{})
+	var out []Book
+	for _, href := range s.FilterHrefs {
+		books, err := s.Client.WalkFiltered(href)
+		if err != nil {
+			return nil, err
+		}
+		for _, b := range books {
+			if _, ok := seen[b.UUID]; ok {
+				continue
+			}
+			seen[b.UUID] = struct{}{}
+			out = append(out, b)
+		}
+	}
+	return out, nil
 }
 
 func (s *OPDSSource) Fetch(ctx context.Context, b Book) (io.ReadCloser, error) {
@@ -47,7 +67,7 @@ func newSource(cfg *Config) (Source, error) {
 			return nil, err
 		}
 		_ = client.DetectType()
-		return &OPDSSource{Client: client, FilterHref: cfg.FilterHref}, nil
+		return &OPDSSource{Client: client, FilterHrefs: cfg.FilterHrefs}, nil
 	case BackendWebDAV:
 		return NewWebDAVSource(cfg.Host, cfg.User, cfg.Pass, cfg.Path), nil
 	}

@@ -113,6 +113,50 @@ func TestFetchLevel_WalksPagination(t *testing.T) {
 	}
 }
 
+func TestFetchLevel_ParsesOPDSCount(t *testing.T) {
+	const root = `<?xml version="1.0"?><feed ` + opdsNS + ` xmlns:opds="http://opds-spec.org/2010/catalog">
+        <title>My Library</title>
+        <entry>
+          <id>full</id><title>Fantasy</title>
+          <link rel="subsection" type="application/atom+xml" href="/opds/tag/3" opds:count="42"/>
+        </entry>
+        <entry>
+          <id>empty</id><title>Unused Tag</title>
+          <link rel="subsection" type="application/atom+xml" href="/opds/tag/4" opds:count="0"/>
+        </entry>
+        <entry>
+          <id>unknown</id><title>Legacy</title>
+          <link rel="subsection" type="application/atom+xml" href="/opds/legacy"/>
+        </entry>
+      </feed>`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/atom+xml")
+		_, _ = w.Write([]byte(root))
+	}))
+	defer srv.Close()
+
+	c := newOPDSClient(t, srv.URL)
+	lvl, err := c.FetchLevel("/opds")
+	if err != nil {
+		t.Fatalf("FetchLevel: %v", err)
+	}
+	if len(lvl.Subsections) != 3 {
+		t.Fatalf("got %d subsections, want 3: %+v", len(lvl.Subsections), lvl.Subsections)
+	}
+	full := lvl.Subsections[0]
+	if !full.CountKnown || full.Count != 42 {
+		t.Errorf("Fantasy: got CountKnown=%v Count=%d, want true/42", full.CountKnown, full.Count)
+	}
+	empty := lvl.Subsections[1]
+	if !empty.CountKnown || empty.Count != 0 {
+		t.Errorf("Unused Tag: got CountKnown=%v Count=%d, want true/0", empty.CountKnown, empty.Count)
+	}
+	unknown := lvl.Subsections[2]
+	if unknown.CountKnown {
+		t.Errorf("Legacy: got CountKnown=true, want false when attribute is absent")
+	}
+}
+
 func TestFetchLevel_EmptyHrefDefaultsToRoot(t *testing.T) {
 	var gotPath string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

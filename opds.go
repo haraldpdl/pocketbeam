@@ -47,6 +47,11 @@ type link struct {
 	Rel  string `xml:"rel,attr"`
 	Type string `xml:"type,attr"`
 	Href string `xml:"href,attr"`
+	// Count is the OPDS:count attribute Calibre-Web attaches to
+	// navigation links ("how many items behind this link"). Namespace-
+	// agnostic match: any `count="N"` on the link parses here. Empty
+	// when the server didn't attach one.
+	Count string `xml:"count,attr"`
 }
 
 // Book is one acquirable item flattened out of the OPDS catalog.
@@ -210,10 +215,15 @@ type Shelf struct {
 
 // FilterOption is one row in the filter picker. Works for both CWA shelves
 // (Href is /opds/shelf/<N>) and generic OPDS subsections (Href is whatever
-// the server exposes from its root navigation feed).
+// the server exposes from its root navigation feed). Count and CountKnown
+// come from the opds:count attribute when the server advertises it; when
+// the attribute is absent (generic OPDS servers, older CWA), CountKnown
+// is false and the picker shows the row as-is.
 type FilterOption struct {
-	Name string // display label
-	Href string // OPDS path to walk for this filter
+	Name       string
+	Href       string
+	Count      int
+	CountKnown bool
 }
 
 // OPDSLevel is one step of nested navigation: a list of subsections the
@@ -252,15 +262,8 @@ func (c *Client) FetchLevel(href string) (OPDSLevel, error) {
 				lvl.BookCount++
 				continue
 			}
-			if sub := navigationHref(e.Links); sub != "" {
-				name := strings.TrimSpace(e.Title)
-				if name == "" {
-					name = sub
-				}
-				lvl.Subsections = append(lvl.Subsections, FilterOption{
-					Name: name,
-					Href: sub,
-				})
+			if nav, ok := navigationLink(e.Links); ok {
+				lvl.Subsections = append(lvl.Subsections, filterOptionFromLink(nav, e.Title))
 			}
 		}
 		href = nextLink(f.Links)
@@ -296,12 +299,8 @@ func (c *Client) ListFilterOptions() ([]FilterOption, error) {
 	}
 	out := make([]FilterOption, 0, len(f.Entries))
 	for _, e := range f.Entries {
-		if href := navigationHref(e.Links); href != "" {
-			name := strings.TrimSpace(e.Title)
-			if name == "" {
-				name = href
-			}
-			out = append(out, FilterOption{Name: name, Href: href})
+		if nav, ok := navigationLink(e.Links); ok {
+			out = append(out, filterOptionFromLink(nav, e.Title))
 		}
 	}
 	return out, nil
@@ -480,22 +479,52 @@ func shelfIDFromEntry(e entry) (int, bool) {
 	return id, true
 }
 
-// navigationHref returns the first link that points at another OPDS feed,
-// treating it as a navigation child to recurse into. Prefers explicit
-// rel="subsection"; falls back to any atom+xml link since not all OPDS
-// servers set rel on navigation entries (CWA's root feed is an example).
-func navigationHref(links []link) string {
+// navigationLink returns the first link on entry that points at another
+// OPDS feed. Prefers explicit rel="subsection"; falls back to any
+// atom+xml link since not all OPDS servers set rel on navigation entries
+// (CWA's root feed is an example).
+func navigationLink(links []link) (link, bool) {
 	for _, l := range links {
 		if l.Rel == "subsection" {
-			return l.Href
+			return l, true
 		}
 	}
 	for _, l := range links {
 		if strings.Contains(l.Type, "atom+xml") {
-			return l.Href
+			return l, true
 		}
 	}
-	return ""
+	return link{}, false
+}
+
+// navigationHref is a convenience wrapper returning only the Href of the
+// selected navigation link.
+func navigationHref(links []link) string {
+	l, ok := navigationLink(links)
+	if !ok {
+		return ""
+	}
+	return l.Href
+}
+
+// filterOptionFromLink builds a FilterOption from a navigation link plus
+// the entry's display title, parsing opds:count when the server attached
+// one so the picker can hide empty categories.
+func filterOptionFromLink(l link, title string) FilterOption {
+	opt := FilterOption{
+		Name: strings.TrimSpace(title),
+		Href: l.Href,
+	}
+	if opt.Name == "" {
+		opt.Name = l.Href
+	}
+	if l.Count != "" {
+		if n, err := strconv.Atoi(strings.TrimSpace(l.Count)); err == nil {
+			opt.Count = n
+			opt.CountKnown = true
+		}
+	}
+	return opt
 }
 
 func (c *Client) walk(start string) ([]Book, error) {

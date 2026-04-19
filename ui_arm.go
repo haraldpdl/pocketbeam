@@ -23,6 +23,7 @@ const (
 	screenShelfPicker
 	screenDirPicker
 	screenDeleteConfirm
+	screenProfileList
 )
 
 // wizardStep tracks where the user is in the first-run flow.
@@ -30,6 +31,7 @@ type wizardStep int
 
 const (
 	stepWelcome wizardStep = iota
+	stepProfileName
 	stepBackend
 	stepURL
 	stepUser
@@ -45,7 +47,13 @@ type wizardState struct {
 	url     string
 	user    string
 	pass    string
+	name    string // profile name; "default" on the initial first run, user-entered when adding another
 	err     error
+	// addProfile is true when the wizard is being used to create another
+	// profile from the profile-list screen rather than the initial
+	// first-run setup. It controls where the wizard returns on success
+	// and whether the profile-name step is shown.
+	addProfile bool
 	// Tap targets for the backend-choice step, captured during draw so the
 	// pointer handler knows where the two buttons live.
 	opdsBtn   image.Rectangle
@@ -73,18 +81,40 @@ type feedPickerFrame struct {
 }
 
 // feedPickerState holds the current OPDS feed the user is browsing. The
-// navigation stack lets the user walk back up to any ancestor.
+// navigation stack lets the user walk back up to any ancestor. offset is
+// the first-row-index in the current page; prevPageRect / nextPageRect
+// are the navigation buttons for long lists that don't fit on screen.
 type feedPickerState struct {
-	mu         sync.Mutex
-	loading    bool
-	href       string
-	title      string
-	stack      []feedPickerFrame
-	level      OPDSLevel
-	err        error
-	rowRects   []image.Rectangle // per visible subsection row
-	selectRect image.Rectangle   // "Sync this level" button
-	upRect     image.Rectangle   // ".. (up)" button, empty when at root
+	mu           sync.Mutex
+	loading      bool
+	href         string
+	title        string
+	stack        []feedPickerFrame
+	level        OPDSLevel
+	err          error
+	offset       int
+	rowRects     []image.Rectangle // per visible subsection row
+	selectRect   image.Rectangle   // primary action ("Done" or "Add this level" depending on state)
+	doneRect     image.Rectangle   // "Done" button when the selection set is non-empty
+	upRect       image.Rectangle   // ".. (up)" button, empty when at root
+	prevPageRect image.Rectangle   // "< Prev page" button, empty when at first page
+	nextPageRect image.Rectangle   // "Next page >" button, empty when at last page
+	// Selected is the accumulating set of filters chosen during this
+	// picker session; seeded from cfg.FilterHrefs on open, written back
+	// to the config when the user taps Done.
+	selected []FilterOption
+}
+
+// profileListState holds the snapshot shown on the profile-list screen
+// and the tap targets for each row plus the Add-new / Delete buttons.
+type profileListState struct {
+	mu        sync.Mutex
+	names     []string
+	active    string
+	err       error
+	rowRects  []image.Rectangle
+	addRect   image.Rectangle
+	delRect   image.Rectangle
 }
 
 // deleteConfirmState holds the deletion set awaiting user confirmation
@@ -102,13 +132,16 @@ type deleteConfirmState struct {
 // through. path is the currently-browsed directory (always absolute, always
 // starts with "/"); dirs is the list of subdirectories to display.
 type dirPickerState struct {
-	mu         sync.Mutex
-	loading    bool
-	path       string
-	dirs       []string
-	err        error
-	rowRects   []image.Rectangle // one per visible row (index 0 = "..", 1+ = dirs)
-	selectRect image.Rectangle   // "Sync this folder" button
+	mu           sync.Mutex
+	loading      bool
+	path         string
+	dirs         []string
+	err          error
+	offset       int
+	rowRects     []image.Rectangle // one per visible row (index 0 = "..", 1+ = dirs)
+	prevPageRect image.Rectangle
+	nextPageRect image.Rectangle
+	selectRect   image.Rectangle // "Sync this folder" button
 }
 
 // layout holds screen-relative rectangles for every clickable element and for
@@ -130,6 +163,7 @@ type layout struct {
 	changeButton    image.Rectangle
 	filterButton    image.Rectangle
 	deleteTglButton image.Rectangle
+	profilesButton  image.Rectangle
 	backButton      image.Rectangle
 
 	// shelf picker: per-row tap rects computed dynamically in draw.
@@ -180,15 +214,17 @@ func computeLayout(sz image.Point) layout {
 	settingsBtn := image.Rect(networkBtn.Max.X+40, btnY1, networkBtn.Max.X+40+btnW, btnY2)
 	quitBtn := image.Rect(w-sideMargin-btnW, btnY1, w-sideMargin, btnY2)
 
-	// Settings screen: three stacked big buttons (change server info,
-	// change filter, toggle delete-missing); Back in the bottom-left
-	// mirroring the main screen.
+	// Settings screen: four stacked big buttons (change server info,
+	// change filter, toggle delete-missing, switch/add server profile);
+	// Back in the bottom-left mirroring the main screen.
 	changeY1 := topSafe + 320
 	changeBtn := image.Rect(sideMargin, changeY1, sideMargin+contentW, changeY1+160)
 	filterY1 := changeY1 + 200
 	filterBtn := image.Rect(sideMargin, filterY1, sideMargin+contentW, filterY1+160)
 	deleteTglY1 := filterY1 + 200
 	deleteTglBtn := image.Rect(sideMargin, deleteTglY1, sideMargin+contentW, deleteTglY1+120)
+	profilesY1 := deleteTglY1 + 160
+	profilesBtn := image.Rect(sideMargin, profilesY1, sideMargin+contentW, profilesY1+120)
 
 	// Shelf picker: rows live between the header (below topSafe) and the
 	// Back button (same position as bottom btnY1).
@@ -207,11 +243,20 @@ func computeLayout(sz image.Point) layout {
 		changeButton:     changeBtn,
 		filterButton:     filterBtn,
 		deleteTglButton:  deleteTglBtn,
+		profilesButton:   profilesBtn,
 		backButton:       networkBtn,
 		pickerAreaTop:    pickerTop,
 		pickerAreaBottom: pickerBottom,
 	}
 }
+
+// tapDebounce is the minimum gap between two pointer events that will
+// both be treated as taps. PocketBook sometimes fires only a PointerDown
+// or only a PointerUp for a glancing touch; the bottom-row Network
+// button was the most visible victim. Reacting to both event states and
+// dropping close duplicates gives every tap a chance to land without
+// letting a genuine down+up pair fire the same action twice.
+const tapDebounce = 250 * time.Millisecond
 
 // app implements ink.App for the pocketbeam device UI.
 type app struct {
@@ -225,12 +270,30 @@ type app struct {
 	picker      feedPickerState
 	dirPicker   dirPickerState
 	delConfirm  deleteConfirmState
+	profileList profileListState
 	lastSync    SyncSummary
 	hasLastSync bool
 	bookCount   int
 	netStop     func()
 	layout      layout
 	connState   connectivity
+	lastTap     time.Time
+}
+
+// acceptTap returns true if the event should be treated as a tap. Accepts
+// PointerDown OR PointerUp to maximise the chance a glancing touch
+// registers, but drops any event within tapDebounce of the previous
+// accepted one so a normal down+up pair fires the handler exactly once.
+func (a *app) acceptTap(e ink.PointerEvent) bool {
+	if e.State != ink.PointerDown && e.State != ink.PointerUp {
+		return false
+	}
+	now := time.Now()
+	if now.Sub(a.lastTap) < tapDebounce {
+		return false
+	}
+	a.lastTap = now
+	return true
 }
 
 func newApp() *app {
@@ -334,6 +397,8 @@ func (a *app) Draw() {
 		a.drawDirPicker()
 	case screenDeleteConfirm:
 		a.drawDeleteConfirm()
+	case screenProfileList:
+		a.drawProfileList()
 	}
 	ink.FullUpdate()
 }
@@ -347,7 +412,7 @@ func (a *app) Key(e ink.KeyEvent) bool {
 			a.screen = screenMain
 			ink.Repaint()
 			return true
-		case screenShelfPicker, screenDirPicker:
+		case screenShelfPicker, screenDirPicker, screenProfileList:
 			a.screen = screenSettings
 			ink.Repaint()
 			return true
@@ -374,6 +439,8 @@ func (a *app) Key(e ink.KeyEvent) bool {
 		return a.dirPickerKey(e)
 	case screenDeleteConfirm:
 		return a.deleteConfirmKey(e)
+	case screenProfileList:
+		return a.profileListKey(e)
 	}
 	return false
 }
@@ -392,6 +459,8 @@ func (a *app) Pointer(e ink.PointerEvent) bool {
 		return a.dirPickerPointer(e)
 	case screenDeleteConfirm:
 		return a.deleteConfirmPointer(e)
+	case screenProfileList:
+		return a.profileListPointer(e)
 	}
 	return false
 }
@@ -441,6 +510,16 @@ func (a *app) drawWizard() {
 		ink.DrawString(image.Point{X: 120, Y: 420}, "- Calibre-Web / any OPDS server")
 		ink.DrawString(image.Point{X: 120, Y: 470}, "- WebDAV (Nextcloud, Synology, ownCloud)")
 		ink.DrawString(image.Point{X: 80, Y: 620}, "Press OK or tap the screen to begin.")
+
+	case stepProfileName:
+		title.SetActive(ink.Black)
+		ink.DrawString(image.Point{X: 80, Y: 200}, "Name this profile")
+		body.SetActive(ink.Black)
+		ink.DrawString(image.Point{X: 80, Y: 290}, "Short identifier for this server (no spaces).")
+		ink.DrawString(image.Point{X: 80, Y: 360}, "Tap or press OK to re-open the keyboard.")
+		if a.wizard.name != "" {
+			ink.DrawString(image.Point{X: 80, Y: 480}, "Name: "+a.wizard.name)
+		}
 
 	case stepBackend:
 		title.SetActive(ink.Black)
@@ -528,6 +607,11 @@ func (a *app) wizardKey(e ink.KeyEvent) bool {
 			a.pickBackend(BackendWebDAV)
 			return true
 		}
+	case stepProfileName:
+		if e.Key == ink.KeyOk {
+			ink.OpenKeyboard("new-profile-name", 40)
+			return true
+		}
 	case stepError:
 		if e.Key == ink.KeyOk || e.Key == ink.KeyNext {
 			a.startURLEntry()
@@ -560,6 +644,9 @@ func (a *app) wizardPointer(e ink.PointerEvent) bool {
 			a.pickBackend(BackendWebDAV)
 			return true
 		}
+	case stepProfileName:
+		ink.OpenKeyboard("new-profile-name", 40)
+		return true
 	case stepError:
 		a.startURLEntry()
 		return true
@@ -609,6 +696,15 @@ func (a *app) urlHint() string {
 // onKeyboardInput routes based on current wizard step.
 func (a *app) onKeyboardInput(text string) {
 	switch a.wizard.step {
+	case stepProfileName:
+		name := sanitizeProfileName(text)
+		if name == "" {
+			ink.OpenKeyboard("new-profile-name", 40)
+			return
+		}
+		a.wizard.name = name
+		a.wizard.step = stepBackend
+		ink.Repaint()
 	case stepURL:
 		a.wizard.url = text
 		a.wizard.step = stepUser
@@ -623,6 +719,16 @@ func (a *app) onKeyboardInput(text string) {
 		ink.Repaint()
 		go a.runProbe()
 	}
+}
+
+// sanitizeProfileName strips whitespace and characters that would confuse
+// the config-file section parser (brackets, equals). Empty input returns
+// "" so the wizard can re-ask.
+func sanitizeProfileName(s string) string {
+	s = strings.TrimSpace(s)
+	s = strings.ReplaceAll(s, " ", "-")
+	s = strings.Trim(s, "[]=")
+	return s
 }
 
 // runProbe probes the server and transitions the UI on success or failure.
@@ -649,7 +755,12 @@ func (a *app) runProbe() {
 	if backend == BackendWebDAV {
 		libraryDir = "WebDAV"
 	}
+	profile := a.wizard.name
+	if profile == "" {
+		profile = defaultProfileName
+	}
 	cfg := &Config{
+		Profile: profile,
 		Backend: backend,
 		Host:    a.wizard.url,
 		User:    a.wizard.user,
@@ -665,6 +776,17 @@ func (a *app) runProbe() {
 		a.wizard.step = stepError
 		ink.Repaint()
 		return
+	}
+	// When the wizard is being used to add a profile, the new section is
+	// written but the file's `active` marker still points at the existing
+	// one. Flip it so the newly-created profile becomes the working one.
+	if a.wizard.addProfile {
+		if err := SetActiveProfile(a.cfgPath, profile); err != nil {
+			a.wizard.err = err
+			a.wizard.step = stepError
+			ink.Repaint()
+			return
+		}
 	}
 	client, err := NewClient(cfg.Host, cfg.User, cfg.Pass)
 	if err != nil {
@@ -716,15 +838,7 @@ func (a *app) drawMain() {
 	body.SetActive(ink.Black)
 	ink.DrawString(image.Point{X: a.layout.margin, Y: 210}, "Server: "+a.cfg.Host)
 
-	filterText := "Filter: all books"
-	if a.cfg.FilterHref != "" {
-		name := a.cfg.FilterName
-		if name == "" {
-			name = a.cfg.FilterHref
-		}
-		filterText = "Filter: " + name
-	}
-	ink.DrawString(image.Point{X: a.layout.margin, Y: 255}, filterText)
+	ink.DrawString(image.Point{X: a.layout.margin, Y: 255}, "Filter: "+a.cfg.FilterLabel())
 
 	var connText string
 	switch a.connState {
@@ -845,7 +959,7 @@ func (a *app) mainKey(e ink.KeyEvent) bool {
 }
 
 func (a *app) mainPointer(e ink.PointerEvent) bool {
-	if e.State != ink.PointerDown {
+	if !a.acceptTap(e) {
 		return false
 	}
 	if a.syncActive() {
@@ -1091,14 +1205,7 @@ func (a *app) drawSettings() {
 		}
 		filterLabel = "Folder: " + p
 	} else {
-		filterLabel = "Filter: All books"
-		if a.cfg.FilterHref != "" {
-			name := a.cfg.FilterName
-			if name == "" {
-				name = a.cfg.FilterHref
-			}
-			filterLabel = "Filter: " + name
-		}
+		filterLabel = "Filter: " + a.cfg.FilterLabel()
 	}
 	ink.DrawString(image.Point{X: a.layout.margin, Y: 400}, filterLabel)
 
@@ -1126,6 +1233,11 @@ func (a *app) drawSettings() {
 	}
 	ink.DrawRect(a.layout.deleteTglButton, ink.Black)
 	drawCenteredText(btnFont, a.layout.deleteTglButton, delLabel, 44)
+
+	// Switch / add server profile.
+	profileBtnText := fmt.Sprintf("Profile: %s  (switch or add)", a.cfg.Profile)
+	ink.DrawRect(a.layout.profilesButton, ink.Black)
+	drawCenteredText(btnFont, a.layout.profilesButton, profileBtnText, 44)
 
 	// Footer: version + Back
 	small.SetActive(ink.Black)
@@ -1173,6 +1285,9 @@ func (a *app) settingsPointer(e ink.PointerEvent) bool {
 		_ = SaveConfig(a.cfgPath, a.cfg)
 		ink.Repaint()
 		return true
+	case p.In(a.layout.profilesButton):
+		a.openProfileList()
+		return true
 	case p.In(a.layout.backButton):
 		a.screen = screenMain
 		ink.Repaint()
@@ -1200,6 +1315,16 @@ func (a *app) startChangeInfo() {
 // OPDS feed. The name is historical; the picker now walks the full feed
 // tree, not just shelves.
 func (a *app) openShelfPicker() {
+	// Seed the selection from the current config so the user sees
+	// previously-picked filters and can add to / remove from them.
+	seeded := make([]FilterOption, 0, len(a.cfg.FilterHrefs))
+	for i, href := range a.cfg.FilterHrefs {
+		name := href
+		if i < len(a.cfg.FilterNames) && a.cfg.FilterNames[i] != "" {
+			name = a.cfg.FilterNames[i]
+		}
+		seeded = append(seeded, FilterOption{Name: name, Href: href})
+	}
 	a.picker.mu.Lock()
 	a.picker.stack = nil
 	a.picker.href = "/opds"
@@ -1208,6 +1333,8 @@ func (a *app) openShelfPicker() {
 	a.picker.level = OPDSLevel{}
 	a.picker.err = nil
 	a.picker.rowRects = nil
+	a.picker.offset = 0
+	a.picker.selected = seeded
 	a.picker.mu.Unlock()
 	a.screen = screenShelfPicker
 	ink.Repaint()
@@ -1227,9 +1354,30 @@ func (a *app) drillInto(href, title string) {
 	a.picker.level = OPDSLevel{}
 	a.picker.err = nil
 	a.picker.rowRects = nil
+	a.picker.offset = 0
 	a.picker.mu.Unlock()
 	ink.Repaint()
 	go a.fetchFeedLevel(href, title)
+}
+
+// shelfPickerPage scrolls the list by one page. Called from the Prev /
+// Next page buttons; the actual clamping is in drawShelfPicker so the
+// offset can never point past the current list length.
+func (a *app) shelfPickerPage(direction int) {
+	a.picker.mu.Lock()
+	// Page size is computed at draw time from the list's length. We use
+	// the number of currently-visible rows as a good approximation; the
+	// draw clamps any out-of-range result.
+	step := len(a.picker.rowRects)
+	if step <= 0 {
+		step = 1
+	}
+	a.picker.offset += direction * step
+	if a.picker.offset < 0 {
+		a.picker.offset = 0
+	}
+	a.picker.mu.Unlock()
+	ink.Repaint()
 }
 
 // drillUp pops one frame off the navigation stack and re-fetches the
@@ -1248,6 +1396,7 @@ func (a *app) drillUp() {
 	a.picker.level = OPDSLevel{}
 	a.picker.err = nil
 	a.picker.rowRects = nil
+	a.picker.offset = 0
 	a.picker.mu.Unlock()
 	ink.Repaint()
 	go a.fetchFeedLevel(top.Href, top.Title)
@@ -1296,6 +1445,7 @@ func (a *app) drawShelfPicker() {
 	pickerErr := a.picker.err
 	stackLen := len(a.picker.stack)
 	curTitle := a.picker.title
+	offset := a.picker.offset
 	a.picker.mu.Unlock()
 
 	// Breadcrumb / current-level label.
@@ -1311,6 +1461,8 @@ func (a *app) drawShelfPicker() {
 	areaTop := a.layout.pickerAreaTop
 	areaBottom := a.layout.pickerAreaBottom - selectBtnH - 40
 
+	var prevPageRect, nextPageRect image.Rectangle
+
 	if loading {
 		ink.DrawString(image.Point{X: a.layout.margin, Y: 300}, "Loading...")
 		ink.ShowHourglassAt(image.Point{X: a.layout.margin, Y: 360})
@@ -1319,71 +1471,183 @@ func (a *app) drawShelfPicker() {
 		ink.DrawString(image.Point{X: a.layout.margin, Y: 350}, truncate(pickerErr.Error(), 60))
 	} else {
 		rowH := 90
+		pageBtnH := 60
 		atRoot := stackLen == 0
-		rows := make([]string, 0, len(lvl.Subsections)+1)
+		// Suppress navigation rows whose server-advertised count is zero
+		// (opds:count == 0). Servers that don't advertise counts leave
+		// CountKnown=false and the row shows normally.
+		visibleSubs := make([]FilterOption, 0, len(lvl.Subsections))
+		for _, sub := range lvl.Subsections {
+			if sub.CountKnown && sub.Count == 0 {
+				continue
+			}
+			visibleSubs = append(visibleSubs, sub)
+		}
+		rows := make([]string, 0, len(visibleSubs)+1)
 		if !atRoot {
 			rows = append(rows, ".. (up)")
 		}
-		for _, sub := range lvl.Subsections {
-			rows = append(rows, sub.Name)
+		for _, sub := range visibleSubs {
+			label := sub.Name
+			if sub.CountKnown {
+				label = fmt.Sprintf("%s  (%d)", sub.Name, sub.Count)
+			}
+			rows = append(rows, label)
 		}
 
-		availableH := areaBottom - areaTop
-		maxRows := availableH / rowH
-		visible := len(rows)
-		if visible > maxRows {
-			visible = maxRows
+		// Paging: reserve a thin strip at the bottom of the list area for
+		// page buttons only when the list overflows a single page.
+		visibleArea := areaBottom - areaTop
+		maxRows := (visibleArea - pageBtnH - 20) / rowH
+		if maxRows < 1 {
+			maxRows = 1
+		}
+		if maxRows >= len(rows) {
+			maxRows = len(rows)
+		}
+		// Clamp offset so a shorter list after drilling / scrolling can't
+		// leave a stale offset pointing past the end.
+		if offset > len(rows)-maxRows {
+			offset = len(rows) - maxRows
+		}
+		if offset < 0 {
+			offset = 0
+		}
+		end := offset + maxRows
+		if end > len(rows) {
+			end = len(rows)
 		}
 
-		rects := make([]image.Rectangle, 0, visible)
-		for i := 0; i < visible; i++ {
-			y1 := areaTop + i*rowH
+		rects := make([]image.Rectangle, 0, end-offset)
+		for i := offset; i < end; i++ {
+			y1 := areaTop + (i-offset)*rowH
 			rect := image.Rect(a.layout.margin, y1, a.layout.screen.X-a.layout.margin, y1+rowH-20)
 			rects = append(rects, rect)
 			ink.DrawRect(rect, ink.Black)
 			drawCenteredText(btnFont, rect, truncate(rows[i], 40), 44)
 		}
-		if len(rows) > visible {
+
+		// Page buttons appear only when more rows exist outside the window.
+		if len(rows) > maxRows {
+			btnY1 := areaTop + maxRows*rowH
+			btnY2 := btnY1 + pageBtnH
+			contentW := a.layout.screen.X - 2*a.layout.margin
+			half := (contentW - 40) / 2
+			if offset > 0 {
+				prevPageRect = image.Rect(a.layout.margin, btnY1, a.layout.margin+half, btnY2)
+				ink.DrawRect(prevPageRect, ink.Black)
+				drawCenteredText(btnFont, prevPageRect, "< Prev", 44)
+			}
+			if end < len(rows) {
+				nextPageRect = image.Rect(a.layout.screen.X-a.layout.margin-half, btnY1, a.layout.screen.X-a.layout.margin, btnY2)
+				ink.DrawRect(nextPageRect, ink.Black)
+				drawCenteredText(btnFont, nextPageRect, "Next >", 44)
+			}
+			// Page-of-pages indicator underneath.
+			page := offset/maxRows + 1
+			total := (len(rows) + maxRows - 1) / maxRows
 			ink.DrawString(
-				image.Point{X: a.layout.margin, Y: areaBottom - 30},
-				fmt.Sprintf("Showing %d of %d.", visible, len(rows)),
+				image.Point{X: a.layout.margin, Y: btnY2 + 30},
+				fmt.Sprintf("Page %d of %d (%d items)", page, total, len(rows)),
 			)
 		}
 
 		a.picker.mu.Lock()
 		a.picker.rowRects = rects
+		a.picker.prevPageRect = prevPageRect
+		a.picker.nextPageRect = nextPageRect
 		if atRoot {
 			a.picker.upRect = image.Rectangle{}
-		} else if len(rects) > 0 {
+		} else if offset == 0 && len(rects) > 0 {
 			a.picker.upRect = rects[0]
+		} else {
+			a.picker.upRect = image.Rectangle{}
 		}
 		a.picker.mu.Unlock()
 	}
 
-	// "Sync this level" button, always present (syncing at root = sync all).
+	// Primary action button(s). With no selection the user sees a single
+	// "Sync this level" (sync-all at root) that saves and closes. Once a
+	// selection is in progress we show two stacked buttons: the top one
+	// is "Add" / "Remove" for the current feed, and the bottom one is
+	// "Done (N selected)" that persists and closes.
+	a.picker.mu.Lock()
+	selected := append([]FilterOption(nil), a.picker.selected...)
+	curHref := a.picker.href
+	curTitleSaved := a.picker.title
+	a.picker.mu.Unlock()
+
+	alreadyIn := pickerContains(selected, curHref)
 	selectY2 := a.layout.backButton.Min.Y - 40
 	selectY1 := selectY2 - selectBtnH
 	selectRect := image.Rect(a.layout.margin, selectY1, a.layout.screen.X-a.layout.margin, selectY2)
-	ink.DrawRect(selectRect, ink.Black)
-	ink.DrawRect(selectRect.Inset(2), ink.Black)
-	label := "Sync this level"
-	if stackLen == 0 {
-		label = "Sync everything"
-	} else if !loading && pickerErr == nil && lvl.BookCount > 0 {
-		label = fmt.Sprintf("Sync this level (%d books)", lvl.BookCount)
+	var doneRect image.Rectangle
+	if len(selected) == 0 {
+		ink.DrawRect(selectRect, ink.Black)
+		ink.DrawRect(selectRect.Inset(2), ink.Black)
+		label := "Sync this level"
+		if stackLen == 0 {
+			label = "Sync everything"
+		} else if !loading && pickerErr == nil && lvl.BookCount > 0 {
+			label = fmt.Sprintf("Sync this level (%d books)", lvl.BookCount)
+		}
+		drawCenteredText(btnFont, selectRect, truncate(label, 40), 44)
+	} else {
+		// Two buttons stacked: Add/Remove on top, Done below.
+		half := (selectBtnH - 20) / 2
+		addRect := image.Rect(selectRect.Min.X, selectY1, selectRect.Max.X, selectY1+half+20)
+		doneRect = image.Rect(selectRect.Min.X, selectY1+half+30, selectRect.Max.X, selectY2)
+		ink.DrawRect(addRect, ink.Black)
+		addLabel := "Add this level"
+		if alreadyIn {
+			addLabel = "Remove this level"
+		}
+		// At root with no filter picked yet, adding the root feed is
+		// identical to "sync all"; offering the button there makes no
+		// sense, so hide it by using an empty rect.
+		if stackLen == 0 {
+			addRect = image.Rectangle{}
+			ink.FillArea(image.Rect(selectRect.Min.X, selectY1, selectRect.Max.X, selectY1+half+20), ink.White)
+		} else {
+			drawCenteredText(btnFont, addRect, truncate(addLabel, 40), 44)
+		}
+		ink.DrawRect(doneRect, ink.Black)
+		ink.DrawRect(doneRect.Inset(2), ink.Black)
+		drawCenteredText(btnFont, doneRect, fmt.Sprintf("Done (%d selected)", len(selected)), 44)
+		selectRect = addRect
 	}
-	drawCenteredText(btnFont, selectRect, truncate(label, 40), 44)
 	a.picker.mu.Lock()
 	a.picker.selectRect = selectRect
+	a.picker.doneRect = doneRect
 	a.picker.mu.Unlock()
+
+	_ = curTitleSaved // retained so future iterations can show the breadcrumb in the Add label
 
 	ink.DrawRect(a.layout.backButton, ink.Black)
 	drawCenteredText(btnFont, a.layout.backButton, "Back", 44)
 }
 
+// pickerContains reports whether sel already includes an option with the
+// given href. Used to label the Add/Remove toggle.
+func pickerContains(sel []FilterOption, href string) bool {
+	for _, o := range sel {
+		if o.Href == href {
+			return true
+		}
+	}
+	return false
+}
+
 func (a *app) shelfPickerKey(e ink.KeyEvent) bool {
 	if e.Key == ink.KeyOk {
-		a.pickerConfirmCurrent()
+		a.picker.mu.Lock()
+		hasSelection := len(a.picker.selected) > 0
+		a.picker.mu.Unlock()
+		if hasSelection {
+			a.pickerFinishMulti()
+		} else {
+			a.pickerConfirmCurrent()
+		}
 		return true
 	}
 	if e.Key == ink.KeyBack {
@@ -1404,32 +1668,65 @@ func (a *app) shelfPickerPointer(e ink.PointerEvent) bool {
 	}
 	a.picker.mu.Lock()
 	rects := a.picker.rowRects
-	subs := a.picker.level.Subsections
+	subsAll := a.picker.level.Subsections
 	selectRect := a.picker.selectRect
+	doneRect := a.picker.doneRect
 	stackLen := len(a.picker.stack)
+	offset := a.picker.offset
+	prev := a.picker.prevPageRect
+	next := a.picker.nextPageRect
+	hasSelection := len(a.picker.selected) > 0
 	a.picker.mu.Unlock()
 
-	if e.Point.In(selectRect) {
-		a.pickerConfirmCurrent()
+	// Match the visible filter used in drawShelfPicker so row indices
+	// line up with what the user sees.
+	subs := make([]FilterOption, 0, len(subsAll))
+	for _, s := range subsAll {
+		if s.CountKnown && s.Count == 0 {
+			continue
+		}
+		subs = append(subs, s)
+	}
+
+	if !selectRect.Empty() && e.Point.In(selectRect) {
+		if hasSelection {
+			a.toggleCurrentInSelection()
+		} else {
+			a.pickerConfirmCurrent()
+		}
+		return true
+	}
+	if !doneRect.Empty() && e.Point.In(doneRect) {
+		a.pickerFinishMulti()
+		return true
+	}
+	if !prev.Empty() && e.Point.In(prev) {
+		a.shelfPickerPage(-1)
+		return true
+	}
+	if !next.Empty() && e.Point.In(next) {
+		a.shelfPickerPage(+1)
 		return true
 	}
 
 	atRoot := stackLen == 0
+	// Compute the absolute row index: rects[0] is at offset; adjust for the
+	// leading ".. (up)" row that's only present on page 1.
+	upOffset := 0
+	if !atRoot && offset == 0 {
+		upOffset = 1
+	}
 	for i, r := range rects {
 		if !e.Point.In(r) {
 			continue
 		}
-		if !atRoot && i == 0 {
+		if !atRoot && offset == 0 && i == 0 {
 			a.drillUp()
 			return true
 		}
-		offset := 0
-		if !atRoot {
-			offset = 1
-		}
-		idx := i - offset
-		if idx >= 0 && idx < len(subs) {
-			s := subs[idx]
+		abs := offset + i - upOffset
+		if abs >= 0 && abs < len(subs) {
+			s := subs[abs]
 			a.drillInto(s.Href, s.Name)
 			return true
 		}
@@ -1437,10 +1734,9 @@ func (a *app) shelfPickerPointer(e ink.PointerEvent) bool {
 	return false
 }
 
-// pickerConfirmCurrent saves the currently-displayed feed as the sync
-// filter and returns to the settings screen. At the root (empty stack) we
-// store an empty filter to mean "sync everything" so the rest of the app
-// keeps the simple "no filter" semantics.
+// pickerConfirmCurrent saves the currently-displayed feed as the sole
+// sync filter (or clears the filter when at root) and returns to the
+// settings screen. Used when no multi-selection is in progress.
 func (a *app) pickerConfirmCurrent() {
 	a.picker.mu.Lock()
 	href := a.picker.href
@@ -1448,10 +1744,50 @@ func (a *app) pickerConfirmCurrent() {
 	atRoot := len(a.picker.stack) == 0
 	a.picker.mu.Unlock()
 	if atRoot {
-		a.setFilter("", "")
+		a.setFilters(nil, nil)
 	} else {
-		a.setFilter(href, title)
+		a.setFilters([]string{href}, []string{title})
 	}
+	a.screen = screenSettings
+	ink.HideHourglass()
+	ink.Repaint()
+}
+
+// toggleCurrentInSelection adds the current feed to the selection set,
+// or removes it if already present. No-op at the root (which is always
+// "sync everything" and covered by the bottom Done button instead).
+func (a *app) toggleCurrentInSelection() {
+	a.picker.mu.Lock()
+	defer a.picker.mu.Unlock()
+	if len(a.picker.stack) == 0 {
+		return
+	}
+	href := a.picker.href
+	title := a.picker.title
+	for i, s := range a.picker.selected {
+		if s.Href == href {
+			a.picker.selected = append(a.picker.selected[:i], a.picker.selected[i+1:]...)
+			ink.Repaint()
+			return
+		}
+	}
+	a.picker.selected = append(a.picker.selected, FilterOption{Name: title, Href: href})
+	ink.Repaint()
+}
+
+// pickerFinishMulti writes the accumulated selection into the config and
+// closes the picker. An empty selection is the same as "sync everything".
+func (a *app) pickerFinishMulti() {
+	a.picker.mu.Lock()
+	sel := append([]FilterOption(nil), a.picker.selected...)
+	a.picker.mu.Unlock()
+	hrefs := make([]string, 0, len(sel))
+	names := make([]string, 0, len(sel))
+	for _, s := range sel {
+		hrefs = append(hrefs, s.Href)
+		names = append(names, s.Name)
+	}
+	a.setFilters(hrefs, names)
 	a.screen = screenSettings
 	ink.HideHourglass()
 	ink.Repaint()
@@ -1473,6 +1809,7 @@ func (a *app) openDirPicker(startPath string) {
 	a.dirPicker.dirs = nil
 	a.dirPicker.err = nil
 	a.dirPicker.rowRects = nil
+	a.dirPicker.offset = 0
 	a.dirPicker.mu.Unlock()
 	a.screen = screenDirPicker
 	ink.Repaint()
@@ -1526,6 +1863,7 @@ func (a *app) drawDirPicker() {
 	path := a.dirPicker.path
 	dirs := append([]string(nil), a.dirPicker.dirs...)
 	pickErr := a.dirPicker.err
+	offset := a.dirPicker.offset
 	a.dirPicker.mu.Unlock()
 
 	title.SetActive(ink.Black)
@@ -1533,6 +1871,8 @@ func (a *app) drawDirPicker() {
 
 	body.SetActive(ink.Black)
 	ink.DrawString(image.Point{X: a.layout.margin, Y: 220}, "Currently in: "+truncate(path, 60))
+
+	var prevPageRect, nextPageRect image.Rectangle
 
 	if loading {
 		ink.DrawString(image.Point{X: a.layout.margin, Y: 300}, "Loading...")
@@ -1542,6 +1882,7 @@ func (a *app) drawDirPicker() {
 		ink.DrawString(image.Point{X: a.layout.margin, Y: 350}, truncate(pickErr.Error(), 60))
 	} else {
 		rowH := 90
+		pageBtnH := 60
 		areaTop := a.layout.pickerAreaTop
 		// Reserve space at the bottom for the "Sync this folder" button.
 		selectBtnH := 100
@@ -1556,30 +1897,60 @@ func (a *app) drawDirPicker() {
 			rows = append(rows, d+"/")
 		}
 
-		availableH := areaBottom - areaTop
-		maxRows := availableH / rowH
-		visible := len(rows)
-		if visible > maxRows {
-			visible = maxRows
+		visibleArea := areaBottom - areaTop
+		maxRows := (visibleArea - pageBtnH - 20) / rowH
+		if maxRows < 1 {
+			maxRows = 1
+		}
+		if maxRows >= len(rows) {
+			maxRows = len(rows)
+		}
+		if offset > len(rows)-maxRows {
+			offset = len(rows) - maxRows
+		}
+		if offset < 0 {
+			offset = 0
+		}
+		end := offset + maxRows
+		if end > len(rows) {
+			end = len(rows)
 		}
 
-		rects := make([]image.Rectangle, 0, visible)
-		for i := 0; i < visible; i++ {
-			y1 := areaTop + i*rowH
+		rects := make([]image.Rectangle, 0, end-offset)
+		for i := offset; i < end; i++ {
+			y1 := areaTop + (i-offset)*rowH
 			rect := image.Rect(a.layout.margin, y1, a.layout.screen.X-a.layout.margin, y1+rowH-20)
 			rects = append(rects, rect)
 			ink.DrawRect(rect, ink.Black)
 			drawCenteredText(btnFont, rect, truncate(rows[i], 40), 44)
 		}
-		if len(rows) > visible {
+		if len(rows) > maxRows {
+			btnY1 := areaTop + maxRows*rowH
+			btnY2 := btnY1 + pageBtnH
+			contentW := a.layout.screen.X - 2*a.layout.margin
+			half := (contentW - 40) / 2
+			if offset > 0 {
+				prevPageRect = image.Rect(a.layout.margin, btnY1, a.layout.margin+half, btnY2)
+				ink.DrawRect(prevPageRect, ink.Black)
+				drawCenteredText(btnFont, prevPageRect, "< Prev", 44)
+			}
+			if end < len(rows) {
+				nextPageRect = image.Rect(a.layout.screen.X-a.layout.margin-half, btnY1, a.layout.screen.X-a.layout.margin, btnY2)
+				ink.DrawRect(nextPageRect, ink.Black)
+				drawCenteredText(btnFont, nextPageRect, "Next >", 44)
+			}
+			page := offset/maxRows + 1
+			total := (len(rows) + maxRows - 1) / maxRows
 			ink.DrawString(
-				image.Point{X: a.layout.margin, Y: areaBottom - 30},
-				fmt.Sprintf("Showing %d of %d.", visible, len(rows)),
+				image.Point{X: a.layout.margin, Y: btnY2 + 30},
+				fmt.Sprintf("Page %d of %d (%d items)", page, total, len(rows)),
 			)
 		}
 
 		a.dirPicker.mu.Lock()
 		a.dirPicker.rowRects = rects
+		a.dirPicker.prevPageRect = prevPageRect
+		a.dirPicker.nextPageRect = nextPageRect
 		a.dirPicker.mu.Unlock()
 
 		// Select button sits just above the Back button.
@@ -1625,6 +1996,9 @@ func (a *app) dirPickerPointer(e ink.PointerEvent) bool {
 	dirs := a.dirPicker.dirs
 	path := a.dirPicker.path
 	selectRect := a.dirPicker.selectRect
+	offset := a.dirPicker.offset
+	prev := a.dirPicker.prevPageRect
+	next := a.dirPicker.nextPageRect
 	a.dirPicker.mu.Unlock()
 
 	if e.Point.In(selectRect) {
@@ -1634,29 +2008,51 @@ func (a *app) dirPickerPointer(e ink.PointerEvent) bool {
 		ink.Repaint()
 		return true
 	}
+	if !prev.Empty() && e.Point.In(prev) {
+		a.dirPickerPage(-1)
+		return true
+	}
+	if !next.Empty() && e.Point.In(next) {
+		a.dirPickerPage(+1)
+		return true
+	}
 
 	atRoot := path == "/" || path == ""
+	upOffset := 0
+	if !atRoot && offset == 0 {
+		upOffset = 1
+	}
 	for i, r := range rects {
 		if !e.Point.In(r) {
 			continue
 		}
-		if !atRoot && i == 0 {
+		if !atRoot && offset == 0 && i == 0 {
 			a.openDirPicker(parentDir(path))
 			return true
 		}
-		offset := 0
-		if !atRoot {
-			offset = 1
-		}
-		idx := i - offset
-		if idx >= 0 && idx < len(dirs) {
-			child := dirs[idx]
-			next := normaliseRoot(path) + "/" + child
-			a.openDirPicker(next)
+		abs := offset + i - upOffset
+		if abs >= 0 && abs < len(dirs) {
+			child := dirs[abs]
+			a.openDirPicker(normaliseRoot(path) + "/" + child)
 			return true
 		}
 	}
 	return false
+}
+
+// dirPickerPage scrolls the directory list by one page and repaints.
+func (a *app) dirPickerPage(direction int) {
+	a.dirPicker.mu.Lock()
+	step := len(a.dirPicker.rowRects)
+	if step <= 0 {
+		step = 1
+	}
+	a.dirPicker.offset += direction * step
+	if a.dirPicker.offset < 0 {
+		a.dirPicker.offset = 0
+	}
+	a.dirPicker.mu.Unlock()
+	ink.Repaint()
 }
 
 // parentDir returns the parent of p using forward-slash semantics. Root
@@ -1682,10 +2078,11 @@ func (a *app) setPath(p string) {
 	_ = SaveConfig(a.cfgPath, a.cfg)
 }
 
-// setFilter updates the in-memory config and persists it.
-func (a *app) setFilter(href, name string) {
-	a.cfg.FilterHref = href
-	a.cfg.FilterName = name
+// setFilters replaces the config's filter selection and persists it.
+// Passing nil/empty slices clears the filter (sync everything).
+func (a *app) setFilters(hrefs, names []string) {
+	a.cfg.FilterHrefs = hrefs
+	a.cfg.FilterNames = names
 	_ = SaveConfig(a.cfgPath, a.cfg)
 }
 
@@ -1813,4 +2210,207 @@ func (a *app) deleteConfirmPointer(e ink.PointerEvent) bool {
 		return true
 	}
 	return false
+}
+
+// ---------- Profile list ----------
+
+// openProfileList refreshes the snapshot and switches to the profile
+// screen. Profile data is loaded synchronously because the on-disk file
+// is tiny.
+func (a *app) openProfileList() {
+	names, active, err := ListProfiles(a.cfgPath)
+	a.profileList.mu.Lock()
+	a.profileList.names = names
+	a.profileList.active = active
+	a.profileList.err = err
+	a.profileList.rowRects = nil
+	a.profileList.mu.Unlock()
+	a.screen = screenProfileList
+	ink.Repaint()
+}
+
+func (a *app) drawProfileList() {
+	title := ink.OpenFont(ink.DefaultFontBold, 64, true)
+	defer title.Close()
+	title.SetActive(ink.Black)
+
+	body := ink.OpenFont(ink.DefaultFont, 32, true)
+	defer body.Close()
+	body.SetActive(ink.Black)
+
+	btnFont := ink.OpenFont(ink.DefaultFontBold, 44, true)
+	defer btnFont.Close()
+	btnFont.SetActive(ink.Black)
+
+	a.profileList.mu.Lock()
+	names := append([]string(nil), a.profileList.names...)
+	active := a.profileList.active
+	perr := a.profileList.err
+	a.profileList.mu.Unlock()
+
+	ink.DrawString(image.Point{X: a.layout.margin, Y: 140}, "Server profiles")
+
+	if perr != nil {
+		body.SetActive(ink.Black)
+		ink.DrawString(image.Point{X: a.layout.margin, Y: 240}, "Could not list profiles:")
+		ink.DrawString(image.Point{X: a.layout.margin, Y: 290}, truncate(perr.Error(), 60))
+		ink.DrawRect(a.layout.backButton, ink.Black)
+		drawCenteredText(btnFont, a.layout.backButton, "Back", 44)
+		return
+	}
+
+	// Rows: one per profile. Active profile gets a leading marker.
+	rowH := 90
+	areaTop := a.layout.pickerAreaTop
+	rects := make([]image.Rectangle, 0, len(names))
+	for i, n := range names {
+		y1 := areaTop + i*rowH
+		rect := image.Rect(a.layout.margin, y1, a.layout.screen.X-a.layout.margin, y1+rowH-20)
+		rects = append(rects, rect)
+		ink.DrawRect(rect, ink.Black)
+		label := n
+		if n == active {
+			label = "* " + n + "  (active)"
+		}
+		drawCenteredText(btnFont, rect, truncate(label, 40), 44)
+	}
+
+	// Add new + Delete current stacked above Back. Delete only when there
+	// is more than one profile on disk.
+	btnH := 100
+	backMin := a.layout.backButton.Min.Y
+	delY2 := backMin - 40
+	delY1 := delY2 - btnH
+	addY2 := delY1 - 30
+	addY1 := addY2 - btnH
+
+	addRect := image.Rect(a.layout.margin, addY1, a.layout.screen.X-a.layout.margin, addY2)
+	ink.DrawRect(addRect, ink.Black)
+	ink.DrawRect(addRect.Inset(2), ink.Black)
+	drawCenteredText(btnFont, addRect, "Add new server", 44)
+
+	var delRect image.Rectangle
+	if len(names) > 1 {
+		delRect = image.Rect(a.layout.margin, delY1, a.layout.screen.X-a.layout.margin, delY2)
+		ink.DrawRect(delRect, ink.Black)
+		drawCenteredText(btnFont, delRect, "Delete active profile", 44)
+	}
+
+	a.profileList.mu.Lock()
+	a.profileList.rowRects = rects
+	a.profileList.addRect = addRect
+	a.profileList.delRect = delRect
+	a.profileList.mu.Unlock()
+
+	ink.DrawRect(a.layout.backButton, ink.Black)
+	drawCenteredText(btnFont, a.layout.backButton, "Back", 44)
+}
+
+func (a *app) profileListKey(e ink.KeyEvent) bool {
+	if e.Key == ink.KeyBack {
+		a.screen = screenSettings
+		ink.Repaint()
+		return true
+	}
+	return false
+}
+
+func (a *app) profileListPointer(e ink.PointerEvent) bool {
+	if e.State != ink.PointerDown {
+		return false
+	}
+	if e.Point.In(a.layout.backButton) {
+		a.screen = screenSettings
+		ink.Repaint()
+		return true
+	}
+	a.profileList.mu.Lock()
+	rects := a.profileList.rowRects
+	names := append([]string(nil), a.profileList.names...)
+	active := a.profileList.active
+	addRect := a.profileList.addRect
+	delRect := a.profileList.delRect
+	a.profileList.mu.Unlock()
+
+	if e.Point.In(addRect) {
+		a.startAddProfile()
+		return true
+	}
+	if !delRect.Empty() && e.Point.In(delRect) {
+		a.deleteActiveProfile(active)
+		return true
+	}
+	for i, r := range rects {
+		if !e.Point.In(r) {
+			continue
+		}
+		if i < len(names) && names[i] != active {
+			a.switchProfile(names[i])
+		}
+		return true
+	}
+	return false
+}
+
+// switchProfile marks the chosen profile active, reloads the config,
+// swaps the underlying store, and flips back to the main screen.
+func (a *app) switchProfile(name string) {
+	if err := SetActiveProfile(a.cfgPath, name); err != nil {
+		a.profileList.mu.Lock()
+		a.profileList.err = err
+		a.profileList.mu.Unlock()
+		ink.Repaint()
+		return
+	}
+	a.reloadActiveConfig()
+	a.screen = screenMain
+	ink.Repaint()
+}
+
+// deleteActiveProfile removes the active profile after a switch. The
+// fileDoc promotes another profile to active automatically; we reload to
+// pick it up.
+func (a *app) deleteActiveProfile(name string) {
+	if err := DeleteProfile(a.cfgPath, name); err != nil {
+		a.profileList.mu.Lock()
+		a.profileList.err = err
+		a.profileList.mu.Unlock()
+		ink.Repaint()
+		return
+	}
+	a.reloadActiveConfig()
+	a.openProfileList()
+}
+
+// reloadActiveConfig rereads the config file, closes any existing store
+// handle, and opens a fresh one for the now-active profile. Called
+// whenever the active profile changes.
+func (a *app) reloadActiveConfig() {
+	cfg, err := LoadConfig(a.cfgPath)
+	if err != nil {
+		log.Printf("reload config: %v", err)
+		return
+	}
+	store, err := OpenStore(cfg.StateDB)
+	if err != nil {
+		log.Printf("open store: %v", err)
+		return
+	}
+	if a.store != nil {
+		_ = a.store.Close()
+	}
+	a.cfg = cfg
+	a.store = store
+	a.client, _ = NewClient(cfg.Host, cfg.User, cfg.Pass)
+	a.connState = connUnknown
+	a.refreshMainStats()
+}
+
+// startAddProfile enters the wizard in "add-profile" mode: the first
+// step asks for the new profile's name, then the normal URL / user /
+// pass flow runs. Saving creates the new section and marks it active.
+func (a *app) startAddProfile() {
+	a.wizard = wizardState{step: stepProfileName, addProfile: true}
+	a.screen = screenFirstRun
+	ink.OpenKeyboard("new-profile-name", 40)
 }

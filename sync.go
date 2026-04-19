@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -212,10 +213,14 @@ func reconcileDeletions(store *Store, remote []Book, opts SyncOptions, res *Sync
 }
 
 // ScopeFor returns the opaque scope string for a config. Change in any
-// of the identity-bearing fields invalidates the scope, disabling the
-// delete step for that run.
+// of the identity-bearing fields (backend, host, filter set, path)
+// invalidates the scope, disabling the delete step for that run. The
+// filter list is sorted before hashing so two orderings of the same set
+// produce the same scope.
 func ScopeFor(cfg *Config) string {
-	return fmt.Sprintf("%s|%s|%s|%s", cfg.Backend, cfg.Host, cfg.FilterHref, cfg.Path)
+	filters := append([]string(nil), cfg.FilterHrefs...)
+	sort.Strings(filters)
+	return fmt.Sprintf("%s|%s|%s|%s|%s", cfg.Profile, cfg.Backend, cfg.Host, strings.Join(filters, ","), cfg.Path)
 }
 
 func download(src Source, library string, b Book) (string, error) {
