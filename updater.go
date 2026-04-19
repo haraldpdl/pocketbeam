@@ -16,6 +16,14 @@ import (
 	"strings"
 )
 
+// UserAgentFn returns the HTTP User-Agent used by updater requests.
+// The default prints only `pocketbeam/<version>`; the InkView build
+// overrides it at startup with the device-specific form built in
+// ui_arm.go. Disable update checks via check_updates = off.
+var UserAgentFn = func() string {
+	return "pocketbeam/" + version
+}
+
 // Release captures the subset of a Gitea / GitHub release payload that
 // the updater needs: the tag name (treated as a semver), a direct URL to
 // the ARM .app asset, and a published SHA-256 checksum for integrity
@@ -57,7 +65,7 @@ func CheckLatest(ctx context.Context, endpoint, currentVersion string) (newer bo
 		return false, Release{}, err
 	}
 	req.Header.Set("Accept", "application/json")
-	req.Header.Set("User-Agent", "pocketbeam/"+version)
+	req.Header.Set("User-Agent", UserAgentFn())
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return false, Release{}, err
@@ -98,7 +106,7 @@ func Download(ctx context.Context, rel Release, destPath string, progress func(w
 	if err != nil {
 		return err
 	}
-	req.Header.Set("User-Agent", "pocketbeam/"+version)
+	req.Header.Set("User-Agent", UserAgentFn())
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return err

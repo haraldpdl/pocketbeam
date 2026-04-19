@@ -409,6 +409,18 @@ func (a *app) Init() error {
 		version, ink.DeviceModel(), ink.HardwareType(), ink.SoftwareVersion(),
 		sz.X, sz.Y, a.layout.scale)
 
+	// Install the device-aware User-Agent used by the updater. This
+	// header goes only to the release endpoint (OPDS / WebDAV requests
+	// still identify themselves as a plain pocketbeam/<version>, since
+	// the user already knows which device their server is talking to).
+	// Captured as a closure so each request reads the current values
+	// rather than whatever was present at Init.
+	UserAgentFn = func() string {
+		sz := ink.ScreenSize()
+		return fmt.Sprintf("pocketbeam/%s (%s; %s; fw %s; %dx%d)",
+			version, ink.DeviceModel(), ink.HardwareType(), ink.SoftwareVersion(), sz.X, sz.Y)
+	}
+
 	if err := ink.InitCerts(); err != nil {
 		log.Printf("InitCerts: %v", err)
 	}
@@ -2564,10 +2576,13 @@ func (a *app) startAddProfile() {
 
 // ---------- Self-update ----------
 
-// updateCheckMinInterval bounds how often the background check hits the
-// release endpoint. Gitea does not rate-limit, but a daily cadence is a
-// better match for how often the user is likely to see a new release.
-const updateCheckMinInterval = 24 * time.Hour
+// updateCheckMinInterval bounds how often the background check hits
+// the release endpoint. Weekly matches how often a new release is
+// realistically cut and keeps background traffic low on metered
+// connections. The first launch after install bypasses this because
+// meta.last_update_check has never been set, so a fresh sideload
+// always sees the current latest immediately.
+const updateCheckMinInterval = 7 * 24 * time.Hour
 
 // metaLastUpdateCheck is the store meta key holding the RFC3339
 // timestamp of the most recent successful or failed update check.
