@@ -705,6 +705,17 @@ func (a *app) startSync() {
 }
 
 func (a *app) runSync() {
+	// Prevent the device from going to standby mid-sync. PocketBook's power
+	// manager will otherwise suspend the CPU / drop Wi-Fi after the usual
+	// idle timeout even though bookbeam is actively downloading. Restore
+	// normal behaviour when the sync finishes (including on early return).
+	ink.SetSleepMode(false)
+	ink.SetAutoPowerOff(false)
+	defer func() {
+		ink.SetSleepMode(true)
+		ink.SetAutoPowerOff(true)
+	}()
+
 	if err := a.ensureConnected(); err != nil {
 		a.finishSyncWithError(err)
 		ink.Repaint()
