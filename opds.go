@@ -216,6 +216,58 @@ type FilterOption struct {
 	Href string // OPDS path to walk for this filter
 }
 
+// OPDSLevel is one step of nested navigation: a list of subsections the
+// user can drill into, the feed's title (for breadcrumbs), and whether
+// the feed contains acquirable books at this level. Used by the picker.
+type OPDSLevel struct {
+	FeedTitle   string
+	Subsections []FilterOption
+	BookCount   int // total acquisition entries seen across all pages
+}
+
+// FetchLevel retrieves the feed at href (walking pagination) and splits
+// its entries into drill-in subsections and acquisition entries. An empty
+// href starts at "/opds".
+func (c *Client) FetchLevel(href string) (OPDSLevel, error) {
+	if href == "" {
+		href = "/opds"
+	}
+	var lvl OPDSLevel
+	first := true
+	for href != "" {
+		body, err := c.get(href)
+		if err != nil {
+			return OPDSLevel{}, err
+		}
+		var f feed
+		if err := xml.Unmarshal(body, &f); err != nil {
+			return OPDSLevel{}, fmt.Errorf("parse %s: %w", href, err)
+		}
+		if first {
+			lvl.FeedTitle = strings.TrimSpace(f.Title)
+			first = false
+		}
+		for _, e := range f.Entries {
+			if _, ok := bookFromEntry(c.Base, e); ok {
+				lvl.BookCount++
+				continue
+			}
+			if sub := navigationHref(e.Links); sub != "" {
+				name := strings.TrimSpace(e.Title)
+				if name == "" {
+					name = sub
+				}
+				lvl.Subsections = append(lvl.Subsections, FilterOption{
+					Name: name,
+					Href: sub,
+				})
+			}
+		}
+		href = nextLink(f.Links)
+	}
+	return lvl, nil
+}
+
 // ListFilterOptions returns the options a user can choose from in the
 // filter picker. On CWA it returns the user's shelves; on any other OPDS
 // server it returns the top-level subsections of the root feed.

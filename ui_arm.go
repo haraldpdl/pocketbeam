@@ -63,16 +63,26 @@ type syncState struct {
 	bookStart time.Time // when the current book's download began
 }
 
-// shelfPickerState holds the in-flight list-options request plus its result
-// or error. Written by the fetch goroutine, read by Draw. Despite the legacy
-// name it covers both CWA shelves and generic OPDS subsections.
-type shelfPickerState struct {
-	mu       sync.Mutex
-	loading  bool
-	options  []FilterOption
-	err      error
-	isCWA    bool              // captured at fetch time so the draw function can label the screen
-	rowRects []image.Rectangle // one per visible row (index 0 = "All books")
+// feedPickerFrame is one level of the nested-navigation stack. Pushed when
+// the user drills into a subsection, popped on "..".
+type feedPickerFrame struct {
+	Href  string
+	Title string
+}
+
+// feedPickerState holds the current OPDS feed the user is browsing. The
+// navigation stack lets the user walk back up to any ancestor.
+type feedPickerState struct {
+	mu         sync.Mutex
+	loading    bool
+	href       string
+	title      string
+	stack      []feedPickerFrame
+	level      OPDSLevel
+	err        error
+	rowRects   []image.Rectangle // per visible subsection row
+	selectRect image.Rectangle   // "Sync this level" button
+	upRect     image.Rectangle   // ".. (up)" button, empty when at root
 }
 
 // dirPickerState holds the current WebDAV directory the user is drilling
@@ -194,7 +204,7 @@ type app struct {
 	screen      screen
 	wizard      wizardState
 	sync        syncState
-	picker      shelfPickerState
+	picker      feedPickerState
 	dirPicker   dirPickerState
 	lastSync    SyncSummary
 	hasLastSync bool
@@ -1092,23 +1102,66 @@ func (a *app) startChangeInfo() {
 	ink.OpenKeyboard("https://library.example.com:8083", 512)
 }
 
-// ---------- Shelf picker ----------
+// ---------- OPDS feed picker (nested) ----------
 
-// openShelfPicker transitions to the picker screen and kicks off a fetch of
-// the filter options in the background.
+// openShelfPicker transitions to the picker screen and fetches the root
+// OPDS feed. The name is historical; the picker now walks the full feed
+// tree, not just shelves.
 func (a *app) openShelfPicker() {
 	a.picker.mu.Lock()
+	a.picker.stack = nil
+	a.picker.href = "/opds"
+	a.picker.title = "All books"
 	a.picker.loading = true
-	a.picker.options = nil
+	a.picker.level = OPDSLevel{}
 	a.picker.err = nil
 	a.picker.rowRects = nil
 	a.picker.mu.Unlock()
 	a.screen = screenShelfPicker
 	ink.Repaint()
-	go a.fetchFilterOptions()
+	go a.fetchFeedLevel("/opds", "All books")
 }
 
-func (a *app) fetchFilterOptions() {
+// drillInto pushes the current feed onto the stack and fetches the child
+// feed at href. Title is the navigation entry's display name, used in the
+// breadcrumb and in the stored filter_name when the user taps "Sync this
+// level".
+func (a *app) drillInto(href, title string) {
+	a.picker.mu.Lock()
+	a.picker.stack = append(a.picker.stack, feedPickerFrame{Href: a.picker.href, Title: a.picker.title})
+	a.picker.href = href
+	a.picker.title = title
+	a.picker.loading = true
+	a.picker.level = OPDSLevel{}
+	a.picker.err = nil
+	a.picker.rowRects = nil
+	a.picker.mu.Unlock()
+	ink.Repaint()
+	go a.fetchFeedLevel(href, title)
+}
+
+// drillUp pops one frame off the navigation stack and re-fetches the
+// parent feed. No-op at the root.
+func (a *app) drillUp() {
+	a.picker.mu.Lock()
+	if len(a.picker.stack) == 0 {
+		a.picker.mu.Unlock()
+		return
+	}
+	top := a.picker.stack[len(a.picker.stack)-1]
+	a.picker.stack = a.picker.stack[:len(a.picker.stack)-1]
+	a.picker.href = top.Href
+	a.picker.title = top.Title
+	a.picker.loading = true
+	a.picker.level = OPDSLevel{}
+	a.picker.err = nil
+	a.picker.rowRects = nil
+	a.picker.mu.Unlock()
+	ink.Repaint()
+	go a.fetchFeedLevel(top.Href, top.Title)
+}
+
+func (a *app) fetchFeedLevel(href, title string) {
 	if err := a.ensureConnected(); err != nil {
 		a.picker.mu.Lock()
 		a.picker.loading = false
@@ -1117,12 +1170,16 @@ func (a *app) fetchFilterOptions() {
 		ink.Repaint()
 		return
 	}
-	opts, err := a.client.ListFilterOptions()
+	lvl, err := a.client.FetchLevel(href)
 	a.picker.mu.Lock()
 	a.picker.loading = false
-	a.picker.options = opts
+	a.picker.level = lvl
 	a.picker.err = err
-	a.picker.isCWA = a.client.IsCWA
+	if err == nil && lvl.FeedTitle != "" && len(a.picker.stack) == 0 {
+		// Root feed: adopt the server's advertised title for the breadcrumb
+		// so the user sees their server's label instead of the placeholder.
+		a.picker.title = lvl.FeedTitle
+	}
 	a.picker.mu.Unlock()
 	ink.Repaint()
 }
@@ -1143,45 +1200,45 @@ func (a *app) drawShelfPicker() {
 
 	a.picker.mu.Lock()
 	loading := a.picker.loading
-	options := append([]FilterOption(nil), a.picker.options...)
+	lvl := a.picker.level
 	pickerErr := a.picker.err
-	isCWA := a.picker.isCWA
+	stackLen := len(a.picker.stack)
+	curTitle := a.picker.title
 	a.picker.mu.Unlock()
 
-	thingName := "subsections"
-	if isCWA {
-		thingName = "shelves"
+	// Breadcrumb / current-level label.
+	body.SetActive(ink.Black)
+	crumb := "Currently in: " + truncate(curTitle, 50)
+	if stackLen > 0 {
+		crumb += fmt.Sprintf("  (%d up)", stackLen)
 	}
+	ink.DrawString(image.Point{X: a.layout.margin, Y: 220}, crumb)
+
+	// Reserve space at bottom for "Sync this level" + Back.
+	selectBtnH := 100
+	areaTop := a.layout.pickerAreaTop
+	areaBottom := a.layout.pickerAreaBottom - selectBtnH - 40
 
 	if loading {
-		body.SetActive(ink.Black)
-		ink.DrawString(image.Point{X: a.layout.margin, Y: 260}, "Loading "+thingName+"...")
-		ink.ShowHourglassAt(image.Point{X: a.layout.margin, Y: 340})
+		ink.DrawString(image.Point{X: a.layout.margin, Y: 300}, "Loading...")
+		ink.ShowHourglassAt(image.Point{X: a.layout.margin, Y: 360})
 	} else if pickerErr != nil {
-		body.SetActive(ink.Black)
-		ink.DrawString(image.Point{X: a.layout.margin, Y: 260}, "Could not load "+thingName+":")
-		ink.DrawString(image.Point{X: a.layout.margin, Y: 310}, truncate(pickerErr.Error(), 60))
-	} else if len(options) == 0 {
-		body.SetActive(ink.Black)
-		ink.DrawString(image.Point{X: a.layout.margin, Y: 260}, "This server does not expose "+thingName+".")
-		ink.DrawString(image.Point{X: a.layout.margin, Y: 310}, "Select All books to continue.")
-		// Still render the All books row so the user can confirm.
-		rowH := 90
-		rect := image.Rect(a.layout.margin, a.layout.pickerAreaTop+60, a.layout.screen.X-a.layout.margin, a.layout.pickerAreaTop+60+rowH-20)
-		ink.DrawRect(rect, ink.Black)
-		btnFont.SetActive(ink.Black)
-		drawCenteredText(btnFont, rect, "All books", 44)
-		a.picker.mu.Lock()
-		a.picker.rowRects = []image.Rectangle{rect}
-		a.picker.mu.Unlock()
+		ink.DrawString(image.Point{X: a.layout.margin, Y: 300}, "Could not load feed:")
+		ink.DrawString(image.Point{X: a.layout.margin, Y: 350}, truncate(pickerErr.Error(), 60))
 	} else {
 		rowH := 90
-		areaTop := a.layout.pickerAreaTop
-		areaBottom := a.layout.pickerAreaBottom
+		atRoot := stackLen == 0
+		rows := make([]string, 0, len(lvl.Subsections)+1)
+		if !atRoot {
+			rows = append(rows, ".. (up)")
+		}
+		for _, sub := range lvl.Subsections {
+			rows = append(rows, sub.Name)
+		}
+
 		availableH := areaBottom - areaTop
-		maxRows := availableH/rowH - 1
-		total := 1 + len(options) // +1 for "All books"
-		visible := total
+		maxRows := availableH / rowH
+		visible := len(rows)
 		if visible > maxRows {
 			visible = maxRows
 		}
@@ -1192,37 +1249,53 @@ func (a *app) drawShelfPicker() {
 			rect := image.Rect(a.layout.margin, y1, a.layout.screen.X-a.layout.margin, y1+rowH-20)
 			rects = append(rects, rect)
 			ink.DrawRect(rect, ink.Black)
-			var text string
-			if i == 0 {
-				text = "All books"
-			} else {
-				text = options[i-1].Name
-			}
-			btnFont.SetActive(ink.Black)
-			drawCenteredText(btnFont, rect, truncate(text, 40), 44)
+			drawCenteredText(btnFont, rect, truncate(rows[i], 40), 44)
 		}
-		if total > visible {
-			body.SetActive(ink.Black)
+		if len(rows) > visible {
 			ink.DrawString(
 				image.Point{X: a.layout.margin, Y: areaBottom - 30},
-				fmt.Sprintf("Showing %d of %d.", visible, total),
+				fmt.Sprintf("Showing %d of %d.", visible, len(rows)),
 			)
 		}
 
 		a.picker.mu.Lock()
 		a.picker.rowRects = rects
+		if atRoot {
+			a.picker.upRect = image.Rectangle{}
+		} else if len(rects) > 0 {
+			a.picker.upRect = rects[0]
+		}
 		a.picker.mu.Unlock()
 	}
 
+	// "Sync this level" button, always present (syncing at root = sync all).
+	selectY2 := a.layout.backButton.Min.Y - 40
+	selectY1 := selectY2 - selectBtnH
+	selectRect := image.Rect(a.layout.margin, selectY1, a.layout.screen.X-a.layout.margin, selectY2)
+	ink.DrawRect(selectRect, ink.Black)
+	ink.DrawRect(selectRect.Inset(2), ink.Black)
+	label := "Sync this level"
+	if stackLen == 0 {
+		label = "Sync everything"
+	} else if !loading && pickerErr == nil && lvl.BookCount > 0 {
+		label = fmt.Sprintf("Sync this level (%d books)", lvl.BookCount)
+	}
+	drawCenteredText(btnFont, selectRect, truncate(label, 40), 44)
+	a.picker.mu.Lock()
+	a.picker.selectRect = selectRect
+	a.picker.mu.Unlock()
+
 	ink.DrawRect(a.layout.backButton, ink.Black)
-	btnFont.SetActive(ink.Black)
 	drawCenteredText(btnFont, a.layout.backButton, "Back", 44)
 }
 
 func (a *app) shelfPickerKey(e ink.KeyEvent) bool {
 	if e.Key == ink.KeyOk {
-		a.screen = screenSettings
-		ink.Repaint()
+		a.pickerConfirmCurrent()
+		return true
+	}
+	if e.Key == ink.KeyBack {
+		a.drillUp()
 		return true
 	}
 	return false
@@ -1239,23 +1312,57 @@ func (a *app) shelfPickerPointer(e ink.PointerEvent) bool {
 	}
 	a.picker.mu.Lock()
 	rects := a.picker.rowRects
-	options := a.picker.options
+	subs := a.picker.level.Subsections
+	selectRect := a.picker.selectRect
+	stackLen := len(a.picker.stack)
 	a.picker.mu.Unlock()
+
+	if e.Point.In(selectRect) {
+		a.pickerConfirmCurrent()
+		return true
+	}
+
+	atRoot := stackLen == 0
 	for i, r := range rects {
-		if e.Point.In(r) {
-			if i == 0 {
-				a.setFilter("", "")
-			} else if i-1 < len(options) {
-				o := options[i-1]
-				a.setFilter(o.Href, o.Name)
-			}
-			a.screen = screenSettings
-			ink.HideHourglass()
-			ink.Repaint()
+		if !e.Point.In(r) {
+			continue
+		}
+		if !atRoot && i == 0 {
+			a.drillUp()
+			return true
+		}
+		offset := 0
+		if !atRoot {
+			offset = 1
+		}
+		idx := i - offset
+		if idx >= 0 && idx < len(subs) {
+			s := subs[idx]
+			a.drillInto(s.Href, s.Name)
 			return true
 		}
 	}
 	return false
+}
+
+// pickerConfirmCurrent saves the currently-displayed feed as the sync
+// filter and returns to the settings screen. At the root (empty stack) we
+// store an empty filter to mean "sync everything" so the rest of the app
+// keeps the simple "no filter" semantics.
+func (a *app) pickerConfirmCurrent() {
+	a.picker.mu.Lock()
+	href := a.picker.href
+	title := a.picker.title
+	atRoot := len(a.picker.stack) == 0
+	a.picker.mu.Unlock()
+	if atRoot {
+		a.setFilter("", "")
+	} else {
+		a.setFilter(href, title)
+	}
+	a.screen = screenSettings
+	ink.HideHourglass()
+	ink.Repaint()
 }
 
 // ---------- Directory picker (WebDAV) ----------
