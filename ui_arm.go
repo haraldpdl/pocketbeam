@@ -133,14 +133,17 @@ type updateState struct {
 
 // profileListState holds the snapshot shown on the profile-list screen
 // and the tap targets for each row plus the Add-new / Delete buttons.
+// confirmDelete is true after the first tap on Delete; a second tap
+// actually deletes. Any other interaction resets it.
 type profileListState struct {
-	mu        sync.Mutex
-	names     []string
-	active    string
-	err       error
-	rowRects  []image.Rectangle
-	addRect   image.Rectangle
-	delRect   image.Rectangle
+	mu            sync.Mutex
+	names         []string
+	active        string
+	err           error
+	rowRects      []image.Rectangle
+	addRect       image.Rectangle
+	delRect       image.Rectangle
+	confirmDelete bool
 }
 
 // deleteConfirmState holds the deletion set awaiting user confirmation
@@ -2396,6 +2399,7 @@ func (a *app) drawProfileList() {
 	names := append([]string(nil), a.profileList.names...)
 	active := a.profileList.active
 	perr := a.profileList.err
+	confirming := a.profileList.confirmDelete
 	a.profileList.mu.Unlock()
 
 	ink.DrawString(image.Point{X: a.layout.margin, Y: 140}, "Server profiles")
@@ -2439,11 +2443,24 @@ func (a *app) drawProfileList() {
 	ink.DrawRect(addRect.Inset(2), ink.Black)
 	drawCenteredText(btnFont, addRect, "Add new server", a.layout.fpx(44))
 
+	// Delete button is always shown. Last-profile deletion is allowed
+	// (resets to first-run) so users can reset from inside the app.
+	// Tap-to-confirm: the first tap changes the label; a second tap
+	// commits. Any other interaction resets the confirm state.
 	var delRect image.Rectangle
-	if len(names) > 1 {
+	if active != "" {
 		delRect = image.Rect(a.layout.margin, delY1, a.layout.screen.X-a.layout.margin, delY2)
 		ink.DrawRect(delRect, ink.Black)
-		drawCenteredText(btnFont, delRect, "Delete active profile", a.layout.fpx(44))
+		label := "Delete active profile"
+		if confirming {
+			label = fmt.Sprintf("Tap again to delete \"%s\"", active)
+			if len(names) == 1 {
+				label = fmt.Sprintf("Tap again to reset pocketbeam")
+			}
+			// Double-border to visually emphasize the armed state.
+			ink.DrawRect(delRect.Inset(2), ink.Black)
+		}
+		drawCenteredText(btnFont, delRect, truncate(label, 40), a.layout.fpx(44))
 	}
 
 	a.profileList.mu.Lock()
@@ -2470,6 +2487,7 @@ func (a *app) profileListPointer(e ink.PointerEvent) bool {
 		return false
 	}
 	if e.Point.In(a.layout.backButton) {
+		a.clearDeleteConfirm()
 		a.screen = screenSettings
 		ink.Repaint()
 		return true
@@ -2480,16 +2498,30 @@ func (a *app) profileListPointer(e ink.PointerEvent) bool {
 	active := a.profileList.active
 	addRect := a.profileList.addRect
 	delRect := a.profileList.delRect
+	confirming := a.profileList.confirmDelete
 	a.profileList.mu.Unlock()
 
 	if e.Point.In(addRect) {
+		a.clearDeleteConfirm()
 		a.startAddProfile()
 		return true
 	}
 	if !delRect.Empty() && e.Point.In(delRect) {
+		if !confirming {
+			a.profileList.mu.Lock()
+			a.profileList.confirmDelete = true
+			a.profileList.mu.Unlock()
+			ink.Repaint()
+			return true
+		}
+		a.profileList.mu.Lock()
+		a.profileList.confirmDelete = false
+		a.profileList.mu.Unlock()
 		a.deleteActiveProfile(active)
 		return true
 	}
+	// Any other tap cancels the armed delete.
+	a.clearDeleteConfirm()
 	for i, r := range rects {
 		if !e.Point.In(r) {
 			continue
@@ -2500,6 +2532,19 @@ func (a *app) profileListPointer(e ink.PointerEvent) bool {
 		return true
 	}
 	return false
+}
+
+// clearDeleteConfirm resets the two-tap-to-delete state so a stale
+// "armed" condition can't carry over into an unrelated interaction.
+func (a *app) clearDeleteConfirm() {
+	a.profileList.mu.Lock()
+	if a.profileList.confirmDelete {
+		a.profileList.confirmDelete = false
+		a.profileList.mu.Unlock()
+		ink.Repaint()
+		return
+	}
+	a.profileList.mu.Unlock()
 }
 
 // switchProfile marks the chosen profile active, reloads the config,
@@ -2517,14 +2562,32 @@ func (a *app) switchProfile(name string) {
 	ink.Repaint()
 }
 
-// deleteActiveProfile removes the active profile after a switch. The
-// fileDoc promotes another profile to active automatically; we reload to
-// pick it up.
+// deleteActiveProfile removes the active profile. fileDoc promotes
+// another profile to active automatically when one exists; if the
+// deleted profile was the only one, we drop to the first-run wizard
+// so the user can start over from scratch.
 func (a *app) deleteActiveProfile(name string) {
 	if err := DeleteProfile(a.cfgPath, name); err != nil {
 		a.profileList.mu.Lock()
 		a.profileList.err = err
 		a.profileList.mu.Unlock()
+		ink.Repaint()
+		return
+	}
+	names, _, _ := ListProfiles(a.cfgPath)
+	if len(names) == 0 {
+		// No profiles left; tear down in-memory state and hand control
+		// to the wizard. The store stays on disk until the user sets up
+		// a new profile pointing at a (possibly new) StateDB path.
+		if a.store != nil {
+			_ = a.store.Close()
+			a.store = nil
+		}
+		a.cfg = nil
+		a.client = nil
+		a.connState = connUnknown
+		a.wizard = wizardState{step: stepWelcome}
+		a.screen = screenFirstRun
 		ink.Repaint()
 		return
 	}

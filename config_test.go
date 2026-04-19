@@ -116,8 +116,21 @@ func TestProfilesAddListSwitchDelete(t *testing.T) {
 	if len(names) != 1 || names[0] != "nas" || active != "nas" {
 		t.Errorf("after delete: names=%v active=%q", names, active)
 	}
-	if err := DeleteProfile(path, "nas"); err == nil {
-		t.Errorf("deleting last profile should error")
+	// Deleting the last profile now succeeds (leaves the file empty);
+	// the caller is expected to drop the user into the first-run
+	// wizard when LoadConfig subsequently reports no profiles.
+	if err := DeleteProfile(path, "nas"); err != nil {
+		t.Errorf("deleting last profile: %v", err)
+	}
+	names, active, err = ListProfiles(path)
+	if err != nil {
+		t.Fatalf("list after empty: %v", err)
+	}
+	if len(names) != 0 || active != "" {
+		t.Errorf("after deleting last profile: names=%v active=%q, want empty", names, active)
+	}
+	if _, err := LoadConfig(path); err == nil {
+		t.Errorf("LoadConfig should fail on empty config so the caller can trigger first-run")
 	}
 }
 
