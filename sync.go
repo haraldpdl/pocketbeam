@@ -1,12 +1,31 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
+	"unicode/utf8"
 )
+
+// downloadBodyTimeout caps the wall-clock time for a single book download
+// once headers have been received. The transport's ResponseHeaderTimeout
+// only covers the handshake, so a server that stalls the body at 1 byte per
+// second could otherwise hold the TCP connection indefinitely.
+const downloadBodyTimeout = 30 * time.Minute
+
+// stalePartAge is the minimum age of a leftover .part file before the sweep
+// deletes it. The grace window avoids clobbering a concurrent run (e.g. the
+// user triggers sync from the UI while a CLI run is still in flight).
+const stalePartAge = 1 * time.Hour
+
+// maxFilenameBytes caps sanitized filename components below ext4's 255-byte
+// NAME_MAX, leaving headroom for an extension. Calibre multi-author strings
+// ("A & B & C & D & ...") routinely exceed this on generic OPDS catalogs.
+const maxFilenameBytes = 200
 
 // formatExt maps OPDS acquisition mime types to file extensions.
 var formatExt = map[string]string{
@@ -29,6 +48,7 @@ type Progress func(index, total int, b Book)
 // path like /opds/shelf/1 or a generic subsection like /opds/books);
 // otherwise the full catalog.
 func Sync(client *Client, store *Store, library, filterHref string, progress Progress) (downloaded, skipped, failed int, firstErr error) {
+	sweepStalePartFiles(library, stalePartAge)
 	books, err := client.WalkFiltered(filterHref)
 	if err != nil {
 		return 0, 0, 0, fmt.Errorf("walk catalog: %w", err)
@@ -90,7 +110,9 @@ func download(client *Client, library string, b Book) (string, error) {
 	}
 	path := filepath.Join(dir, sanitize(b.Title)+ext)
 
-	body, err := client.Fetch(b.URL)
+	ctx, cancel := context.WithTimeout(context.Background(), downloadBodyTimeout)
+	defer cancel()
+	body, err := client.Fetch(ctx, b.URL)
 	if err != nil {
 		return "", err
 	}
@@ -138,8 +160,48 @@ func sanitize(s string) string {
 	}
 	out := strings.Join(strings.Fields(b.String()), " ")
 	out = strings.Trim(out, ". ")
+	out = truncateUTF8(out, maxFilenameBytes)
+	out = strings.TrimRight(out, ". ")
 	if out == "" {
 		return "_"
 	}
 	return out
+}
+
+// truncateUTF8 returns s truncated to at most maxBytes bytes without
+// splitting a multi-byte rune. Input shorter than the limit is returned
+// unchanged.
+func truncateUTF8(s string, maxBytes int) string {
+	if len(s) <= maxBytes {
+		return s
+	}
+	cut := maxBytes
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut]
+}
+
+// sweepStalePartFiles removes any *.part files under library older than
+// olderThan. These are left behind by crashes, reboots, or SIGKILL during
+// a prior sync's atomic-rename staging. Errors are swallowed; this is a
+// best-effort housekeeping pass, not a precondition for sync.
+func sweepStalePartFiles(library string, olderThan time.Duration) {
+	cutoff := time.Now().Add(-olderThan)
+	_ = filepath.WalkDir(library, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if d.IsDir() || !strings.HasSuffix(path, ".part") {
+			return nil
+		}
+		info, err := d.Info()
+		if err != nil {
+			return nil
+		}
+		if info.ModTime().Before(cutoff) {
+			_ = os.Remove(path)
+		}
+		return nil
+	})
 }

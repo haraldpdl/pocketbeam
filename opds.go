@@ -1,7 +1,9 @@
 package main
 
 import (
+	"context"
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -101,8 +103,44 @@ func NewClient(base, user, pass string) (*Client, error) {
 		Base: u,
 		User: user,
 		Pass: pass,
-		HTTP: &http.Client{Transport: transport},
+		HTTP: &http.Client{
+			Transport:     transport,
+			CheckRedirect: rejectSchemeDowngrade,
+		},
 	}, nil
+}
+
+// rejectSchemeDowngrade blocks redirects from https:// to http://. A
+// compromised or misconfigured proxy could otherwise strip TLS and expose
+// Basic auth credentials in cleartext.
+func rejectSchemeDowngrade(req *http.Request, via []*http.Request) error {
+	if len(via) == 0 {
+		return nil
+	}
+	origin := via[0].URL
+	if origin.Scheme == "https" && req.URL.Scheme == "http" {
+		return fmt.Errorf("refusing redirect from https to http (%s)", redactURL(req.URL))
+	}
+	if len(via) >= 10 {
+		return errors.New("too many redirects")
+	}
+	return nil
+}
+
+// redactURL returns a URL string with any embedded userinfo stripped. OPDS
+// base URLs normally carry auth via headers, but a user pasting
+// `https://user:pass@host/` would otherwise leak credentials into error
+// messages and logs.
+func redactURL(u *url.URL) string {
+	if u == nil {
+		return ""
+	}
+	if u.User != nil {
+		cp := *u
+		cp.User = nil
+		return cp.String()
+	}
+	return u.String()
 }
 
 func (c *Client) get(href string) ([]byte, error) {
@@ -114,43 +152,53 @@ func (c *Client) get(href string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	if c.User != "" || c.Pass != "" {
-		req.SetBasicAuth(c.User, c.Pass)
-	}
+	c.prepare(req)
 	resp, err := c.HTTP.Do(req)
 	if err != nil {
 		return nil, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
-		return nil, fmt.Errorf("GET %s: %s", abs, resp.Status)
+		return nil, fmt.Errorf("GET %s: %s", redactURL(abs), resp.Status)
 	}
 	return io.ReadAll(resp.Body)
 }
 
-// Fetch downloads a single URL, used for EPUB acquisition. The caller streams
-// the body to disk; we return the body reader and a close func.
-func (c *Client) Fetch(rawurl string) (io.ReadCloser, error) {
+// Fetch downloads a single URL, used for book acquisition. The caller streams
+// the body to disk; the returned ReadCloser must be closed. The context
+// bounds the whole transfer (headers + body); cancel it to abort a stalled
+// download, and set a deadline to cap wall-clock transfer time.
+func (c *Client) Fetch(ctx context.Context, rawurl string) (io.ReadCloser, error) {
 	abs, err := c.Base.Parse(rawurl)
 	if err != nil {
 		return nil, err
 	}
-	req, err := http.NewRequest("GET", abs.String(), nil)
+	req, err := http.NewRequestWithContext(ctx, "GET", abs.String(), nil)
 	if err != nil {
 		return nil, err
 	}
-	if c.User != "" || c.Pass != "" {
-		req.SetBasicAuth(c.User, c.Pass)
-	}
+	c.prepare(req)
 	resp, err := c.HTTP.Do(req)
 	if err != nil {
 		return nil, err
 	}
 	if resp.StatusCode != 200 {
 		resp.Body.Close()
-		return nil, fmt.Errorf("GET %s: %s", abs, resp.Status)
+		return nil, fmt.Errorf("GET %s: %s", redactURL(abs), resp.Status)
 	}
 	return resp.Body, nil
+}
+
+// prepare applies auth and request headers common to every OPDS request.
+// Accept-Encoding: identity avoids servers (or middleware) returning gzipped
+// bodies the client then has to decode inline. Some Calibre-Web fronting
+// proxies have been observed mangling compressed OPDS streams.
+func (c *Client) prepare(req *http.Request) {
+	if c.User != "" || c.Pass != "" {
+		req.SetBasicAuth(c.User, c.Pass)
+	}
+	req.Header.Set("Accept-Encoding", "identity")
+	req.Header.Set("User-Agent", "bookbeam/"+version)
 }
 
 // Shelf is a user-curated collection of books, exposed by CWA under

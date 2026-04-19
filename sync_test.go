@@ -1,6 +1,13 @@
 package main
 
-import "testing"
+import (
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+	"unicode/utf8"
+)
 
 func TestSanitize(t *testing.T) {
 	cases := []struct{ in, want string }{
@@ -51,6 +58,54 @@ func TestPickAcquisition_NoneSupported(t *testing.T) {
 	}
 	if got := pickAcquisition(links).Href; got != "" {
 		t.Errorf("expected empty when no preferred format, got %q", got)
+	}
+}
+
+func TestSanitize_LengthCap(t *testing.T) {
+	long := strings.Repeat("A", maxFilenameBytes+50)
+	got := sanitize(long)
+	if len(got) > maxFilenameBytes {
+		t.Errorf("sanitize did not cap length: got %d bytes, want <= %d", len(got), maxFilenameBytes)
+	}
+	// Ensure the cap doesn't split a multi-byte rune. 4-byte runes ("𝄞"
+	// musical symbol) packed to just over the cap must end on a rune
+	// boundary.
+	multiByte := strings.Repeat("𝄞", (maxFilenameBytes/4)+5)
+	got = sanitize(multiByte)
+	if len(got) > maxFilenameBytes {
+		t.Errorf("multi-byte sanitize exceeded cap: %d", len(got))
+	}
+	if !utf8.ValidString(got) {
+		t.Errorf("sanitize produced invalid UTF-8 at cap boundary")
+	}
+}
+
+func TestSweepStalePartFiles(t *testing.T) {
+	dir := t.TempDir()
+	stale := filepath.Join(dir, "Author", "Book.epub.part")
+	fresh := filepath.Join(dir, "Author", "Fresh.epub.part")
+	keep := filepath.Join(dir, "Author", "Book.epub")
+	if err := os.MkdirAll(filepath.Dir(stale), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range []string{stale, fresh, keep} {
+		if err := os.WriteFile(p, []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	old := time.Now().Add(-2 * time.Hour)
+	if err := os.Chtimes(stale, old, old); err != nil {
+		t.Fatal(err)
+	}
+	sweepStalePartFiles(dir, time.Hour)
+	if _, err := os.Stat(stale); !os.IsNotExist(err) {
+		t.Errorf("stale .part not removed: %v", err)
+	}
+	if _, err := os.Stat(fresh); err != nil {
+		t.Errorf("fresh .part removed (should remain): %v", err)
+	}
+	if _, err := os.Stat(keep); err != nil {
+		t.Errorf("non-.part file removed: %v", err)
 	}
 }
 
