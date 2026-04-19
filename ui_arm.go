@@ -165,7 +165,8 @@ type dirPickerState struct {
 	err          error
 	offset       int
 	pageSize     int
-	rowRects     []image.Rectangle // one per visible row (index 0 = "..", 1+ = dirs)
+	rowRects     []image.Rectangle // paginated directory rows
+	upRect       image.Rectangle   // fixed ".. (up)" row, empty when at root
 	prevPageRect image.Rectangle
 	nextPageRect image.Rectangle
 	selectRect   image.Rectangle // "Sync this folder" button
@@ -1648,45 +1649,50 @@ func (a *app) drawShelfPicker() {
 			}
 			visibleSubs = append(visibleSubs, sub)
 		}
-		rows := make([]string, 0, len(visibleSubs)+1)
+
+		// ".. (up)" is a fixed row above the paginated window so the
+		// user can always tap to go up, including from page 2+. It
+		// occupies one rowH at the top of the list area; the subsection
+		// window starts below it.
+		listTop := areaTop
+		var upRect image.Rectangle
 		if !atRoot {
-			rows = append(rows, ".. (up)")
-		}
-		for _, sub := range visibleSubs {
-			label := sub.Name
-			if sub.CountKnown {
-				label = fmt.Sprintf("%s  (%d)", sub.Name, sub.Count)
-			}
-			rows = append(rows, label)
+			upRect = image.Rect(a.layout.margin, listTop, a.layout.screen.X-a.layout.margin, listTop+rowH-20)
+			ink.DrawRect(upRect, ink.Black)
+			drawCenteredText(btnFont, upRect, ".. (up)", a.layout.fpx(44))
+			listTop += rowH
 		}
 
-		// Paging: reserve a thin strip at the bottom of the list area for
-		// page buttons only when the list overflows a single page.
-		// pageSize is the true viewport (used for Prev/Next steps and
-		// the "Page N of M" label); maxRows is the rendered window for
-		// this specific page (same except on the short last page).
-		visibleArea := areaBottom - areaTop
+		// Paging applies only to subsection rows. pageSize is the true
+		// viewport (used for Prev/Next steps and the "Page N" label);
+		// the last page may render fewer rows.
+		visibleArea := areaBottom - listTop
 		pageSize := (visibleArea - pageBtnH - 20) / rowH
 		if pageSize < 1 {
 			pageSize = 1
 		}
-		p := paginate(len(rows), pageSize, offset)
+		p := paginate(len(visibleSubs), pageSize, offset)
 		offset = p.offset
 		end := p.end
-		maxRows := end - offset
 
-		rects := make([]image.Rectangle, 0, maxRows)
+		rects := make([]image.Rectangle, 0, end-offset)
 		for i := offset; i < end; i++ {
-			y1 := areaTop + (i-offset)*rowH
+			sub := visibleSubs[i]
+			label := sub.Name
+			if sub.CountKnown {
+				label = fmt.Sprintf("%s  (%d)", sub.Name, sub.Count)
+			}
+			y1 := listTop + (i-offset)*rowH
 			rect := image.Rect(a.layout.margin, y1, a.layout.screen.X-a.layout.margin, y1+rowH-20)
 			rects = append(rects, rect)
 			ink.DrawRect(rect, ink.Black)
-			drawCenteredText(btnFont, rect, truncate(rows[i], 40), a.layout.fpx(44))
+			drawCenteredText(btnFont, rect, truncate(label, 40), a.layout.fpx(44))
 		}
 
-		// Page buttons appear only when more rows exist outside the window.
-		if len(rows) > pageSize {
-			btnY1 := areaTop + pageSize*rowH
+		// Page buttons + label appear only when subsections overflow a
+		// page. The fixed up-row doesn't count.
+		if len(visibleSubs) > pageSize {
+			btnY1 := listTop + pageSize*rowH
 			btnY2 := btnY1 + pageBtnH
 			contentW := a.layout.screen.X - 2*a.layout.margin
 			half := (contentW - 40) / 2
@@ -1695,41 +1701,26 @@ func (a *app) drawShelfPicker() {
 				ink.DrawRect(prevPageRect, ink.Black)
 				drawCenteredText(btnFont, prevPageRect, "< Prev", a.layout.fpx(44))
 			}
-			if end < len(rows) {
+			if end < len(visibleSubs) {
 				nextPageRect = image.Rect(a.layout.screen.X-a.layout.margin-half, btnY1, a.layout.screen.X-a.layout.margin, btnY2)
 				ink.DrawRect(nextPageRect, ink.Black)
 				drawCenteredText(btnFont, nextPageRect, "Next >", a.layout.fpx(44))
 			}
-			// Page-of-pages indicator underneath. Computed from pageSize
-			// (true viewport), not maxRows (rendered window; short on
-			// the last page), so "Page N" matches what the user sees.
 			page := offset/pageSize + 1
-			total := (len(rows) + pageSize - 1) / pageSize
+			total := (len(visibleSubs) + pageSize - 1) / pageSize
 			ink.DrawString(
 				image.Point{X: a.layout.margin, Y: btnY2 + 30},
-				fmt.Sprintf("Page %d of %d (%d items)", page, total, len(rows)),
+				fmt.Sprintf("Page %d of %d (%d items)", page, total, len(visibleSubs)),
 			)
 		}
 
 		a.picker.mu.Lock()
-		// Persist the clamped offset + page size back to state. Without
-		// this the pointer handler reads the stored (possibly-overshot)
-		// offset and indexes past what the user actually sees, which
-		// manifests as taps landing on the wrong row after Next reaches
-		// the end. pageSize is used by shelfPickerPage to step by the
-		// correct amount regardless of how short the last page is.
 		a.picker.offset = offset
 		a.picker.pageSize = pageSize
 		a.picker.rowRects = rects
 		a.picker.prevPageRect = prevPageRect
 		a.picker.nextPageRect = nextPageRect
-		if atRoot {
-			a.picker.upRect = image.Rectangle{}
-		} else if offset == 0 && len(rects) > 0 {
-			a.picker.upRect = rects[0]
-		} else {
-			a.picker.upRect = image.Rectangle{}
-		}
+		a.picker.upRect = upRect
 		a.picker.mu.Unlock()
 	}
 
@@ -1844,10 +1835,10 @@ func (a *app) shelfPickerPointer(e ink.PointerEvent) bool {
 	subsAll := a.picker.level.Subsections
 	selectRect := a.picker.selectRect
 	doneRect := a.picker.doneRect
-	stackLen := len(a.picker.stack)
 	offset := a.picker.offset
 	prev := a.picker.prevPageRect
 	next := a.picker.nextPageRect
+	upRect := a.picker.upRect
 	hasSelection := len(a.picker.selected) > 0
 	a.picker.mu.Unlock()
 
@@ -1861,6 +1852,12 @@ func (a *app) shelfPickerPointer(e ink.PointerEvent) bool {
 		subs = append(subs, s)
 	}
 
+	// ".. (up)" is a fixed top row and always accessible, including
+	// from page 2+ where it sits above the paginated window.
+	if !upRect.Empty() && e.Point.In(upRect) {
+		a.drillUp()
+		return true
+	}
 	if !selectRect.Empty() && e.Point.In(selectRect) {
 		if hasSelection {
 			a.toggleCurrentInSelection()
@@ -1882,22 +1879,13 @@ func (a *app) shelfPickerPointer(e ink.PointerEvent) bool {
 		return true
 	}
 
-	atRoot := stackLen == 0
-	// Compute the absolute row index: rects[0] is at offset; adjust for the
-	// leading ".. (up)" row that's only present on page 1.
-	upOffset := 0
-	if !atRoot && offset == 0 {
-		upOffset = 1
-	}
+	// rects[i] corresponds to subs[offset+i] directly now that ".."
+	// lives outside the paginated window.
 	for i, r := range rects {
 		if !e.Point.In(r) {
 			continue
 		}
-		if !atRoot && offset == 0 && i == 0 {
-			a.drillUp()
-			return true
-		}
-		abs := offset + i - upOffset
+		abs := offset + i
 		if abs >= 0 && abs < len(subs) {
 			s := subs[abs]
 			a.drillInto(s.Href, s.Name)
@@ -2061,34 +2049,38 @@ func (a *app) drawDirPicker() {
 		selectBtnH := 100
 		areaBottom := a.layout.pickerAreaBottom - selectBtnH - 40
 
-		rows := make([]string, 0, 1+len(dirs))
 		atRoot := path == "/" || path == ""
+
+		// Fixed ".. (up)" row at the top, above the paginated subdir
+		// rows, so it's reachable from any page.
+		listTop := areaTop
+		var upRect image.Rectangle
 		if !atRoot {
-			rows = append(rows, ".. (up)")
-		}
-		for _, d := range dirs {
-			rows = append(rows, d+"/")
+			upRect = image.Rect(a.layout.margin, listTop, a.layout.screen.X-a.layout.margin, listTop+rowH-20)
+			ink.DrawRect(upRect, ink.Black)
+			drawCenteredText(btnFont, upRect, ".. (up)", a.layout.fpx(44))
+			listTop += rowH
 		}
 
-		visibleArea := areaBottom - areaTop
+		visibleArea := areaBottom - listTop
 		pageSize := (visibleArea - pageBtnH - 20) / rowH
 		if pageSize < 1 {
 			pageSize = 1
 		}
-		p := paginate(len(rows), pageSize, offset)
+		p := paginate(len(dirs), pageSize, offset)
 		offset = p.offset
 		end := p.end
 
 		rects := make([]image.Rectangle, 0, end-offset)
 		for i := offset; i < end; i++ {
-			y1 := areaTop + (i-offset)*rowH
+			y1 := listTop + (i-offset)*rowH
 			rect := image.Rect(a.layout.margin, y1, a.layout.screen.X-a.layout.margin, y1+rowH-20)
 			rects = append(rects, rect)
 			ink.DrawRect(rect, ink.Black)
-			drawCenteredText(btnFont, rect, truncate(rows[i], 40), a.layout.fpx(44))
+			drawCenteredText(btnFont, rect, truncate(dirs[i]+"/", 40), a.layout.fpx(44))
 		}
-		if len(rows) > pageSize {
-			btnY1 := areaTop + pageSize*rowH
+		if len(dirs) > pageSize {
+			btnY1 := listTop + pageSize*rowH
 			btnY2 := btnY1 + pageBtnH
 			contentW := a.layout.screen.X - 2*a.layout.margin
 			half := (contentW - 40) / 2
@@ -2097,25 +2089,24 @@ func (a *app) drawDirPicker() {
 				ink.DrawRect(prevPageRect, ink.Black)
 				drawCenteredText(btnFont, prevPageRect, "< Prev", a.layout.fpx(44))
 			}
-			if end < len(rows) {
+			if end < len(dirs) {
 				nextPageRect = image.Rect(a.layout.screen.X-a.layout.margin-half, btnY1, a.layout.screen.X-a.layout.margin, btnY2)
 				ink.DrawRect(nextPageRect, ink.Black)
 				drawCenteredText(btnFont, nextPageRect, "Next >", a.layout.fpx(44))
 			}
 			page := offset/pageSize + 1
-			total := (len(rows) + pageSize - 1) / pageSize
+			total := (len(dirs) + pageSize - 1) / pageSize
 			ink.DrawString(
 				image.Point{X: a.layout.margin, Y: btnY2 + 30},
-				fmt.Sprintf("Page %d of %d (%d items)", page, total, len(rows)),
+				fmt.Sprintf("Page %d of %d (%d items)", page, total, len(dirs)),
 			)
 		}
 
 		a.dirPicker.mu.Lock()
-		// Same clamp-to-state fix as the feed picker: keep the pointer
-		// handler and the rendered rects using the same offset.
 		a.dirPicker.offset = offset
 		a.dirPicker.pageSize = pageSize
 		a.dirPicker.rowRects = rects
+		a.dirPicker.upRect = upRect
 		a.dirPicker.prevPageRect = prevPageRect
 		a.dirPicker.nextPageRect = nextPageRect
 		a.dirPicker.mu.Unlock()
@@ -2166,8 +2157,13 @@ func (a *app) dirPickerPointer(e ink.PointerEvent) bool {
 	offset := a.dirPicker.offset
 	prev := a.dirPicker.prevPageRect
 	next := a.dirPicker.nextPageRect
+	upRect := a.dirPicker.upRect
 	a.dirPicker.mu.Unlock()
 
+	if !upRect.Empty() && e.Point.In(upRect) {
+		a.openDirPicker(parentDir(path))
+		return true
+	}
 	if e.Point.In(selectRect) {
 		a.setPath(path)
 		a.screen = screenSettings
@@ -2184,23 +2180,13 @@ func (a *app) dirPickerPointer(e ink.PointerEvent) bool {
 		return true
 	}
 
-	atRoot := path == "/" || path == ""
-	upOffset := 0
-	if !atRoot && offset == 0 {
-		upOffset = 1
-	}
 	for i, r := range rects {
 		if !e.Point.In(r) {
 			continue
 		}
-		if !atRoot && offset == 0 && i == 0 {
-			a.openDirPicker(parentDir(path))
-			return true
-		}
-		abs := offset + i - upOffset
+		abs := offset + i
 		if abs >= 0 && abs < len(dirs) {
-			child := dirs[abs]
-			a.openDirPicker(normaliseRoot(path) + "/" + child)
+			a.openDirPicker(normaliseRoot(path) + "/" + dirs[abs])
 			return true
 		}
 	}
