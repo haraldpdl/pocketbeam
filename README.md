@@ -134,7 +134,7 @@ pocketbeam checks for new releases so you don't have to re-sideload manually. Th
 
 The update check is a single HTTPS GET to the release endpoint (dev builds: Gitea on your LAN; public builds: a project-hosted JSON endpoint).
 
-To disable all update checks, set `check_updates = off` at the top of `pocketbeam.cfg` or toggle the preference via a future Settings entry. Manual checks remain possible from the update screen.
+To disable all automatic update checks, tap the version line in Settings to open the update screen, then tap the **Automatic weekly checks: on** row to flip it off. Manual "Check for updates" remains available on that screen even when automatic checks are disabled. Power users can also set `check_updates = off` at the top of `pocketbeam.cfg`.
 
 The only outbound HTTP traffic pocketbeam ever initiates is (a) OPDS / WebDAV requests to your configured server, (b) the update check described above, (c) the release binary download when you tap Install.
 

@@ -124,6 +124,7 @@ type updateState struct {
 	installed    bool // true once the new binary has been written to disk
 	installBtn   image.Rectangle
 	checkBtn     image.Rectangle
+	toggleBtn    image.Rectangle // enable/disable automatic weekly checks
 	backBtn      image.Rectangle
 }
 
@@ -2703,12 +2704,17 @@ func (a *app) drawUpdate() {
 		ink.DrawString(image.Point{X: a.layout.margin, Y: y}, "You are up to date.")
 	}
 
-	// Action buttons. "Install now" is shown only when a newer release
-	// is ready and we're not mid-install; otherwise the user gets the
-	// manual "Check for updates" button for a fresh poll.
+	// Action buttons. The primary button is either "Install now" when
+	// a newer release is ready or "Check for updates" for a manual
+	// refresh. Below it sits the automatic-checks toggle, which is
+	// always shown so users can disable weekly checks without editing
+	// the config file by hand.
 	btnH := 100
+	toggleH := 90
 	contentW := a.layout.screen.X - 2*a.layout.margin
-	btnY2 := a.layout.backButton.Min.Y - 40
+	toggleY2 := a.layout.backButton.Min.Y - 40
+	toggleY1 := toggleY2 - toggleH
+	btnY2 := toggleY1 - 30
 	btnY1 := btnY2 - btnH
 	primary := image.Rect(a.layout.margin, btnY1, a.layout.margin+contentW, btnY2)
 
@@ -2723,9 +2729,19 @@ func (a *app) drawUpdate() {
 		ink.DrawRect(checkBtn, ink.Black)
 		drawCenteredText(btnFont, checkBtn, "Check for updates", a.layout.fpx(44))
 	}
+
+	toggleRect := image.Rect(a.layout.margin, toggleY1, a.layout.margin+contentW, toggleY2)
+	toggleLabel := "Automatic weekly checks: off  (tap to enable)"
+	if a.cfg.CheckUpdates {
+		toggleLabel = "Automatic weekly checks: on  (tap to disable)"
+	}
+	ink.DrawRect(toggleRect, ink.Black)
+	drawCenteredText(btnFont, toggleRect, toggleLabel, a.layout.fpx(44))
+
 	a.update.mu.Lock()
 	a.update.installBtn = installBtn
 	a.update.checkBtn = checkBtn
+	a.update.toggleBtn = toggleRect
 	a.update.backBtn = a.layout.backButton
 	a.update.mu.Unlock()
 
@@ -2760,6 +2776,7 @@ func (a *app) updatePointer(e ink.PointerEvent) bool {
 	a.update.mu.Lock()
 	installBtn := a.update.installBtn
 	checkBtn := a.update.checkBtn
+	toggleBtn := a.update.toggleBtn
 	backBtn := a.update.backBtn
 	a.update.mu.Unlock()
 	if e.Point.In(backBtn) {
@@ -2773,6 +2790,12 @@ func (a *app) updatePointer(e ink.PointerEvent) bool {
 	}
 	if !checkBtn.Empty() && e.Point.In(checkBtn) {
 		go a.runUpdateCheck()
+		return true
+	}
+	if !toggleBtn.Empty() && e.Point.In(toggleBtn) {
+		a.cfg.CheckUpdates = !a.cfg.CheckUpdates
+		_ = SaveConfig(a.cfgPath, a.cfg)
+		ink.Repaint()
 		return true
 	}
 	return false
