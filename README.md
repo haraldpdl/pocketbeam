@@ -6,7 +6,7 @@ Native on-device app, no PC, no USB cable. Pulls new and updated ebooks over Wi-
 
 ## Status
 
-Early but working. The first-run wizard, main sync screen, settings, OPDS feed picker (nested), and WebDAV directory picker all run under InkView on device. Tested on the PocketBook Era Color (1264x1680). Pending features listed near the bottom.
+Early but working. The first-run wizard, main sync screen, settings, OPDS feed picker (nested + multi-select), WebDAV directory picker, and multi-server profile switcher all run under InkView on device. Primary development happens on a PocketBook Era Color (1264x1680); the layout scales for smaller panels (Touch HD, Touch Lux 5, InkPad X) via a three-tier width heuristic. Pending features listed near the bottom.
 
 ## Why
 
@@ -35,10 +35,10 @@ The app then appears in the device's Applications menu as `@pocketbeam` with a g
 
 Launch pocketbeam from the Applications menu. You will be walked through:
 
-1. **Server type** — Calibre-Web / OPDS, or WebDAV / Nextcloud
-2. **Server URL** — e.g. `http://library.lan:8083` for OPDS, or `https://nc.example.com/remote.php/dav/files/alice` for WebDAV
-3. **Username** and **password** — your server login
-4. **Testing connection** — the wizard probes the server and validates your credentials before saving
+1. **Server type**: Calibre-Web / OPDS, or WebDAV / Nextcloud
+2. **Server URL**: e.g. `http://library.lan:8083` for OPDS, or `https://nc.example.com/remote.php/dav/files/alice` for WebDAV
+3. **Username** and **password**: your server login
+4. **Testing connection**: the wizard probes the server and validates your credentials before saving
 
 On success, the main sync screen appears. On failure, the wizard shows a specific error (bad URL, wrong credentials, server unreachable, etc.) and offers retry.
 
@@ -48,41 +48,49 @@ For OPDS servers, pocketbeam auto-detects whether the endpoint is Calibre-Web / 
 
 The main screen has four actions:
 
-- **Sync Now** — connects the Wi-Fi (wakes the radio if asleep), probes the server, then pulls the configured catalog (all books by default, or a specific shelf / folder / subsection if you set one) and downloads everything that is new or updated since the last sync. Progress shows the current book counter, a live elapsed-time indicator, and the book title being downloaded. Already-synced books skip instantly.
-- **Network** — opens the PocketBook system network dialog so you can switch Wi-Fi networks or re-enable Wi-Fi if you had it off.
-- **Settings** — change the server URL, username, or password, or pick a filter. For OPDS servers the filter picker drills through the catalog's subsections; tap "Sync this level" at any feed to sync that branch (e.g. a specific author, tag, or series on Calibre). For WebDAV the picker drills through server directories the same way. A typical CWA workflow is to create a `to-pocketbook` shelf and pick it as the filter.
-- **Quit** — back to the Applications menu.
+- **Sync Now**: connects the Wi-Fi (wakes the radio if asleep), probes the server, then pulls the configured catalog (all books by default, or one or more filters / folders that you picked) and downloads everything that is new or updated since the last sync. Progress shows the current book counter, a live elapsed-time indicator, and the book title being downloaded. Already-synced books skip instantly.
+- **Network**: opens the PocketBook system network dialog so you can switch Wi-Fi networks or re-enable Wi-Fi if you had it off.
+- **Settings**: change the server URL / credentials, pick sync filters, toggle delete-missing, or switch between server profiles. Four buttons:
+    - **Change server info**: re-runs the wizard for the active profile.
+    - **Change sync filter / folder**: opens the picker. For OPDS, drills through the catalog's subsections; tapping a row descends, "Add this level" accumulates a selection, and "Done" saves the set. Empty subsections (opds:count = 0) are hidden, long lists paginate with Prev / Next. For WebDAV it drills through server directories the same way.
+    - **Delete missing**: opt-in toggle. When on, every sync ends with a confirmation prompt listing books no longer on the server; tap Delete or Keep.
+    - **Profile: &lt;name&gt;**: opens the profile list. Tap any profile to switch, "Add new server" to create another (one device can sync from a home CWA, a friend's Nextcloud, and a public OPDS server, each as its own profile), or "Delete active profile" to remove one.
+- **Quit**: back to the Applications menu.
 
 Books land under `/mnt/ext1/Books/CWA/<Author>/<Title>.<ext>` (OPDS) or `/mnt/ext1/Books/WebDAV/<Author>/<Title>.<ext>` and show up in the device's library after the next library refresh.
 
 ## Configuration file
 
-For power users only. The wizard writes the config to `/mnt/ext1/system/config/pocketbeam.cfg`:
+For power users only. The wizard writes the config to `/mnt/ext1/system/config/pocketbeam.cfg`. The file uses `[section]` headers so multiple server profiles live side-by-side:
 
 ```ini
+active   = home
+state_db = /mnt/ext1/system/config/pocketbeam.db
+
+[home]
 backend     = opds
 host        = http://cwa.lan:8083
 user        = your-cwa-username
 password    = your-cwa-password
 library     = /mnt/ext1/Books/CWA
-state_db    = /mnt/ext1/system/config/pocketbeam.db
 filter_href = /opds/shelf/3
 filter_name = to-pocketbook
-```
+filter_href = /opds/category/tag/12
+filter_name = Fantasy
+delete_missing = on
 
-For WebDAV:
-
-```ini
+[nas]
 backend  = webdav
 host     = https://nc.example.com/remote.php/dav/files/alice
 user     = alice
 password = hunter2
 library  = /mnt/ext1/Books/WebDAV
-state_db = /mnt/ext1/system/config/pocketbeam.db
 path     = /Books/Fiction
 ```
 
-You can edit either by hand over USB if you prefer not to go through the on-device wizard.
+`filter_href` / `filter_name` can repeat to sync more than one feed per profile; books are deduped by UUID across the union. `state_db` is global and shared by every profile (identities don't collide across real catalogs).
+
+You can edit this by hand over USB if you prefer not to go through the on-device wizard.
 
 ## Development
 
@@ -112,9 +120,9 @@ go test -tags=live -run TestLive
 
 - **App name shows as `@pocketbeam`** in the PocketBook launcher with a generic icon. This is the PocketBook firmware's default presentation for any sideloaded app and matches KOReader's `@koreader` presentation. Customising it requires editing `/mnt/ext1/system/config/desktop/view.json` and placing BMP icons under `/mnt/ext1/applications/icons/`; that is a per-user polish step, not part of the default install.
 - **Password entry is visible** on the on-screen keyboard. The PocketBook InkView keyboard has no masked-input mode exposed through the SDK. Use a stance that blocks onlookers or set a throwaway password for device use.
-- **Single source only.** pocketbeam syncs one server at a time. Multiple-library support is a v2 item.
-- **No delete on remote-removal.** Books deleted from the server are not removed from the device.
 - **Sync cannot be cancelled mid-run.** Interrupting (Back key or force-quit) is safe but leaves a partial download as a `.part` file that the next sync retries cleanly.
+- **Library rescan not triggered automatically.** After sync, new covers and titles appear when the PocketBook library app is opened; pocketbeam does not force an immediate rescan because the stock `scanner.app` steals foreground focus and makes pocketbeam look frozen.
+- **Only tested on firmware 6.x.** Older firmware may lack the `NetMgrPing` keepalive API; sync will still work but the radio may drop during long runs.
 
 ## License
 
