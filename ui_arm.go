@@ -1743,8 +1743,14 @@ func (a *app) drawShelfPicker() {
 		label := "Sync this level"
 		if stackLen == 0 {
 			label = "Sync everything"
-		} else if !loading && pickerErr == nil && lvl.BookCount > 0 {
-			label = fmt.Sprintf("Sync this level (%d books)", lvl.BookCount)
+		} else if !loading && pickerErr == nil {
+			count, approx := levelBookCount(lvl)
+			switch {
+			case count > 0 && approx:
+				label = fmt.Sprintf("Sync this level (~%d books)", count)
+			case count > 0:
+				label = fmt.Sprintf("Sync this level (%d books)", count)
+			}
 		}
 		drawCenteredText(btnFont, selectRect, truncate(label, 40), a.layout.fpx(44))
 	} else {
