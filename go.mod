@@ -1,4 +1,4 @@
-module github.com/haraldpdl/bookbeam
+module github.com/haraldpdl/pocketbeam
 
 go 1.24
 

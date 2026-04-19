@@ -7,7 +7,7 @@ import (
 )
 
 func main() {
-	cfgPath := flag.String("config", "/mnt/ext1/system/config/bookbeam.cfg", "path to config file")
+	cfgPath := flag.String("config", "/mnt/ext1/system/config/pocketbeam.cfg", "path to config file")
 	verbose := flag.Bool("v", false, "verbose: log every book considered")
 	flag.Parse()
 
@@ -25,7 +25,7 @@ func main() {
 	}
 	defer store.Close()
 
-	fmt.Printf("bookbeam %s: syncing %s to %s\n", version, cfg.Host, cfg.Library)
+	fmt.Printf("pocketbeam %s: syncing %s to %s\n", version, cfg.Host, cfg.Library)
 
 	var progress Progress
 	if *verbose {

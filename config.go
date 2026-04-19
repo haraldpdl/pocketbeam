@@ -23,7 +23,7 @@ type Config struct {
 	User       string // server user
 	Pass       string // server password
 	Library    string // local target dir, e.g. /mnt/ext1/Books/CWA
-	StateDB    string // sqlite path, e.g. /mnt/ext1/system/config/bookbeam.db
+	StateDB    string // sqlite path, e.g. /mnt/ext1/system/config/pocketbeam.db
 	FilterHref string // OPDS only: path to sync (empty = all books). Works for CWA shelves AND generic subsections.
 	FilterName string // last-known display name of the filter (cache; refreshed in the picker)
 	Path       string // WebDAV only: absolute directory on the server to mirror, e.g. "/Books/Fiction"

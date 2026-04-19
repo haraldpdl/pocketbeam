@@ -8,6 +8,6 @@ import (
 
 func main() {
 	if err := ink.Run(newApp()); err != nil {
-		log.Fatalf("bookbeam: %v", err)
+		log.Fatalf("pocketbeam: %v", err)
 	}
 }

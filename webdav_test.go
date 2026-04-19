@@ -11,7 +11,7 @@ import (
 )
 
 // webdavPropfindResponses maps a request path to the XML body the mock
-// server returns. Only the fields bookbeam actually reads
+// server returns. Only the fields pocketbeam actually reads
 // (href, collection bit, getlastmodified, getcontentlength) are populated.
 type webdavPropfindResponses map[string]string
 

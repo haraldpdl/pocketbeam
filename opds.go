@@ -198,7 +198,7 @@ func (c *Client) prepare(req *http.Request) {
 		req.SetBasicAuth(c.User, c.Pass)
 	}
 	req.Header.Set("Accept-Encoding", "identity")
-	req.Header.Set("User-Agent", "bookbeam/"+version)
+	req.Header.Set("User-Agent", "pocketbeam/"+version)
 }
 
 // Shelf is a user-curated collection of books, exposed by CWA under

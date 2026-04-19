@@ -37,7 +37,7 @@ func TestConfigRoundTripWebDAV(t *testing.T) {
 		User:    "alice",
 		Pass:    "hunter2",
 		Library: "/mnt/ext1/Books/WebDAV",
-		StateDB: "/mnt/ext1/system/config/bookbeam.db",
+		StateDB: "/mnt/ext1/system/config/pocketbeam.db",
 		Path:    "/Books/Fiction",
 	}
 	if err := SaveConfig(path, want); err != nil {
@@ -54,7 +54,7 @@ func TestConfigRoundTripWebDAV(t *testing.T) {
 
 func TestConfigRoundTrip(t *testing.T) {
 	dir := t.TempDir()
-	path := filepath.Join(dir, "nested", "bookbeam.cfg")
+	path := filepath.Join(dir, "nested", "pocketbeam.cfg")
 
 	want := &Config{
 		Backend:    BackendOPDS,
@@ -62,7 +62,7 @@ func TestConfigRoundTrip(t *testing.T) {
 		User:       "alice",
 		Pass:       "hunter2",
 		Library:    "/mnt/ext1/Books/CWA",
-		StateDB:    "/mnt/ext1/system/config/bookbeam.db",
+		StateDB:    "/mnt/ext1/system/config/pocketbeam.db",
 		FilterHref: "/opds/shelf/7",
 		FilterName: "to-pocketbook",
 	}

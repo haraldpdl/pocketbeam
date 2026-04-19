@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -195,7 +196,7 @@ func computeLayout(sz image.Point) layout {
 	}
 }
 
-// app implements ink.App for the bookbeam device UI.
+// app implements ink.App for the pocketbeam device UI.
 type app struct {
 	cfgPath     string
 	cfg         *Config
@@ -216,7 +217,37 @@ type app struct {
 
 func newApp() *app {
 	return &app{
-		cfgPath: filepath.Join(ink.ConfigPath, "bookbeam.cfg"),
+		cfgPath: filepath.Join(ink.ConfigPath, "pocketbeam.cfg"),
+	}
+}
+
+// migrateLegacyConfig renames pre-rename files into place for existing
+// installs and rewrites the cfg's state_db key so it points at the
+// renamed database. Runs before LoadConfig so the upgrade is invisible to
+// the rest of the app.
+// TODO: remove before public release.
+func migrateLegacyConfig(cfgPath string) {
+	dir := filepath.Dir(cfgPath)
+	pairs := [][2]string{
+		{filepath.Join(dir, "bookbeam.cfg"), cfgPath},
+		{filepath.Join(dir, "bookbeam.db"), filepath.Join(dir, "pocketbeam.db")},
+	}
+	for _, p := range pairs {
+		oldP, newP := p[0], p[1]
+		if _, err := os.Stat(newP); err == nil {
+			continue
+		}
+		if _, err := os.Stat(oldP); err != nil {
+			continue
+		}
+		_ = os.Rename(oldP, newP)
+	}
+	// Rewrite state_db inside the cfg if it still points at the old
+	// filename. os.ReadFile + os.WriteFile is fine for a tiny config.
+	if data, err := os.ReadFile(cfgPath); err == nil {
+		if patched := strings.ReplaceAll(string(data), "bookbeam.db", "pocketbeam.db"); patched != string(data) {
+			_ = os.WriteFile(cfgPath, []byte(patched), 0o600)
+		}
 	}
 }
 
@@ -237,6 +268,11 @@ func (a *app) Init() error {
 	}
 
 	ink.SetKeyboardHandler(func(s string) { a.onKeyboardInput(s) })
+
+	// TODO: remove before public release. One-shot migration for the
+	// bookbeam → pocketbeam rename: rename the old config and state DB
+	// into place so existing installs upgrade seamlessly.
+	migrateLegacyConfig(a.cfgPath)
 
 	if cfg, err := LoadConfig(a.cfgPath); err == nil {
 		if client, err := NewClient(cfg.Host, cfg.User, cfg.Pass); err == nil {
@@ -369,7 +405,7 @@ func (a *app) drawWizard() {
 	switch a.wizard.step {
 	case stepWelcome:
 		title.SetActive(ink.Black)
-		ink.DrawString(image.Point{X: 80, Y: 200}, "bookbeam")
+		ink.DrawString(image.Point{X: 80, Y: 200}, "pocketbeam")
 		body.SetActive(ink.Black)
 		ink.DrawString(image.Point{X: 80, Y: 280}, "Wireless sync from a book server.")
 		ink.DrawString(image.Point{X: 80, Y: 360}, "Supports:")
@@ -402,7 +438,7 @@ func (a *app) drawWizard() {
 
 	case stepURL, stepUser, stepPass:
 		title.SetActive(ink.Black)
-		ink.DrawString(image.Point{X: 80, Y: 200}, "bookbeam setup")
+		ink.DrawString(image.Point{X: 80, Y: 200}, "pocketbeam setup")
 		body.SetActive(ink.Black)
 		var prompt string
 		switch a.wizard.step {
@@ -590,7 +626,7 @@ func (a *app) runProbe() {
 		User:    a.wizard.user,
 		Pass:    a.wizard.pass,
 		Library: filepath.Join(ink.FlashDir, "Books", libraryDir),
-		StateDB: filepath.Join(ink.ConfigPath, "bookbeam.db"),
+		StateDB: filepath.Join(ink.ConfigPath, "pocketbeam.db"),
 	}
 	if backend == BackendWebDAV {
 		cfg.Path = "/"
@@ -645,7 +681,7 @@ func (a *app) drawMain() {
 
 	// Header
 	title.SetActive(ink.Black)
-	ink.DrawString(image.Point{X: a.layout.margin, Y: 120}, "bookbeam")
+	ink.DrawString(image.Point{X: a.layout.margin, Y: 120}, "pocketbeam")
 
 	// Connection info + filter + status stacked tightly near the top
 	body.SetActive(ink.Black)
@@ -828,7 +864,7 @@ func (a *app) startSync() {
 func (a *app) runSync() {
 	// Prevent the device from going to standby mid-sync. PocketBook's power
 	// manager will otherwise suspend the CPU / drop Wi-Fi after the usual
-	// idle timeout even though bookbeam is actively downloading. Restore
+	// idle timeout even though pocketbeam is actively downloading. Restore
 	// normal behaviour when the sync finishes (including on early return).
 	ink.SetSleepMode(false)
 	ink.SetAutoPowerOff(false)
@@ -888,7 +924,7 @@ func (a *app) runSync() {
 
 	// We deliberately do NOT auto-exec /mnt/ext1/system/bin/scanner.app here:
 	// on PocketBook firmware 6.x it takes foreground focus, which makes
-	// bookbeam appear frozen until the scan finishes. The Library app
+	// pocketbeam appear frozen until the scan finishes. The Library app
 	// rescans on its own the next time you open it, so new covers and
 	// titles show up after a normal navigation back to the library.
 }
@@ -1042,7 +1078,7 @@ func (a *app) drawSettings() {
 
 	// Footer: version + Back
 	small.SetActive(ink.Black)
-	ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.backButton.Min.Y - 40}, "bookbeam "+version)
+	ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.backButton.Min.Y - 40}, "pocketbeam "+version)
 
 	ink.DrawRect(a.layout.backButton, ink.Black)
 	btnFont.SetActive(ink.Black)

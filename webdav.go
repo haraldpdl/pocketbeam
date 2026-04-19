@@ -22,7 +22,7 @@ type WebDAVSource struct {
 }
 
 // extToFormat maps supported ebook/comic extensions to the OPDS-style mime
-// types the rest of bookbeam keys on (see formatExt in sync.go).
+// types the rest of pocketbeam keys on (see formatExt in sync.go).
 var extToFormat = map[string]string{
 	".epub": "application/epub+zip",
 	".cbz":  "application/x-cbz",
@@ -36,7 +36,7 @@ var extToFormat = map[string]string{
 // device.
 func ProbeWebDAV(ctx context.Context, host, user, pass, rootPath string) error {
 	c := gowebdav.NewClient(host, user, pass)
-	c.SetHeader("User-Agent", "bookbeam/"+version)
+	c.SetHeader("User-Agent", "pocketbeam/"+version)
 	if err := c.Connect(); err != nil {
 		return classifyWebDAVError(err)
 	}
@@ -74,7 +74,7 @@ func classifyWebDAVError(err error) error {
 // use ProbeWebDAV up front to validate credentials.
 func NewWebDAVSource(host, user, pass, rootPath string) *WebDAVSource {
 	c := gowebdav.NewClient(host, user, pass)
-	c.SetHeader("User-Agent", "bookbeam/"+version)
+	c.SetHeader("User-Agent", "pocketbeam/"+version)
 	return &WebDAVSource{
 		Client: c,
 		Root:   normaliseRoot(rootPath),
@@ -117,7 +117,7 @@ func (s *WebDAVSource) walk(dir string, out *[]Book) error {
 }
 
 // bookFromFileInfo maps a WebDAV file entry to a Book, returning false if
-// the extension is not one bookbeam knows how to place.
+// the extension is not one pocketbeam knows how to place.
 func bookFromFileInfo(root, full string, fi os.FileInfo) (Book, bool) {
 	ext := strings.ToLower(path.Ext(full))
 	format, ok := extToFormat[ext]
@@ -130,7 +130,7 @@ func bookFromFileInfo(root, full string, fi os.FileInfo) (Book, bool) {
 	// Author comes from the immediate parent directory below the root,
 	// which matches how most WebDAV ebook libraries are organised
 	// (/Author/Title.epub). Books living directly in the root get no
-	// author, matching bookbeam's existing sanitize("") = "_" directory.
+	// author, matching pocketbeam's existing sanitize("") = "_" directory.
 	author := ""
 	if parent := path.Dir(rel); parent != "." && parent != "/" {
 		author = path.Base(parent)
