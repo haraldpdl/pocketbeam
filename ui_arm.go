@@ -150,6 +150,11 @@ type dirPickerState struct {
 type layout struct {
 	screen image.Point
 	margin int
+	// scale multiplies all font heights so the UI stays readable on
+	// smaller PocketBook panels (Touch HD, Touch Lux 5) without
+	// blowing up unnecessarily on the HD 6" devices we originally
+	// designed against (Era / Era Color at 1264x1680).
+	scale float64
 
 	// main screen
 	syncButton     image.Rectangle
@@ -187,11 +192,12 @@ const (
 // (ScreenSize does not account for either).
 func computeLayout(sz image.Point) layout {
 	w, h := sz.X, sz.Y
-	sideMargin := 60
-	topSafe := 100
-	bottomSafe := 180
+	scale := scaleFactor(sz)
+	sideMargin := int(60 * scale)
+	topSafe := int(100 * scale)
+	bottomSafe := int(180 * scale)
 	if w > 0 && w < 1200 {
-		sideMargin = 40
+		sideMargin = int(40 * scale)
 	}
 	contentW := w - 2*sideMargin
 
@@ -234,6 +240,7 @@ func computeLayout(sz image.Point) layout {
 	return layout{
 		screen:           sz,
 		margin:           sideMargin,
+		scale:            scale,
 		syncButton:       syncBtn,
 		networkButton:    networkBtn,
 		settingsButton:   settingsBtn,
@@ -248,6 +255,39 @@ func computeLayout(sz image.Point) layout {
 		pickerAreaTop:    pickerTop,
 		pickerAreaBottom: pickerBottom,
 	}
+}
+
+// scaleFactor returns a multiplier for font sizes and generous spacings
+// so the UI stays readable on smaller PocketBook panels without looking
+// bloated on HD 6" screens. Three tiers match the three resolution
+// families we see across the PocketBook line:
+//   - >= 1200 wide: Era / Era Color / InkPad Color / InkPad X (scale 1.0)
+//   - >= 1000 wide: Touch HD, HD 3 (~1072 wide, scale 0.85)
+//   - smaller: Touch Lux 5 and legacy 6" (scale 0.7)
+//
+// We key off pixel width rather than DPI because the only value InkView
+// hands us for free is the framebuffer size; DPI-per-model tables live
+// in KOReader and would be heavy to maintain.
+func scaleFactor(sz image.Point) float64 {
+	w := sz.X
+	if sz.Y < w {
+		w = sz.Y
+	}
+	switch {
+	case w >= 1200:
+		return 1.0
+	case w >= 1000:
+		return 0.85
+	default:
+		return 0.7
+	}
+}
+
+// fpx scales a base font size in px by s.scale, rounded to nearest pixel.
+// Centralised so every drawString that picks a font size scales the
+// same way.
+func (s layout) fpx(base int) int {
+	return int(float64(base)*s.scale + 0.5)
 }
 
 // tapDebounce is the minimum gap between two pointer events that will
@@ -336,7 +376,14 @@ func migrateLegacyConfig(cfgPath string) {
 func (a *app) Init() error {
 	_ = os.Chdir(filepath.Dir(os.Args[0]))
 
-	a.layout = computeLayout(ink.ScreenSize())
+	sz := ink.ScreenSize()
+	a.layout = computeLayout(sz)
+	// Record the device context so any bug report carries the exact
+	// hardware and firmware string; the scale factor shows which font
+	// tier the layout picked for this resolution.
+	log.Printf("pocketbeam %s on %s (hw=%s fw=%s screen=%dx%d scale=%.2f)",
+		version, ink.DeviceModel(), ink.HardwareType(), ink.SoftwareVersion(),
+		sz.X, sz.Y, a.layout.scale)
 
 	if err := ink.InitCerts(); err != nil {
 		log.Printf("InitCerts: %v", err)
@@ -492,11 +539,11 @@ func (a *app) syncActive() bool {
 // ---------- First-run wizard ----------
 
 func (a *app) drawWizard() {
-	title := ink.OpenFont(ink.DefaultFontBold, 54, true)
+	title := ink.OpenFont(ink.DefaultFontBold, a.layout.fpx(54), true)
 	defer title.Close()
 	title.SetActive(ink.Black)
 
-	body := ink.OpenFont(ink.DefaultFont, 32, true)
+	body := ink.OpenFont(ink.DefaultFont, a.layout.fpx(32), true)
 	defer body.Close()
 	body.SetActive(ink.Black)
 
@@ -527,7 +574,7 @@ func (a *app) drawWizard() {
 		body.SetActive(ink.Black)
 		ink.DrawString(image.Point{X: 80, Y: 290}, "Tap the option that matches your server.")
 
-		btnFont := ink.OpenFont(ink.DefaultFontBold, 44, true)
+		btnFont := ink.OpenFont(ink.DefaultFontBold, a.layout.fpx(44), true)
 		defer btnFont.Close()
 		btnFont.SetActive(ink.Black)
 
@@ -538,11 +585,11 @@ func (a *app) drawWizard() {
 
 		ink.DrawRect(a.wizard.opdsBtn, ink.Black)
 		ink.DrawRect(a.wizard.opdsBtn.Inset(2), ink.Black)
-		drawCenteredText(btnFont, a.wizard.opdsBtn, "Calibre-Web / OPDS", 44)
+		drawCenteredText(btnFont, a.wizard.opdsBtn, "Calibre-Web / OPDS", a.layout.fpx(44))
 
 		ink.DrawRect(a.wizard.webdavBtn, ink.Black)
 		ink.DrawRect(a.wizard.webdavBtn.Inset(2), ink.Black)
-		drawCenteredText(btnFont, a.wizard.webdavBtn, "WebDAV / Nextcloud", 44)
+		drawCenteredText(btnFont, a.wizard.webdavBtn, "WebDAV / Nextcloud", a.layout.fpx(44))
 
 	case stepURL, stepUser, stepPass:
 		title.SetActive(ink.Black)
@@ -818,15 +865,15 @@ func (a *app) runProbe() {
 // ---------- Main sync screen ----------
 
 func (a *app) drawMain() {
-	title := ink.OpenFont(ink.DefaultFontBold, 64, true)
+	title := ink.OpenFont(ink.DefaultFontBold, a.layout.fpx(64), true)
 	defer title.Close()
 	title.SetActive(ink.Black)
 
-	body := ink.OpenFont(ink.DefaultFont, 32, true)
+	body := ink.OpenFont(ink.DefaultFont, a.layout.fpx(32), true)
 	defer body.Close()
 	body.SetActive(ink.Black)
 
-	btnFont := ink.OpenFont(ink.DefaultFontBold, 44, true)
+	btnFont := ink.OpenFont(ink.DefaultFontBold, a.layout.fpx(44), true)
 	defer btnFont.Close()
 	btnFont.SetActive(ink.Black)
 
@@ -866,7 +913,7 @@ func (a *app) drawMain() {
 	ink.DrawRect(a.layout.syncButton, ink.Black)
 	ink.DrawRect(a.layout.syncButton.Inset(2), ink.Black)
 	btnFont.SetActive(ink.Black)
-	drawCenteredText(btnFont, a.layout.syncButton, "Sync Now", 44)
+	drawCenteredText(btnFont, a.layout.syncButton, "Sync Now", a.layout.fpx(44))
 
 	// Live progress area (drawn fully here on idle-to-sync transition; during
 	// the sync it is refreshed in-place via drawMainProgress + PartialUpdate).
@@ -877,9 +924,9 @@ func (a *app) drawMain() {
 	ink.DrawRect(a.layout.settingsButton, ink.Black)
 	ink.DrawRect(a.layout.quitButton, ink.Black)
 	btnFont.SetActive(ink.Black)
-	drawCenteredText(btnFont, a.layout.networkButton, "Network", 44)
-	drawCenteredText(btnFont, a.layout.settingsButton, "Settings", 44)
-	drawCenteredText(btnFont, a.layout.quitButton, "Quit", 44)
+	drawCenteredText(btnFont, a.layout.networkButton, "Network", a.layout.fpx(44))
+	drawCenteredText(btnFont, a.layout.settingsButton, "Settings", a.layout.fpx(44))
+	drawCenteredText(btnFont, a.layout.quitButton, "Quit", a.layout.fpx(44))
 }
 
 // drawMainProgressContent renders the progress strip (counter, bar, current
@@ -926,7 +973,7 @@ func (a *app) drawMainProgressContent(body *ink.Font) {
 // refreshProgress redraws only the progress strip and pushes it with a
 // partial e-ink update, so the rest of the main screen stays stable.
 func (a *app) refreshProgress() {
-	body := ink.OpenFont(ink.DefaultFont, 32, true)
+	body := ink.OpenFont(ink.DefaultFont, a.layout.fpx(32), true)
 	defer body.Close()
 	a.drawMainProgressContent(body)
 	ink.PartialUpdate(a.layout.progressArea)
@@ -1170,19 +1217,19 @@ func truncate(s string, n int) string {
 // ---------- Settings screen ----------
 
 func (a *app) drawSettings() {
-	title := ink.OpenFont(ink.DefaultFontBold, 64, true)
+	title := ink.OpenFont(ink.DefaultFontBold, a.layout.fpx(64), true)
 	defer title.Close()
 	title.SetActive(ink.Black)
 
-	body := ink.OpenFont(ink.DefaultFont, 32, true)
+	body := ink.OpenFont(ink.DefaultFont, a.layout.fpx(32), true)
 	defer body.Close()
 	body.SetActive(ink.Black)
 
-	btnFont := ink.OpenFont(ink.DefaultFontBold, 44, true)
+	btnFont := ink.OpenFont(ink.DefaultFontBold, a.layout.fpx(44), true)
 	defer btnFont.Close()
 	btnFont.SetActive(ink.Black)
 
-	small := ink.OpenFont(ink.DefaultFont, 26, true)
+	small := ink.OpenFont(ink.DefaultFont, a.layout.fpx(26), true)
 	defer small.Close()
 	small.SetActive(ink.Black)
 
@@ -1213,7 +1260,7 @@ func (a *app) drawSettings() {
 	ink.DrawRect(a.layout.changeButton, ink.Black)
 	ink.DrawRect(a.layout.changeButton.Inset(2), ink.Black)
 	btnFont.SetActive(ink.Black)
-	drawCenteredText(btnFont, a.layout.changeButton, "Change server info", 44)
+	drawCenteredText(btnFont, a.layout.changeButton, "Change server info", a.layout.fpx(44))
 
 	// Change-filter / folder button (label varies by backend).
 	filterBtnText := "Change sync filter"
@@ -1222,7 +1269,7 @@ func (a *app) drawSettings() {
 	}
 	ink.DrawRect(a.layout.filterButton, ink.Black)
 	ink.DrawRect(a.layout.filterButton.Inset(2), ink.Black)
-	drawCenteredText(btnFont, a.layout.filterButton, filterBtnText, 44)
+	drawCenteredText(btnFont, a.layout.filterButton, filterBtnText, a.layout.fpx(44))
 
 	// Delete-missing toggle: drawn as a single tap-to-cycle button whose
 	// label reflects the current state. Single border (not inset) to read
@@ -1232,12 +1279,12 @@ func (a *app) drawSettings() {
 		delLabel = "Delete missing: on  (tap to disable)"
 	}
 	ink.DrawRect(a.layout.deleteTglButton, ink.Black)
-	drawCenteredText(btnFont, a.layout.deleteTglButton, delLabel, 44)
+	drawCenteredText(btnFont, a.layout.deleteTglButton, delLabel, a.layout.fpx(44))
 
 	// Switch / add server profile.
 	profileBtnText := fmt.Sprintf("Profile: %s  (switch or add)", a.cfg.Profile)
 	ink.DrawRect(a.layout.profilesButton, ink.Black)
-	drawCenteredText(btnFont, a.layout.profilesButton, profileBtnText, 44)
+	drawCenteredText(btnFont, a.layout.profilesButton, profileBtnText, a.layout.fpx(44))
 
 	// Footer: version + Back
 	small.SetActive(ink.Black)
@@ -1245,7 +1292,7 @@ func (a *app) drawSettings() {
 
 	ink.DrawRect(a.layout.backButton, ink.Black)
 	btnFont.SetActive(ink.Black)
-	drawCenteredText(btnFont, a.layout.backButton, "Back", 44)
+	drawCenteredText(btnFont, a.layout.backButton, "Back", a.layout.fpx(44))
 }
 
 func (a *app) settingsKey(e ink.KeyEvent) bool {
@@ -1426,16 +1473,16 @@ func (a *app) fetchFeedLevel(href, title string) {
 }
 
 func (a *app) drawShelfPicker() {
-	title := ink.OpenFont(ink.DefaultFontBold, 64, true)
+	title := ink.OpenFont(ink.DefaultFontBold, a.layout.fpx(64), true)
 	defer title.Close()
 	title.SetActive(ink.Black)
 	ink.DrawString(image.Point{X: a.layout.margin, Y: 140}, "Select filter")
 
-	body := ink.OpenFont(ink.DefaultFont, 32, true)
+	body := ink.OpenFont(ink.DefaultFont, a.layout.fpx(32), true)
 	defer body.Close()
 	body.SetActive(ink.Black)
 
-	btnFont := ink.OpenFont(ink.DefaultFontBold, 44, true)
+	btnFont := ink.OpenFont(ink.DefaultFontBold, a.layout.fpx(44), true)
 	defer btnFont.Close()
 	btnFont.SetActive(ink.Black)
 
@@ -1524,7 +1571,7 @@ func (a *app) drawShelfPicker() {
 			rect := image.Rect(a.layout.margin, y1, a.layout.screen.X-a.layout.margin, y1+rowH-20)
 			rects = append(rects, rect)
 			ink.DrawRect(rect, ink.Black)
-			drawCenteredText(btnFont, rect, truncate(rows[i], 40), 44)
+			drawCenteredText(btnFont, rect, truncate(rows[i], 40), a.layout.fpx(44))
 		}
 
 		// Page buttons appear only when more rows exist outside the window.
@@ -1536,12 +1583,12 @@ func (a *app) drawShelfPicker() {
 			if offset > 0 {
 				prevPageRect = image.Rect(a.layout.margin, btnY1, a.layout.margin+half, btnY2)
 				ink.DrawRect(prevPageRect, ink.Black)
-				drawCenteredText(btnFont, prevPageRect, "< Prev", 44)
+				drawCenteredText(btnFont, prevPageRect, "< Prev", a.layout.fpx(44))
 			}
 			if end < len(rows) {
 				nextPageRect = image.Rect(a.layout.screen.X-a.layout.margin-half, btnY1, a.layout.screen.X-a.layout.margin, btnY2)
 				ink.DrawRect(nextPageRect, ink.Black)
-				drawCenteredText(btnFont, nextPageRect, "Next >", 44)
+				drawCenteredText(btnFont, nextPageRect, "Next >", a.layout.fpx(44))
 			}
 			// Page-of-pages indicator underneath.
 			page := offset/maxRows + 1
@@ -1591,7 +1638,7 @@ func (a *app) drawShelfPicker() {
 		} else if !loading && pickerErr == nil && lvl.BookCount > 0 {
 			label = fmt.Sprintf("Sync this level (%d books)", lvl.BookCount)
 		}
-		drawCenteredText(btnFont, selectRect, truncate(label, 40), 44)
+		drawCenteredText(btnFont, selectRect, truncate(label, 40), a.layout.fpx(44))
 	} else {
 		// Two buttons stacked: Add/Remove on top, Done below.
 		half := (selectBtnH - 20) / 2
@@ -1609,11 +1656,11 @@ func (a *app) drawShelfPicker() {
 			addRect = image.Rectangle{}
 			ink.FillArea(image.Rect(selectRect.Min.X, selectY1, selectRect.Max.X, selectY1+half+20), ink.White)
 		} else {
-			drawCenteredText(btnFont, addRect, truncate(addLabel, 40), 44)
+			drawCenteredText(btnFont, addRect, truncate(addLabel, 40), a.layout.fpx(44))
 		}
 		ink.DrawRect(doneRect, ink.Black)
 		ink.DrawRect(doneRect.Inset(2), ink.Black)
-		drawCenteredText(btnFont, doneRect, fmt.Sprintf("Done (%d selected)", len(selected)), 44)
+		drawCenteredText(btnFont, doneRect, fmt.Sprintf("Done (%d selected)", len(selected)), a.layout.fpx(44))
 		selectRect = addRect
 	}
 	a.picker.mu.Lock()
@@ -1624,7 +1671,7 @@ func (a *app) drawShelfPicker() {
 	_ = curTitleSaved // retained so future iterations can show the breadcrumb in the Add label
 
 	ink.DrawRect(a.layout.backButton, ink.Black)
-	drawCenteredText(btnFont, a.layout.backButton, "Back", 44)
+	drawCenteredText(btnFont, a.layout.backButton, "Back", a.layout.fpx(44))
 }
 
 // pickerContains reports whether sel already includes an option with the
@@ -1846,15 +1893,15 @@ func (a *app) fetchDirEntries(p string) {
 }
 
 func (a *app) drawDirPicker() {
-	title := ink.OpenFont(ink.DefaultFontBold, 64, true)
+	title := ink.OpenFont(ink.DefaultFontBold, a.layout.fpx(64), true)
 	defer title.Close()
 	title.SetActive(ink.Black)
 
-	body := ink.OpenFont(ink.DefaultFont, 32, true)
+	body := ink.OpenFont(ink.DefaultFont, a.layout.fpx(32), true)
 	defer body.Close()
 	body.SetActive(ink.Black)
 
-	btnFont := ink.OpenFont(ink.DefaultFontBold, 44, true)
+	btnFont := ink.OpenFont(ink.DefaultFontBold, a.layout.fpx(44), true)
 	defer btnFont.Close()
 	btnFont.SetActive(ink.Black)
 
@@ -1922,7 +1969,7 @@ func (a *app) drawDirPicker() {
 			rect := image.Rect(a.layout.margin, y1, a.layout.screen.X-a.layout.margin, y1+rowH-20)
 			rects = append(rects, rect)
 			ink.DrawRect(rect, ink.Black)
-			drawCenteredText(btnFont, rect, truncate(rows[i], 40), 44)
+			drawCenteredText(btnFont, rect, truncate(rows[i], 40), a.layout.fpx(44))
 		}
 		if len(rows) > maxRows {
 			btnY1 := areaTop + maxRows*rowH
@@ -1932,12 +1979,12 @@ func (a *app) drawDirPicker() {
 			if offset > 0 {
 				prevPageRect = image.Rect(a.layout.margin, btnY1, a.layout.margin+half, btnY2)
 				ink.DrawRect(prevPageRect, ink.Black)
-				drawCenteredText(btnFont, prevPageRect, "< Prev", 44)
+				drawCenteredText(btnFont, prevPageRect, "< Prev", a.layout.fpx(44))
 			}
 			if end < len(rows) {
 				nextPageRect = image.Rect(a.layout.screen.X-a.layout.margin-half, btnY1, a.layout.screen.X-a.layout.margin, btnY2)
 				ink.DrawRect(nextPageRect, ink.Black)
-				drawCenteredText(btnFont, nextPageRect, "Next >", 44)
+				drawCenteredText(btnFont, nextPageRect, "Next >", a.layout.fpx(44))
 			}
 			page := offset/maxRows + 1
 			total := (len(rows) + maxRows - 1) / maxRows
@@ -1959,14 +2006,14 @@ func (a *app) drawDirPicker() {
 		selectRect := image.Rect(a.layout.margin, selectY1, a.layout.screen.X-a.layout.margin, selectY2)
 		ink.DrawRect(selectRect, ink.Black)
 		ink.DrawRect(selectRect.Inset(2), ink.Black)
-		drawCenteredText(btnFont, selectRect, "Sync this folder", 44)
+		drawCenteredText(btnFont, selectRect, "Sync this folder", a.layout.fpx(44))
 		a.dirPicker.mu.Lock()
 		a.dirPicker.selectRect = selectRect
 		a.dirPicker.mu.Unlock()
 	}
 
 	ink.DrawRect(a.layout.backButton, ink.Black)
-	drawCenteredText(btnFont, a.layout.backButton, "Back", 44)
+	drawCenteredText(btnFont, a.layout.backButton, "Back", a.layout.fpx(44))
 }
 
 func (a *app) dirPickerKey(e ink.KeyEvent) bool {
@@ -2121,15 +2168,15 @@ func (a *app) answerDelete(ok bool) {
 }
 
 func (a *app) drawDeleteConfirm() {
-	title := ink.OpenFont(ink.DefaultFontBold, 64, true)
+	title := ink.OpenFont(ink.DefaultFontBold, a.layout.fpx(64), true)
 	defer title.Close()
 	title.SetActive(ink.Black)
 
-	body := ink.OpenFont(ink.DefaultFont, 32, true)
+	body := ink.OpenFont(ink.DefaultFont, a.layout.fpx(32), true)
 	defer body.Close()
 	body.SetActive(ink.Black)
 
-	btnFont := ink.OpenFont(ink.DefaultFontBold, 44, true)
+	btnFont := ink.OpenFont(ink.DefaultFontBold, a.layout.fpx(44), true)
 	defer btnFont.Close()
 	btnFont.SetActive(ink.Black)
 
@@ -2169,11 +2216,11 @@ func (a *app) drawDeleteConfirm() {
 
 	ink.DrawRect(yesRect, ink.Black)
 	ink.DrawRect(yesRect.Inset(2), ink.Black)
-	drawCenteredText(btnFont, yesRect, "Delete", 44)
+	drawCenteredText(btnFont, yesRect, "Delete", a.layout.fpx(44))
 
 	ink.DrawRect(noRect, ink.Black)
 	ink.DrawRect(noRect.Inset(2), ink.Black)
-	drawCenteredText(btnFont, noRect, "Keep", 44)
+	drawCenteredText(btnFont, noRect, "Keep", a.layout.fpx(44))
 
 	a.delConfirm.mu.Lock()
 	a.delConfirm.yesRect = yesRect
@@ -2230,15 +2277,15 @@ func (a *app) openProfileList() {
 }
 
 func (a *app) drawProfileList() {
-	title := ink.OpenFont(ink.DefaultFontBold, 64, true)
+	title := ink.OpenFont(ink.DefaultFontBold, a.layout.fpx(64), true)
 	defer title.Close()
 	title.SetActive(ink.Black)
 
-	body := ink.OpenFont(ink.DefaultFont, 32, true)
+	body := ink.OpenFont(ink.DefaultFont, a.layout.fpx(32), true)
 	defer body.Close()
 	body.SetActive(ink.Black)
 
-	btnFont := ink.OpenFont(ink.DefaultFontBold, 44, true)
+	btnFont := ink.OpenFont(ink.DefaultFontBold, a.layout.fpx(44), true)
 	defer btnFont.Close()
 	btnFont.SetActive(ink.Black)
 
@@ -2255,7 +2302,7 @@ func (a *app) drawProfileList() {
 		ink.DrawString(image.Point{X: a.layout.margin, Y: 240}, "Could not list profiles:")
 		ink.DrawString(image.Point{X: a.layout.margin, Y: 290}, truncate(perr.Error(), 60))
 		ink.DrawRect(a.layout.backButton, ink.Black)
-		drawCenteredText(btnFont, a.layout.backButton, "Back", 44)
+		drawCenteredText(btnFont, a.layout.backButton, "Back", a.layout.fpx(44))
 		return
 	}
 
@@ -2272,7 +2319,7 @@ func (a *app) drawProfileList() {
 		if n == active {
 			label = "* " + n + "  (active)"
 		}
-		drawCenteredText(btnFont, rect, truncate(label, 40), 44)
+		drawCenteredText(btnFont, rect, truncate(label, 40), a.layout.fpx(44))
 	}
 
 	// Add new + Delete current stacked above Back. Delete only when there
@@ -2287,13 +2334,13 @@ func (a *app) drawProfileList() {
 	addRect := image.Rect(a.layout.margin, addY1, a.layout.screen.X-a.layout.margin, addY2)
 	ink.DrawRect(addRect, ink.Black)
 	ink.DrawRect(addRect.Inset(2), ink.Black)
-	drawCenteredText(btnFont, addRect, "Add new server", 44)
+	drawCenteredText(btnFont, addRect, "Add new server", a.layout.fpx(44))
 
 	var delRect image.Rectangle
 	if len(names) > 1 {
 		delRect = image.Rect(a.layout.margin, delY1, a.layout.screen.X-a.layout.margin, delY2)
 		ink.DrawRect(delRect, ink.Black)
-		drawCenteredText(btnFont, delRect, "Delete active profile", 44)
+		drawCenteredText(btnFont, delRect, "Delete active profile", a.layout.fpx(44))
 	}
 
 	a.profileList.mu.Lock()
@@ -2303,7 +2350,7 @@ func (a *app) drawProfileList() {
 	a.profileList.mu.Unlock()
 
 	ink.DrawRect(a.layout.backButton, ink.Black)
-	drawCenteredText(btnFont, a.layout.backButton, "Back", 44)
+	drawCenteredText(btnFont, a.layout.backButton, "Back", a.layout.fpx(44))
 }
 
 func (a *app) profileListKey(e ink.KeyEvent) bool {
