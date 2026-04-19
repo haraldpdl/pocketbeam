@@ -124,6 +124,20 @@ go test -tags=live -run TestLive
 - **Library rescan not triggered automatically.** After sync, new covers and titles appear when the PocketBook library app is opened; pocketbeam does not force an immediate rescan because the stock `scanner.app` steals foreground focus and makes pocketbeam look frozen.
 - **Only tested on firmware 6.x.** Older firmware may lack the `NetMgrPing` keepalive API; sync will still work but the radio may drop during long runs.
 
+## Updates and privacy
+
+pocketbeam checks for new releases so you don't have to re-sideload manually. The check runs:
+
+- **Once at first launch** after sideloading (there's no prior check timestamp, so the app hits the release endpoint within a few seconds of startup).
+- **Once a week thereafter**, gated by the `last_update_check` timestamp stored in the local state DB.
+- **On demand** when you tap the version line in Settings.
+
+The update check is a single HTTPS GET to the release endpoint (dev builds: Gitea on your LAN; public builds: a project-hosted JSON endpoint). The request includes a `User-Agent` header of the form `pocketbeam/<version> (<device-model>; <hardware-type>; fw <firmware>; <width>x<height>)` so the release backend can see which PocketBook models and firmware versions are running which release. No personal data, no library contents, no identifiers beyond what you'd leak to any HTTPS server you visit. The backend logs whatever its web-server access log records, which includes your IP address at the time of the request.
+
+To disable all update checks, set `check_updates = off` at the top of `pocketbeam.cfg` or toggle the preference via a future Settings entry. Manual checks remain possible from the update screen.
+
+The app does **no other telemetry**: no usage stats, no crash pings, no version beacons outside the update check. The only outbound HTTP traffic pocketbeam ever initiates is (a) OPDS / WebDAV requests to your configured server, (b) the update check described above, (c) the release binary download when you tap Install. KOReader has the same posture minus the weekly check.
+
 ## License
 
 MIT. See [LICENSE](LICENSE).
