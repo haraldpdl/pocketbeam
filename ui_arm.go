@@ -97,6 +97,7 @@ type feedPickerState struct {
 	level        OPDSLevel
 	err          error
 	offset       int
+	pageSize     int               // rows per page; written during draw so paging stays consistent when the last page is short
 	rowRects     []image.Rectangle // per visible subsection row
 	selectRect   image.Rectangle   // primary action ("Done" or "Add this level" depending on state)
 	doneRect     image.Rectangle   // "Done" button when the selection set is non-empty
@@ -163,6 +164,7 @@ type dirPickerState struct {
 	dirs         []string
 	err          error
 	offset       int
+	pageSize     int
 	rowRects     []image.Rectangle // one per visible row (index 0 = "..", 1+ = dirs)
 	prevPageRect image.Rectangle
 	nextPageRect image.Rectangle
@@ -1527,10 +1529,11 @@ func (a *app) drillInto(href, title string) {
 // offset can never point past the current list length.
 func (a *app) shelfPickerPage(direction int) {
 	a.picker.mu.Lock()
-	// Page size is computed at draw time from the list's length. We use
-	// the number of currently-visible rows as a good approximation; the
-	// draw clamps any out-of-range result.
-	step := len(a.picker.rowRects)
+	// Step by pageSize (written during draw) rather than len(rowRects),
+	// because the last page can be shorter than a full window. Using
+	// rowRects as the step here would skip forward by only the partial
+	// count and land on a non-page-aligned offset.
+	step := a.picker.pageSize
 	if step <= 0 {
 		step = 1
 	}
@@ -1659,16 +1662,20 @@ func (a *app) drawShelfPicker() {
 
 		// Paging: reserve a thin strip at the bottom of the list area for
 		// page buttons only when the list overflows a single page.
+		// pageSize is the true viewport (used for Prev/Next steps and
+		// the "Page N of M" label); maxRows is the rendered window for
+		// this specific page (same except on the short last page).
 		visibleArea := areaBottom - areaTop
-		maxRows := (visibleArea - pageBtnH - 20) / rowH
-		if maxRows >= len(rows) {
-			maxRows = len(rows)
+		pageSize := (visibleArea - pageBtnH - 20) / rowH
+		if pageSize < 1 {
+			pageSize = 1
 		}
-		p := paginate(len(rows), maxRows, offset)
+		p := paginate(len(rows), pageSize, offset)
 		offset = p.offset
 		end := p.end
+		maxRows := end - offset
 
-		rects := make([]image.Rectangle, 0, end-offset)
+		rects := make([]image.Rectangle, 0, maxRows)
 		for i := offset; i < end; i++ {
 			y1 := areaTop + (i-offset)*rowH
 			rect := image.Rect(a.layout.margin, y1, a.layout.screen.X-a.layout.margin, y1+rowH-20)
@@ -1678,8 +1685,8 @@ func (a *app) drawShelfPicker() {
 		}
 
 		// Page buttons appear only when more rows exist outside the window.
-		if len(rows) > maxRows {
-			btnY1 := areaTop + maxRows*rowH
+		if len(rows) > pageSize {
+			btnY1 := areaTop + pageSize*rowH
 			btnY2 := btnY1 + pageBtnH
 			contentW := a.layout.screen.X - 2*a.layout.margin
 			half := (contentW - 40) / 2
@@ -1693,9 +1700,11 @@ func (a *app) drawShelfPicker() {
 				ink.DrawRect(nextPageRect, ink.Black)
 				drawCenteredText(btnFont, nextPageRect, "Next >", a.layout.fpx(44))
 			}
-			// Page-of-pages indicator underneath.
-			page := offset/maxRows + 1
-			total := (len(rows) + maxRows - 1) / maxRows
+			// Page-of-pages indicator underneath. Computed from pageSize
+			// (true viewport), not maxRows (rendered window; short on
+			// the last page), so "Page N" matches what the user sees.
+			page := offset/pageSize + 1
+			total := (len(rows) + pageSize - 1) / pageSize
 			ink.DrawString(
 				image.Point{X: a.layout.margin, Y: btnY2 + 30},
 				fmt.Sprintf("Page %d of %d (%d items)", page, total, len(rows)),
@@ -1703,11 +1712,14 @@ func (a *app) drawShelfPicker() {
 		}
 
 		a.picker.mu.Lock()
-		// Persist the clamped offset back to state. Without this the
-		// pointer handler reads the stored (possibly-overshot) offset
-		// and indexes past what the user actually sees, which manifests
-		// as taps landing on the wrong row after Next reaches the end.
+		// Persist the clamped offset + page size back to state. Without
+		// this the pointer handler reads the stored (possibly-overshot)
+		// offset and indexes past what the user actually sees, which
+		// manifests as taps landing on the wrong row after Next reaches
+		// the end. pageSize is used by shelfPickerPage to step by the
+		// correct amount regardless of how short the last page is.
 		a.picker.offset = offset
+		a.picker.pageSize = pageSize
 		a.picker.rowRects = rects
 		a.picker.prevPageRect = prevPageRect
 		a.picker.nextPageRect = nextPageRect
@@ -2059,11 +2071,11 @@ func (a *app) drawDirPicker() {
 		}
 
 		visibleArea := areaBottom - areaTop
-		maxRows := (visibleArea - pageBtnH - 20) / rowH
-		if maxRows >= len(rows) {
-			maxRows = len(rows)
+		pageSize := (visibleArea - pageBtnH - 20) / rowH
+		if pageSize < 1 {
+			pageSize = 1
 		}
-		p := paginate(len(rows), maxRows, offset)
+		p := paginate(len(rows), pageSize, offset)
 		offset = p.offset
 		end := p.end
 
@@ -2075,8 +2087,8 @@ func (a *app) drawDirPicker() {
 			ink.DrawRect(rect, ink.Black)
 			drawCenteredText(btnFont, rect, truncate(rows[i], 40), a.layout.fpx(44))
 		}
-		if len(rows) > maxRows {
-			btnY1 := areaTop + maxRows*rowH
+		if len(rows) > pageSize {
+			btnY1 := areaTop + pageSize*rowH
 			btnY2 := btnY1 + pageBtnH
 			contentW := a.layout.screen.X - 2*a.layout.margin
 			half := (contentW - 40) / 2
@@ -2090,8 +2102,8 @@ func (a *app) drawDirPicker() {
 				ink.DrawRect(nextPageRect, ink.Black)
 				drawCenteredText(btnFont, nextPageRect, "Next >", a.layout.fpx(44))
 			}
-			page := offset/maxRows + 1
-			total := (len(rows) + maxRows - 1) / maxRows
+			page := offset/pageSize + 1
+			total := (len(rows) + pageSize - 1) / pageSize
 			ink.DrawString(
 				image.Point{X: a.layout.margin, Y: btnY2 + 30},
 				fmt.Sprintf("Page %d of %d (%d items)", page, total, len(rows)),
@@ -2102,6 +2114,7 @@ func (a *app) drawDirPicker() {
 		// Same clamp-to-state fix as the feed picker: keep the pointer
 		// handler and the rendered rects using the same offset.
 		a.dirPicker.offset = offset
+		a.dirPicker.pageSize = pageSize
 		a.dirPicker.rowRects = rects
 		a.dirPicker.prevPageRect = prevPageRect
 		a.dirPicker.nextPageRect = nextPageRect
@@ -2197,7 +2210,7 @@ func (a *app) dirPickerPointer(e ink.PointerEvent) bool {
 // dirPickerPage scrolls the directory list by one page and repaints.
 func (a *app) dirPickerPage(direction int) {
 	a.dirPicker.mu.Lock()
-	step := len(a.dirPicker.rowRects)
+	step := a.dirPicker.pageSize
 	if step <= 0 {
 		step = 1
 	}
