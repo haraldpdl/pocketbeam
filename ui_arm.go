@@ -24,6 +24,7 @@ const (
 	screenShelfPicker
 	screenDirPicker
 	screenDeleteConfirm
+	screenSpaceWarn
 	screenProfileList
 	screenProfileDetail
 	screenUpdate
@@ -68,14 +69,31 @@ type wizardState struct {
 type syncState struct {
 	mu        sync.Mutex
 	active    bool
+	planning  bool // true while Plan() is running before downloads start
 	index     int
 	total     int
 	title     string
 	author    string
 	err       error
-	bookStart time.Time          // when the current book's download began
-	cancel    context.CancelFunc // populated while active; nil otherwise
-	cancelled bool               // true when the user tapped Cancel so the summary can say so
+	// unknownSizes is the count of new/updated books whose size the
+	// pre-flight plan couldn't determine. Non-zero means the post-sync
+	// summary tacks on a "lower-bound" note so the user knows the size
+	// estimate wasn't exact.
+	unknownSizes int
+	bookStart    time.Time          // when the current book's download began
+	cancel       context.CancelFunc // populated while active; nil otherwise
+	cancelled    bool               // true when the user tapped Cancel so the summary can say so
+}
+
+// spaceWarnState parks a pre-flight plan while the oversize-confirm screen
+// is up and routes the user's answer back to the sync goroutine over ch.
+// ch is non-nil only while a prompt is pending.
+type spaceWarnState struct {
+	mu        sync.Mutex
+	plan      SyncPlan
+	ch        chan bool
+	yesRect   image.Rectangle
+	noRect    image.Rectangle
 }
 
 // feedPickerFrame is one level of the nested-navigation stack. Pushed when
@@ -356,6 +374,7 @@ type app struct {
 	picker      feedPickerState
 	dirPicker   dirPickerState
 	delConfirm    deleteConfirmState
+	spaceWarn     spaceWarnState
 	profileList   profileListState
 	profileDetail profileDetailState
 	update        updateState
@@ -473,6 +492,8 @@ func (a *app) Draw() {
 		a.drawDirPicker()
 	case screenDeleteConfirm:
 		a.drawDeleteConfirm()
+	case screenSpaceWarn:
+		a.drawSpaceWarn()
 	case screenProfileList:
 		a.drawProfileList()
 	case screenProfileDetail:
@@ -505,6 +526,10 @@ func (a *app) Key(e ink.KeyEvent) bool {
 			// release the sync goroutine.
 			a.answerDelete(false)
 			return true
+		case screenSpaceWarn:
+			// Back key on the oversize prompt = cancel the sync.
+			a.answerSpace(false)
+			return true
 		default:
 			ink.Exit()
 			return true
@@ -523,6 +548,8 @@ func (a *app) Key(e ink.KeyEvent) bool {
 		return a.dirPickerKey(e)
 	case screenDeleteConfirm:
 		return a.deleteConfirmKey(e)
+	case screenSpaceWarn:
+		return a.spaceWarnKey(e)
 	case screenProfileList:
 		return a.profileListKey(e)
 	case screenProfileDetail:
@@ -547,6 +574,8 @@ func (a *app) Pointer(e ink.PointerEvent) bool {
 		return a.dirPickerPointer(e)
 	case screenDeleteConfirm:
 		return a.deleteConfirmPointer(e)
+	case screenSpaceWarn:
+		return a.spaceWarnPointer(e)
 	case screenProfileList:
 		return a.profileListPointer(e)
 	case screenProfileDetail:
@@ -999,17 +1028,24 @@ func (a *app) drawMain() {
 func (a *app) drawMainProgressContent(body *ink.Font) {
 	a.sync.mu.Lock()
 	active := a.sync.active
+	planning := a.sync.planning
 	idx := a.sync.index
 	total := a.sync.total
 	curTitle := a.sync.title
 	curAuthor := a.sync.author
 	syncErr := a.sync.err
 	bookStart := a.sync.bookStart
+	unknown := a.sync.unknownSizes
 	a.sync.mu.Unlock()
 
 	ink.FillArea(a.layout.progressArea, ink.White)
 
-	if active {
+	switch {
+	case planning:
+		body.SetActive(ink.Black)
+		ink.DrawString(image.Point{X: 80, Y: a.layout.progressArea.Min.Y + 30},
+			"Checking remote catalog and free space...")
+	case active:
 		body.SetActive(ink.Black)
 		counter := fmt.Sprintf("%d / %d", idx, total)
 		if !bookStart.IsZero() {
@@ -1027,10 +1063,14 @@ func (a *app) drawMainProgressContent(body *ink.Font) {
 			), ink.DarkGray)
 		}
 		ink.DrawString(image.Point{X: 80, Y: a.layout.progressArea.Min.Y + 180}, truncate(curAuthor+": "+curTitle, 60))
-	} else if syncErr != nil {
+	case syncErr != nil:
 		body.SetActive(ink.Black)
 		ink.DrawString(image.Point{X: 80, Y: a.layout.progressArea.Min.Y + 30}, "Last error:")
 		ink.DrawString(image.Point{X: 80, Y: a.layout.progressArea.Min.Y + 80}, truncate(syncErr.Error(), 60))
+	case unknown > 0:
+		body.SetActive(ink.Black)
+		ink.DrawString(image.Point{X: 80, Y: a.layout.progressArea.Min.Y + 30},
+			fmt.Sprintf("%d book(s) had unknown size; space estimate was a lower bound.", unknown))
 	}
 }
 
@@ -1128,6 +1168,7 @@ func (a *app) startSync() {
 	a.sync.title = ""
 	a.sync.author = ""
 	a.sync.err = nil
+	a.sync.unknownSizes = 0
 	a.sync.mu.Unlock()
 	ink.Repaint()
 
@@ -1189,9 +1230,45 @@ func (a *app) runSync() {
 	a.sync.mu.Lock()
 	a.sync.cancel = cancel
 	a.sync.cancelled = false
+	a.sync.planning = true
 	a.sync.mu.Unlock()
 	defer cancel()
+	a.refreshProgress()
 
+	plan, books, err := Plan(ctx, src, a.store, a.cfg.Library, opts)
+	a.sync.mu.Lock()
+	a.sync.planning = false
+	a.sync.mu.Unlock()
+	if err != nil {
+		a.finishSyncWithError(err)
+		a.refreshMainStats()
+		ink.Repaint()
+		return
+	}
+	if ok, _ := plan.Fits(); !ok {
+		if !a.confirmSpace(plan) {
+			a.sync.mu.Lock()
+			a.sync.active = false
+			a.sync.cancel = nil
+			wasCancelled := a.sync.cancelled
+			a.sync.cancelled = false
+			if wasCancelled {
+				a.sync.err = fmt.Errorf("Sync stopped.")
+			} else {
+				a.sync.err = fmt.Errorf("Not enough free space; sync cancelled.")
+			}
+			a.sync.mu.Unlock()
+			a.refreshMainStats()
+			a.screen = screenMain
+			ink.Repaint()
+			return
+		}
+	}
+	a.sync.mu.Lock()
+	a.sync.unknownSizes = plan.UnknownSizes
+	a.sync.mu.Unlock()
+
+	opts.PrefetchedBooks = books
 	res := Sync(ctx, src, a.store, a.cfg.Library, progress, opts)
 
 	a.sync.mu.Lock()
@@ -2228,6 +2305,158 @@ func (a *app) setFilters(hrefs, names []string) {
 	a.cfg.FilterHrefs = hrefs
 	a.cfg.FilterNames = names
 	_ = SaveConfig(a.cfgPath, a.cfg)
+}
+
+// ---------- Pre-flight space-warn confirmation ----------
+
+// confirmSpace parks the plan on the UI, flips to the oversize-confirm
+// screen, and blocks the sync goroutine until the user answers. Returns
+// true to proceed with the download anyway, false to cancel the sync.
+func (a *app) confirmSpace(plan SyncPlan) bool {
+	a.spaceWarn.mu.Lock()
+	a.spaceWarn.plan = plan
+	a.spaceWarn.ch = make(chan bool, 1)
+	ch := a.spaceWarn.ch
+	a.spaceWarn.mu.Unlock()
+	a.screen = screenSpaceWarn
+	ink.Repaint()
+	return <-ch
+}
+
+// answerSpace replies to an in-flight oversize prompt. Safe to call when
+// no prompt is pending; it is a no-op.
+func (a *app) answerSpace(ok bool) {
+	a.spaceWarn.mu.Lock()
+	ch := a.spaceWarn.ch
+	a.spaceWarn.ch = nil
+	a.spaceWarn.mu.Unlock()
+	if ch == nil {
+		return
+	}
+	ch <- ok
+	a.screen = screenMain
+	ink.Repaint()
+}
+
+// formatBytes renders b as a short human-readable size. Binary units
+// (KiB/MiB/GiB) are skipped in favour of base-10 because free-space
+// estimates are already approximate and base-10 matches how every
+// PocketBook file dialog phrases sizes.
+func formatBytes(b int64) string {
+	if b < 0 {
+		b = 0
+	}
+	const (
+		kb = 1000
+		mb = 1000 * kb
+		gb = 1000 * mb
+	)
+	switch {
+	case b >= gb:
+		return fmt.Sprintf("%.1f GB", float64(b)/float64(gb))
+	case b >= mb:
+		return fmt.Sprintf("%.0f MB", float64(b)/float64(mb))
+	case b >= kb:
+		return fmt.Sprintf("%.0f KB", float64(b)/float64(kb))
+	default:
+		return fmt.Sprintf("%d B", b)
+	}
+}
+
+func (a *app) drawSpaceWarn() {
+	title := ink.OpenFont(ink.DefaultFontBold, a.layout.fpx(64), true)
+	defer title.Close()
+	title.SetActive(ink.Black)
+
+	body := ink.OpenFont(ink.DefaultFont, a.layout.fpx(32), true)
+	defer body.Close()
+	body.SetActive(ink.Black)
+
+	btnFont := ink.OpenFont(ink.DefaultFontBold, a.layout.fpx(44), true)
+	defer btnFont.Close()
+	btnFont.SetActive(ink.Black)
+
+	a.spaceWarn.mu.Lock()
+	plan := a.spaceWarn.plan
+	a.spaceWarn.mu.Unlock()
+
+	ink.DrawString(image.Point{X: a.layout.margin, Y: 140}, "Not enough space")
+
+	body.SetActive(ink.Black)
+	newCount := len(plan.NewBooks) + len(plan.UpdatedBooks)
+	needLine := fmt.Sprintf("%d book(s) need %s; %s free on device.",
+		newCount, formatBytes(plan.DownloadBytes), formatBytes(plan.FreeBytes))
+	ink.DrawString(image.Point{X: a.layout.margin, Y: 230}, needLine)
+
+	y := 300
+	if plan.UnknownSizes > 0 {
+		ink.DrawString(image.Point{X: a.layout.margin, Y: y},
+			fmt.Sprintf("(%d book(s) had unknown size; total is a lower bound.)", plan.UnknownSizes))
+		y += 50
+	}
+	if plan.ReclaimableBytes > 0 {
+		ink.DrawString(image.Point{X: a.layout.margin, Y: y},
+			fmt.Sprintf("Up to %s will be freed after delete-missing.",
+				formatBytes(plan.ReclaimableBytes)))
+		y += 50
+	}
+	y += 30
+	ink.DrawString(image.Point{X: a.layout.margin, Y: y},
+		"Download anyway? Partial syncs are safe; the device")
+	ink.DrawString(image.Point{X: a.layout.margin, Y: y + 45},
+		"just stops when the disk fills up.")
+
+	btnH := 100
+	btnY2 := a.layout.backButton.Max.Y
+	btnY1 := btnY2 - btnH
+	contentW := a.layout.screen.X - 2*a.layout.margin
+	half := (contentW - 40) / 2
+	yesRect := image.Rect(a.layout.margin, btnY1, a.layout.margin+half, btnY2)
+	noRect := image.Rect(a.layout.screen.X-a.layout.margin-half, btnY1, a.layout.screen.X-a.layout.margin, btnY2)
+
+	ink.DrawRect(yesRect, ink.Black)
+	ink.DrawRect(yesRect.Inset(2), ink.Black)
+	drawCenteredText(btnFont, yesRect, "Download", a.layout.fpx(44))
+
+	ink.DrawRect(noRect, ink.Black)
+	ink.DrawRect(noRect.Inset(2), ink.Black)
+	drawCenteredText(btnFont, noRect, "Cancel", a.layout.fpx(44))
+
+	a.spaceWarn.mu.Lock()
+	a.spaceWarn.yesRect = yesRect
+	a.spaceWarn.noRect = noRect
+	a.spaceWarn.mu.Unlock()
+}
+
+func (a *app) spaceWarnKey(e ink.KeyEvent) bool {
+	switch e.Key {
+	case ink.KeyOk:
+		a.answerSpace(true)
+		return true
+	case ink.KeyBack:
+		a.answerSpace(false)
+		return true
+	}
+	return false
+}
+
+func (a *app) spaceWarnPointer(e ink.PointerEvent) bool {
+	if e.State != ink.PointerDown {
+		return false
+	}
+	a.spaceWarn.mu.Lock()
+	yes := a.spaceWarn.yesRect
+	no := a.spaceWarn.noRect
+	a.spaceWarn.mu.Unlock()
+	if e.Point.In(yes) {
+		a.answerSpace(true)
+		return true
+	}
+	if e.Point.In(no) {
+		a.answerSpace(false)
+		return true
+	}
+	return false
 }
 
 // ---------- Delete-missing confirmation ----------
