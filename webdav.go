@@ -135,6 +135,10 @@ func bookFromFileInfo(root, full string, fi os.FileInfo) (Book, bool) {
 	if parent := path.Dir(rel); parent != "." && parent != "/" {
 		author = path.Base(parent)
 	}
+	var size int64
+	if s := fi.Size(); s > 0 {
+		size = s
+	}
 	return Book{
 		UUID:    "webdav:" + rel,
 		Title:   title,
@@ -142,6 +146,7 @@ func bookFromFileInfo(root, full string, fi os.FileInfo) (Book, bool) {
 		Updated: fi.ModTime(),
 		URL:     full,
 		Format:  format,
+		Size:    size,
 	}, true
 }
 

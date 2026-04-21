@@ -52,6 +52,10 @@ type link struct {
 	// agnostic match: any `count="N"` on the link parses here. Empty
 	// when the server didn't attach one.
 	Count string `xml:"count,attr"`
+	// Length is the byte size of the acquisition resource, from the
+	// optional `length` attribute on acquisition links. CWA/Calibre-Web
+	// emits it; generic OPDS may not. Empty when absent.
+	Length string `xml:"length,attr"`
 }
 
 // Book is one acquirable item flattened out of the OPDS catalog.
@@ -62,6 +66,11 @@ type Book struct {
 	Updated time.Time // from <updated>
 	URL     string    // absolute acquisition URL
 	Format  string    // mime type
+	// Size is the resource length in bytes when the source advertised it
+	// (OPDS `length` attribute, WebDAV `getcontentlength`). 0 means
+	// unknown; callers treat unknown as "don't count in the space
+	// estimate" rather than zero.
+	Size int64
 }
 
 // Client fetches and walks an OPDS catalog.
@@ -583,6 +592,12 @@ func bookFromEntry(base *url.URL, e entry) (Book, bool) {
 		return Book{}, false
 	}
 	updated, _ := time.Parse(time.RFC3339, e.Updated)
+	var size int64
+	if acq.Length != "" {
+		if n, err := strconv.ParseInt(strings.TrimSpace(acq.Length), 10, 64); err == nil && n > 0 {
+			size = n
+		}
+	}
 	return Book{
 		UUID:    strings.TrimPrefix(e.ID, "urn:uuid:"),
 		Title:   e.Title,
@@ -590,6 +605,7 @@ func bookFromEntry(base *url.URL, e entry) (Book, bool) {
 		Updated: updated,
 		URL:     abs.String(),
 		Format:  acq.Type,
+		Size:    size,
 	}, true
 }
 

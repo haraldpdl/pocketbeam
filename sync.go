@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"syscall"
 	"time"
 	"unicode/utf8"
 )
@@ -62,6 +63,12 @@ type SyncOptions struct {
 	// Confirm is invoked before any deletion happens. If nil, the delete
 	// step is skipped even when DeleteMissing is true.
 	Confirm Confirm
+
+	// PrefetchedBooks short-circuits the initial List call when the caller
+	// already obtained the remote list (e.g. from a prior Plan). Nil means
+	// "List normally". Kept on options rather than as a separate Sync
+	// variant so existing callers stay unchanged.
+	PrefetchedBooks []Book
 }
 
 // SyncResult captures counts for a sync run plus the first non-fatal
@@ -87,10 +94,14 @@ const metaLastScope = "last_scope"
 func Sync(ctx context.Context, src Source, store *Store, library string, progress Progress, opts SyncOptions) SyncResult {
 	var res SyncResult
 	sweepStalePartFiles(library, stalePartAge)
-	books, err := src.List(ctx)
-	if err != nil {
-		res.FirstErr = fmt.Errorf("list remote: %w", err)
-		return res
+	books := opts.PrefetchedBooks
+	if books == nil {
+		var err error
+		books, err = src.List(ctx)
+		if err != nil {
+			res.FirstErr = fmt.Errorf("list remote: %w", err)
+			return res
+		}
 	}
 	total := len(books)
 	for i, b := range books {
@@ -101,7 +112,7 @@ func Sync(ctx context.Context, src Source, store *Store, library string, progres
 		if progress != nil {
 			progress(i+1, total, b)
 		}
-		local, oldPath, exists, err := store.LocalEntry(b.UUID)
+		local, oldPath, _, exists, err := store.LocalEntry(b.UUID)
 		if err != nil {
 			res.Failed++
 			if res.FirstErr == nil {
@@ -113,7 +124,7 @@ func Sync(ctx context.Context, src Source, store *Store, library string, progres
 			res.Skipped++
 			continue
 		}
-		path, err := download(ctx, src, library, b)
+		path, actualSize, err := download(ctx, src, library, b)
 		if err != nil {
 			if ctx.Err() != nil {
 				res.FirstErr = ctx.Err()
@@ -134,7 +145,7 @@ func Sync(ctx context.Context, src Source, store *Store, library string, progres
 				_ = os.Remove(filepath.Dir(oldPath))
 			}
 		}
-		if err := store.Upsert(b, path); err != nil {
+		if err := store.Upsert(b, path, actualSize); err != nil {
 			res.Failed++
 			if res.FirstErr == nil {
 				res.FirstErr = fmt.Errorf("store %q: %w", b.Title, err)
@@ -158,23 +169,24 @@ func Sync(ctx context.Context, src Source, store *Store, library string, progres
 	return res
 }
 
-// reconcileDeletions computes the set of tracked books that are absent
-// from the current remote listing, asks the caller for confirmation, and
-// deletes the confirmed items (file on disk + store row). Several safety
-// guards short-circuit before we call Confirm; a guard tripping is not
-// an error, the sync run simply keeps those books.
-func reconcileDeletions(store *Store, remote []Book, opts SyncOptions, res *SyncResult) int {
+// computeMissing returns the set of local entries absent from the current
+// remote listing, applying the empty-remote and scope-change guards. A nil
+// return with nil error means a guard tripped: the caller should treat it
+// as "no deletions candidate" rather than surface an error. This is the
+// shared source of truth for reconcileDeletions and Plan so the pre-flight
+// space estimate agrees with what the delete step will actually do.
+func computeMissing(store *Store, remote []Book, opts SyncOptions) ([]LocalBook, error) {
 	// Empty-remote guard: a misconfigured feed or wrong credentials often
 	// returns zero items. Treat that as "I can't trust this listing" and
 	// keep everything.
 	if len(remote) == 0 {
-		return 0
+		return nil, nil
 	}
 	// Scope-change guard: if the user narrowed/widened what they sync,
 	// the diff against the previous scope's books would mass-delete.
 	lastScope, _, _ := store.GetMeta(metaLastScope)
 	if lastScope != opts.Scope {
-		return 0
+		return nil, nil
 	}
 	present := make(map[string]struct{}, len(remote))
 	for _, b := range remote {
@@ -182,16 +194,29 @@ func reconcileDeletions(store *Store, remote []Book, opts SyncOptions, res *Sync
 	}
 	entries, err := store.AllEntries()
 	if err != nil {
-		if res.FirstErr == nil {
-			res.FirstErr = fmt.Errorf("list local entries: %w", err)
-		}
-		return 0
+		return nil, err
 	}
 	var missing []LocalBook
 	for _, e := range entries {
 		if _, ok := present[e.UUID]; !ok {
 			missing = append(missing, e)
 		}
+	}
+	return missing, nil
+}
+
+// reconcileDeletions computes the set of tracked books that are absent
+// from the current remote listing, asks the caller for confirmation, and
+// deletes the confirmed items (file on disk + store row). Several safety
+// guards short-circuit before we call Confirm; a guard tripping is not
+// an error, the sync run simply keeps those books.
+func reconcileDeletions(store *Store, remote []Book, opts SyncOptions, res *SyncResult) int {
+	missing, err := computeMissing(store, remote, opts)
+	if err != nil {
+		if res.FirstErr == nil {
+			res.FirstErr = fmt.Errorf("list local entries: %w", err)
+		}
+		return 0
 	}
 	if len(missing) == 0 {
 		return 0
@@ -233,14 +258,136 @@ func ScopeFor(cfg *Config) string {
 	return fmt.Sprintf("%s|%s|%s|%s|%s", cfg.Profile, cfg.Backend, cfg.Host, strings.Join(filters, ","), cfg.Path)
 }
 
-func download(parent context.Context, src Source, library string, b Book) (string, error) {
+// SyncPlan is the pre-flight estimate of a sync run: what would be
+// downloaded, skipped, and (if delete-missing guards don't trip) removed,
+// together with the byte counts needed to decide whether the run fits in
+// the device's free space. Size fields are best-effort; a book whose
+// Size is unknown contributes 0 and UnknownSizes is incremented.
+type SyncPlan struct {
+	NewBooks     []Book
+	UpdatedBooks []Book
+	Unchanged    int
+	Missing      []LocalBook
+
+	// DownloadBytes is the peak additional space the sync needs: the sum
+	// of New and Updated book sizes. We do not deduct the old size of an
+	// updated book because `.part` files are written before the rename,
+	// so during the download both copies coexist.
+	DownloadBytes int64
+
+	// ReclaimableBytes is the total size of Missing books, available only
+	// after the user confirms deletion and after downloads have finished.
+	// Informational: does not reduce DownloadBytes.
+	ReclaimableBytes int64
+
+	// UnknownSizes counts New/Updated books whose size the source did not
+	// advertise (neither the server nor the store cache knew). The
+	// DownloadBytes total is therefore a lower bound when this is > 0.
+	UnknownSizes int
+
+	// FreeBytes is the bytes currently available on the filesystem that
+	// hosts `library`. 0 when the Statfs probe failed, which the caller
+	// should treat as "unknown, skip space check" rather than "full".
+	FreeBytes int64
+}
+
+// Fits reports whether the plan's known download bytes fit in the free
+// space. Certain is false when UnknownSizes > 0 (the DownloadBytes total
+// is a lower bound, so a true result could still overrun), or when
+// FreeBytes is 0 (the free-space probe failed).
+func (p SyncPlan) Fits() (ok bool, certain bool) {
+	if p.FreeBytes == 0 {
+		return true, false
+	}
+	ok = p.DownloadBytes <= p.FreeBytes
+	certain = p.UnknownSizes == 0
+	return ok, certain
+}
+
+// Plan computes what a Sync call with the same options would do without
+// downloading anything. It lists the remote, diffs against the store,
+// tallies sizes, and probes free space. The returned plan's NewBooks and
+// UpdatedBooks share the same ordering as the remote list, so the caller
+// can pass `PrefetchedBooks` back into Sync to avoid a second List.
+func Plan(ctx context.Context, src Source, store *Store, library string, opts SyncOptions) (SyncPlan, []Book, error) {
+	var plan SyncPlan
+	books := opts.PrefetchedBooks
+	if books == nil {
+		var err error
+		books, err = src.List(ctx)
+		if err != nil {
+			return plan, nil, fmt.Errorf("list remote: %w", err)
+		}
+	}
+	for _, b := range books {
+		local, _, cachedSize, exists, err := store.LocalEntry(b.UUID)
+		if err != nil {
+			return plan, books, err
+		}
+		if exists && !b.Updated.After(local) {
+			plan.Unchanged++
+			continue
+		}
+		var size int64
+		switch {
+		case b.Size > 0:
+			size = b.Size
+		case exists && cachedSize > 0:
+			// The server didn't advertise length this time but we know
+			// from a prior download how big this UUID is. Use the cache
+			// so the plan tightens up on every run.
+			size = cachedSize
+		}
+		if size > 0 {
+			plan.DownloadBytes += size
+		} else {
+			plan.UnknownSizes++
+		}
+		if exists {
+			plan.UpdatedBooks = append(plan.UpdatedBooks, b)
+		} else {
+			plan.NewBooks = append(plan.NewBooks, b)
+		}
+	}
+	if opts.DeleteMissing {
+		missing, err := computeMissing(store, books, opts)
+		if err != nil {
+			return plan, books, err
+		}
+		plan.Missing = missing
+		for _, m := range missing {
+			plan.ReclaimableBytes += m.Size
+		}
+	}
+	plan.FreeBytes = availableBytes(library)
+	return plan, books, nil
+}
+
+// availableBytes returns the free space on the filesystem that hosts path.
+// MkdirAll guarantees Statfs has a valid target on first run. Returns 0 on
+// any error: the caller treats 0 as "unknown, skip the space check".
+func availableBytes(path string) int64 {
+	if err := os.MkdirAll(path, 0o755); err != nil {
+		return 0
+	}
+	var st syscall.Statfs_t
+	if err := syscall.Statfs(path, &st); err != nil {
+		return 0
+	}
+	// Bavail is blocks available to an unprivileged user; Bsize is the
+	// fundamental filesystem block size. Multiply in int64 to avoid the
+	// overflow that plain int would hit on >2 GB fields on 32-bit ARM.
+	return int64(st.Bavail) * int64(st.Bsize)
+}
+
+func download(parent context.Context, src Source, library string, b Book) (string, int64, error) {
 	ext := formatExt[b.Format]
 	if ext == "" {
-		return "", fmt.Errorf("no extension known for %s", b.Format)
+		return "", 0, fmt.Errorf("no extension known for %s", b.Format)
 	}
 	dir := filepath.Join(library, sanitize(b.Author))
 	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return "", err
+		return "", 0, err
 	}
 	path := filepath.Join(dir, sanitize(b.Title)+ext)
 
@@ -248,28 +395,29 @@ func download(parent context.Context, src Source, library string, b Book) (strin
 	defer cancel()
 	body, err := src.Fetch(ctx, b)
 	if err != nil {
-		return "", err
+		return "", 0, err
 	}
 	defer body.Close()
 
 	tmp := path + ".part"
 	f, err := os.Create(tmp)
 	if err != nil {
-		return "", err
+		return "", 0, err
 	}
-	if _, err := io.Copy(f, body); err != nil {
+	n, err := io.Copy(f, body)
+	if err != nil {
 		f.Close()
 		os.Remove(tmp)
-		return "", err
+		return "", 0, err
 	}
 	if err := f.Close(); err != nil {
 		os.Remove(tmp)
-		return "", err
+		return "", 0, err
 	}
 	if err := os.Rename(tmp, path); err != nil {
-		return "", err
+		return "", 0, err
 	}
-	return path, nil
+	return path, n, nil
 }
 
 // sanitize strips characters that are illegal or awkward in filenames on

@@ -206,6 +206,58 @@ func TestLevelBookCount(t *testing.T) {
 	}
 }
 
+func TestBookFromEntry_ParsesLength(t *testing.T) {
+	const feedXML = `<?xml version="1.0"?><feed ` + opdsNS + `>
+        <entry>
+          <id>urn:uuid:with-size</id><title>Sized</title>
+          <author><name>A</name></author>
+          <updated>2026-01-01T00:00:00+00:00</updated>
+          <link rel="http://opds-spec.org/acquisition" type="application/epub+zip"
+                href="/d/1" length="3147045"/>
+        </entry>
+        <entry>
+          <id>urn:uuid:no-size</id><title>Unknown</title>
+          <author><name>A</name></author>
+          <updated>2026-01-01T00:00:00+00:00</updated>
+          <link rel="http://opds-spec.org/acquisition" type="application/epub+zip" href="/d/2"/>
+        </entry>
+        <entry>
+          <id>urn:uuid:bad-size</id><title>Garbage</title>
+          <author><name>A</name></author>
+          <updated>2026-01-01T00:00:00+00:00</updated>
+          <link rel="http://opds-spec.org/acquisition" type="application/epub+zip"
+                href="/d/3" length="not-a-number"/>
+        </entry>
+      </feed>`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/atom+xml")
+		_, _ = w.Write([]byte(feedXML))
+	}))
+	defer srv.Close()
+
+	c := newOPDSClient(t, srv.URL)
+	books, err := c.walk("/")
+	if err != nil {
+		t.Fatalf("walk: %v", err)
+	}
+	if len(books) != 3 {
+		t.Fatalf("got %d books, want 3", len(books))
+	}
+	byUUID := map[string]Book{}
+	for _, b := range books {
+		byUUID[b.UUID] = b
+	}
+	if byUUID["with-size"].Size != 3147045 {
+		t.Errorf("with-size: Size=%d, want 3147045", byUUID["with-size"].Size)
+	}
+	if byUUID["no-size"].Size != 0 {
+		t.Errorf("no-size: Size=%d, want 0", byUUID["no-size"].Size)
+	}
+	if byUUID["bad-size"].Size != 0 {
+		t.Errorf("bad-size: Size=%d, want 0 for unparseable length", byUUID["bad-size"].Size)
+	}
+}
+
 func TestFetchLevel_EmptyHrefDefaultsToRoot(t *testing.T) {
 	var gotPath string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

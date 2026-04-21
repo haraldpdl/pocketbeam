@@ -3,6 +3,7 @@ package main
 import (
 	"database/sql"
 	"encoding/json"
+	"strings"
 	"time"
 
 	_ "github.com/mattn/go-sqlite3"
@@ -34,10 +35,21 @@ func OpenStore(path string) (*Store, error) {
 		title      TEXT NOT NULL,
 		author     TEXT NOT NULL,
 		updated    INTEGER NOT NULL,
-		local_path TEXT NOT NULL
+		local_path TEXT NOT NULL,
+		size       INTEGER NOT NULL DEFAULT 0
 	)`); err != nil {
 		db.Close()
 		return nil, err
+	}
+	// Migration: older installs created `books` without the size column.
+	// ALTER TABLE ADD COLUMN is idempotent only if we swallow the "duplicate
+	// column" error; PRAGMA table_info is the clean alternative but this is
+	// cheaper and covers the single-column case we care about.
+	if _, err := db.Exec(`ALTER TABLE books ADD COLUMN size INTEGER NOT NULL DEFAULT 0`); err != nil {
+		if !strings.Contains(err.Error(), "duplicate column name") {
+			db.Close()
+			return nil, err
+		}
 	}
 	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS meta (
 		key   TEXT PRIMARY KEY,
@@ -87,47 +99,63 @@ func (s *Store) LastSync() (SyncSummary, bool, error) {
 
 func (s *Store) Close() error { return s.db.Close() }
 
-// LocalEntry returns the last-recorded updated timestamp and local path for
-// a book UUID. exists=false means we have not synced this book before.
-func (s *Store) LocalEntry(uuid string) (updated time.Time, path string, exists bool, err error) {
+// LocalEntry returns the last-recorded updated timestamp, local path, and
+// cached byte size for a book UUID. Size is 0 when unknown (legacy rows
+// from before the size column, or a server that never advertised length).
+// exists=false means we have not synced this book before.
+func (s *Store) LocalEntry(uuid string) (updated time.Time, path string, size int64, exists bool, err error) {
 	var ts int64
-	err = s.db.QueryRow("SELECT updated, local_path FROM books WHERE uuid = ?", uuid).Scan(&ts, &path)
+	err = s.db.QueryRow("SELECT updated, local_path, size FROM books WHERE uuid = ?", uuid).Scan(&ts, &path, &size)
 	if err == sql.ErrNoRows {
-		return time.Time{}, "", false, nil
+		return time.Time{}, "", 0, false, nil
 	}
 	if err != nil {
-		return time.Time{}, "", false, err
+		return time.Time{}, "", 0, false, err
 	}
-	return time.Unix(ts, 0), path, true, nil
+	return time.Unix(ts, 0), path, size, true, nil
 }
 
-// Upsert records a successful download.
-func (s *Store) Upsert(b Book, localPath string) error {
-	_, err := s.db.Exec(`INSERT INTO books (uuid, title, author, updated, local_path)
-		VALUES (?, ?, ?, ?, ?)
+// Upsert records a successful download. actualSize is the byte count read
+// off the wire during this download; it takes precedence over b.Size
+// (which is the server-advertised value and may not match). A non-positive
+// actualSize falls back to b.Size so callers can use Upsert from contexts
+// that don't measure the transfer.
+func (s *Store) Upsert(b Book, localPath string, actualSize int64) error {
+	size := actualSize
+	if size <= 0 {
+		size = b.Size
+	}
+	if size < 0 {
+		size = 0
+	}
+	_, err := s.db.Exec(`INSERT INTO books (uuid, title, author, updated, local_path, size)
+		VALUES (?, ?, ?, ?, ?, ?)
 		ON CONFLICT(uuid) DO UPDATE SET
 			title = excluded.title,
 			author = excluded.author,
 			updated = excluded.updated,
-			local_path = excluded.local_path`,
-		b.UUID, b.Title, b.Author, b.Updated.Unix(), localPath)
+			local_path = excluded.local_path,
+			size = excluded.size`,
+		b.UUID, b.Title, b.Author, b.Updated.Unix(), localPath, size)
 	return err
 }
 
 // LocalBook is the local view of a previously-synced book: identity,
-// human display fields, and the path on disk. Used by the delete-missing
-// path and the confirmation prompt.
+// human display fields, the path on disk, and the cached byte size
+// (0 if unknown). Used by the delete-missing path, the confirmation
+// prompt, and the pre-flight space check.
 type LocalBook struct {
 	UUID      string
 	Title     string
 	Author    string
 	LocalPath string
+	Size      int64
 }
 
 // AllEntries returns every tracked book. Used to compute which local
 // entries are missing from the current remote listing.
 func (s *Store) AllEntries() ([]LocalBook, error) {
-	rows, err := s.db.Query(`SELECT uuid, title, author, local_path FROM books`)
+	rows, err := s.db.Query(`SELECT uuid, title, author, local_path, size FROM books`)
 	if err != nil {
 		return nil, err
 	}
@@ -135,7 +163,7 @@ func (s *Store) AllEntries() ([]LocalBook, error) {
 	var out []LocalBook
 	for rows.Next() {
 		var b LocalBook
-		if err := rows.Scan(&b.UUID, &b.Title, &b.Author, &b.LocalPath); err != nil {
+		if err := rows.Scan(&b.UUID, &b.Title, &b.Author, &b.LocalPath, &b.Size); err != nil {
 			return nil, err
 		}
 		out = append(out, b)
