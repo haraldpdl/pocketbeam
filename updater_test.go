@@ -46,8 +46,8 @@ func newReleaseMock(t *testing.T, tagName, assetBody, sha string) *httptest.Serv
 		switch r.URL.Path {
 		case "/api/v1/repos/x/pocketbeam/releases/latest":
 			body := fmt.Sprintf("some notes\nsha256: %s\nmore notes", sha)
-			fmt.Fprintf(w, `{"tag_name":%q,"body":%q,"assets":[{"name":%q,"browser_download_url":%q}]}`,
-				tagName, body, assetName, srv.URL+"/asset")
+			fmt.Fprintf(w, `{"tag_name":%q,"body":%q,"assets":[{"name":%q,"browser_download_url":%q,"size":%d}]}`,
+				tagName, body, assetName, srv.URL+"/asset", len(assetBodyBytes))
 		case "/asset":
 			w.Header().Set("Content-Type", "application/octet-stream")
 			_, _ = w.Write(assetBodyBytes)
@@ -76,6 +76,10 @@ func TestCheckLatest_NewerVersionDetected(t *testing.T) {
 	}
 	if rel.BinaryURL == "" || rel.SHA256 == "" {
 		t.Errorf("missing fields: %+v", rel)
+	}
+	if rel.BinarySize != int64(len("pretend new binary")) {
+		t.Errorf("BinarySize = %d, want %d (from manifest assets[].size)",
+			rel.BinarySize, len("pretend new binary"))
 	}
 }
 
