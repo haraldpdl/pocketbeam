@@ -20,10 +20,16 @@ The project expects to be built inside the [`sunsung/pocketbook-go-sdk`](https:/
 
 ```sh
 docker run --rm -v "$PWD":/app -w /app sunsung/pocketbook-go-sdk:latest \
-    go build -ldflags='-s -w' -o pocketbeam.app .
+    go build -ldflags="-s -w -X main.version=$(git describe --tags --always --dirty)" \
+    -o pocketbeam.app .
 ```
 
-The stripped binary is about 8 MB.
+The stripped binary is about 8 MB. The `-X main.version=...` flag bakes the
+current git tag into the binary; the on-device updater compares that against
+the latest Gitea release to decide whether to offer an upgrade. A bare
+`go build` without the flag leaves the version as `dev`, which the updater
+treats as older than any tagged release (so the updater is always willing
+to replace a dev build with a real release).
 
 ### 2. Sideload
 
