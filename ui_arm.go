@@ -3117,7 +3117,11 @@ func (a *app) drawUpdate() {
 		ink.DrawString(image.Point{X: a.layout.margin, Y: y}, "Could not check:")
 		ink.DrawString(image.Point{X: a.layout.margin, Y: y + 50}, truncate(checkErr.Error(), 60))
 	case available:
-		ink.DrawString(image.Point{X: a.layout.margin, Y: y}, "New version: "+rel.Version)
+		line := "New version: " + rel.Version
+		if rel.BinarySize > 0 {
+			line += "  (" + formatBytes(rel.BinarySize) + ")"
+		}
+		ink.DrawString(image.Point{X: a.layout.margin, Y: y}, line)
 		if rel.SHA256 != "" {
 			ink.DrawString(image.Point{X: a.layout.margin, Y: y + 50}, "sha256: "+rel.SHA256[:12]+"...")
 		}

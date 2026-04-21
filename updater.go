@@ -26,12 +26,14 @@ var UserAgentFn = func() string {
 
 // Release captures the subset of a Gitea / GitHub release payload that
 // the updater needs: the tag name (treated as a semver), a direct URL to
-// the ARM .app asset, and a published SHA-256 checksum for integrity
+// the ARM .app asset, the asset byte size (for "X.Y MB" in the UI
+// pre-download), and a published SHA-256 checksum for integrity
 // verification.
 type Release struct {
-	Version  string // tag_name, e.g. "v0.1.0"; compared semver-wise
+	Version   string // tag_name, e.g. "v0.1.0"; compared semver-wise
 	BinaryURL string
-	SHA256   string // lowercase hex; empty means the release body omitted it
+	BinarySize int64 // asset size in bytes from the release manifest; 0 when absent
+	SHA256    string // lowercase hex; empty means the release body omitted it
 }
 
 // giteaRelease mirrors the fields we pull from the release API. The
@@ -42,6 +44,7 @@ type giteaRelease struct {
 	Assets  []struct {
 		Name string `json:"name"`
 		URL  string `json:"browser_download_url"`
+		Size int64  `json:"size"`
 	} `json:"assets"`
 }
 
@@ -82,6 +85,7 @@ func CheckLatest(ctx context.Context, endpoint, currentVersion string) (newer bo
 	for _, a := range g.Assets {
 		if a.Name == assetName {
 			rel.BinaryURL = a.URL
+			rel.BinarySize = a.Size
 			break
 		}
 	}
