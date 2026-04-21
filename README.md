@@ -127,7 +127,7 @@ go test -tags=live -run TestLive
 - **App name shows as `@pocketbeam`** in the PocketBook launcher with a generic icon. This is the PocketBook firmware's default presentation for any sideloaded app and matches KOReader's `@koreader` presentation. Customising it requires editing `/mnt/ext1/system/config/desktop/view.json` and placing BMP icons under `/mnt/ext1/applications/icons/`; that is a per-user polish step, not part of the default install.
 - **Password entry is visible** on the on-screen keyboard. The PocketBook InkView keyboard has no masked-input mode exposed through the SDK. Use a stance that blocks onlookers or set a throwaway password for device use.
 - **Interrupting a sync leaves a partial download** as a `.part` file. The next sync's stale-sweep removes anything older than one hour, so no manual cleanup is needed.
-- **Library rescan not triggered automatically.** After sync, new covers and titles appear when the PocketBook library app is opened; pocketbeam does not force an immediate rescan because the stock `scanner.app` steals foreground focus and makes pocketbeam look frozen.
+- **Library refresh briefly takes over the screen.** After a sync that downloaded or deleted books, pocketbeam runs the stock PocketBook `scanner.app` so new covers and titles show up without you having to navigate into Library. Scanner steals foreground focus while it indexes; pocketbeam shows a "Refreshing library" dialog that closes itself when scanner exits.
 - **Only tested on firmware 6.x.** Older firmware may lack the `NetMgrPing` keepalive API; sync will still work but the radio may drop during long runs.
 
 ## Updates and privacy

@@ -6,6 +6,7 @@ import (
 	"image"
 	"log"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -28,6 +29,21 @@ const (
 	screenProfileList
 	screenProfileDetail
 	screenUpdate
+	screenLibraryRefresh
+)
+
+// libraryScannerTimeout caps how long we wait for the PocketBook scanner to
+// finish indexing new books before we force the refresh dialog closed and
+// return to the main screen. Scanner normally exits in a few seconds; the
+// upper bound guards against a stuck scanner leaving pocketbeam modal.
+const libraryScannerTimeout = 60 * time.Second
+
+// userScannerPath is where firmware 6.x installs the PocketBook library
+// scanner. The systemScannerPath fallback covers variants that only ship the
+// scanner under /ebrmain.
+const (
+	userScannerPath   = "/mnt/ext1/system/bin/scanner.app"
+	systemScannerPath = "/ebrmain/bin/scanner.app"
 )
 
 // wizardStep tracks where the user is in the first-run flow.
@@ -500,11 +516,19 @@ func (a *app) Draw() {
 		a.drawProfileDetail()
 	case screenUpdate:
 		a.drawUpdate()
+	case screenLibraryRefresh:
+		a.drawLibraryRefresh()
 	}
 	ink.FullUpdate()
 }
 
 func (a *app) Key(e ink.KeyEvent) bool {
+	// Library refresh is a modal auto-closing screen. Scanner has
+	// foreground for the duration, so keys can only arrive in the brief
+	// window before scanner takes over; swallow them either way.
+	if a.screen == screenLibraryRefresh {
+		return true
+	}
 	// Back key behaviour: return to previous screen from settings/picker,
 	// quit from first-run welcome/error or from main (if idle).
 	if e.Key == ink.KeyBack && a.wizard.step != stepTesting && !a.syncActive() {
@@ -582,6 +606,8 @@ func (a *app) Pointer(e ink.PointerEvent) bool {
 		return a.profileDetailPointer(e)
 	case screenUpdate:
 		return a.updatePointer(e)
+	case screenLibraryRefresh:
+		return true
 	}
 	return false
 }
@@ -1293,16 +1319,53 @@ func (a *app) runSync() {
 		Failed:     res.Failed,
 	})
 	a.refreshMainStats()
+	// If the sync actually changed the library, hand off to the stock
+	// PocketBook scanner so new covers/titles show up without the user
+	// having to navigate into Library first. Scanner takes foreground
+	// focus while it runs; show an auto-closing "Refreshing library"
+	// dialog so the hand-off is explained rather than looking like a
+	// freeze. If nothing changed (or the sync failed), skip straight to
+	// main as before.
+	if !wasCancelled && (res.Downloaded > 0 || res.Deleted > 0) {
+		a.screen = screenLibraryRefresh
+		ink.Repaint()
+		go a.runLibraryScanner()
+		return
+	}
 	// In case the confirm screen is still up (e.g. user closed the device
 	// with the prompt showing), flip back to main.
 	a.screen = screenMain
 	ink.Repaint()
+}
 
-	// We deliberately do NOT auto-exec /mnt/ext1/system/bin/scanner.app here:
-	// on PocketBook firmware 6.x it takes foreground focus, which makes
-	// pocketbeam appear frozen until the scan finishes. The Library app
-	// rescans on its own the next time you open it, so new covers and
-	// titles show up after a normal navigation back to the library.
+// runLibraryScanner launches the PocketBook scanner to re-index
+// /mnt/ext1/Books, then returns to the main screen. Called from a goroutine
+// after a sync that downloaded or deleted books. The scanner takes
+// foreground focus for the duration; we only use its exit to drive our own
+// auto-close transition. Any failure (missing binary, exec error, timeout)
+// falls through to screenMain without surfacing to the user - the worst
+// case is the old "open Library to see new books" behaviour.
+func (a *app) runLibraryScanner() {
+	defer func() {
+		a.screen = screenMain
+		ink.Repaint()
+	}()
+
+	path := userScannerPath
+	if _, err := os.Stat(path); err != nil {
+		path = systemScannerPath
+		if _, err := os.Stat(path); err != nil {
+			log.Printf("library scanner: no scanner.app found at %s or %s", userScannerPath, systemScannerPath)
+			return
+		}
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), libraryScannerTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, path)
+	if err := cmd.Run(); err != nil {
+		log.Printf("library scanner: %v", err)
+	}
 }
 
 // finishSyncWithError sets the sync state to inactive with the given error.
@@ -2457,6 +2520,31 @@ func (a *app) spaceWarnPointer(e ink.PointerEvent) bool {
 		return true
 	}
 	return false
+}
+
+// ---------- Library-refresh dialog ----------
+
+// drawLibraryRefresh paints a centred informational dialog shown after a
+// sync that changed the library. The actual work happens in
+// runLibraryScanner; scanner.app takes foreground focus as soon as it
+// starts, so this draw pass is what the user sees in the ~instant between
+// sync completion and the scanner UI appearing. It also serves as the
+// backdrop the user returns to when scanner exits, right before the
+// goroutine flips back to screenMain.
+func (a *app) drawLibraryRefresh() {
+	title := ink.OpenFont(ink.DefaultFontBold, a.layout.fpx(54), true)
+	defer title.Close()
+	title.SetActive(ink.Black)
+
+	body := ink.OpenFont(ink.DefaultFont, a.layout.fpx(32), true)
+	defer body.Close()
+	body.SetActive(ink.Black)
+
+	title.SetActive(ink.Black)
+	ink.DrawString(image.Point{X: a.layout.margin, Y: 300}, "Refreshing library")
+	body.SetActive(ink.Black)
+	ink.DrawString(image.Point{X: a.layout.margin, Y: 400}, "Indexing new books on the device.")
+	ink.DrawString(image.Point{X: a.layout.margin, Y: 450}, "This closes on its own.")
 }
 
 // ---------- Delete-missing confirmation ----------
