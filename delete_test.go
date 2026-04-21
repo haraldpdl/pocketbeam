@@ -155,7 +155,7 @@ func TestSync_DeleteMissing_ConfirmsAndRemoves(t *testing.T) {
 		t.Errorf("Confirm called with %+v, want one entry for uuid-b", askedWith)
 	}
 	// The store should no longer know about uuid-b.
-	_, _, exists, err := store.LocalEntry("uuid-b")
+	_, _, _, exists, err := store.LocalEntry("uuid-b")
 	if err != nil {
 		t.Fatalf("LocalEntry: %v", err)
 	}
@@ -259,7 +259,7 @@ func TestSync_DeleteMissing_ConfirmDecline(t *testing.T) {
 	if res.Deleted != 0 {
 		t.Errorf("Deleted = %d, want 0 when declined", res.Deleted)
 	}
-	_, _, exists, _ := store.LocalEntry("uuid-b")
+	_, _, _, exists, _ := store.LocalEntry("uuid-b")
 	if !exists {
 		t.Errorf("uuid-b should still be present after decline")
 	}

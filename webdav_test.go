@@ -119,6 +119,31 @@ func TestWebDAVSource_ListWalksDirectory(t *testing.T) {
 	}
 }
 
+func TestWebDAVSource_CarriesSizeFromPropfind(t *testing.T) {
+	const stamp = "Mon, 02 Jan 2006 15:04:05 GMT"
+	responses := webdavPropfindResponses{
+		"/Books/": propfindResponse([]webdavEntry{
+			{href: "/Books/", isDir: true, mtime: stamp},
+			{href: "/Books/one.epub", mtime: stamp},
+		}),
+	}
+	srv := newWebDAVMock(t, responses)
+	defer srv.Close()
+
+	src := NewWebDAVSource(srv.URL, "", "", "/Books")
+	books, err := src.List(context.Background())
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(books) != 1 {
+		t.Fatalf("got %d books, want 1", len(books))
+	}
+	// propfindResponse hardcodes getcontentlength=10 for every file entry.
+	if books[0].Size != 10 {
+		t.Errorf("Size=%d, want 10 (from getcontentlength)", books[0].Size)
+	}
+}
+
 func TestWebDAVSource_FetchStreamsBody(t *testing.T) {
 	const stamp = "Mon, 02 Jan 2006 15:04:05 GMT"
 	responses := webdavPropfindResponses{
