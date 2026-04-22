@@ -1099,7 +1099,9 @@ func (a *app) drawMainProgressContent(body *ink.Font) {
 		body.SetActive(ink.Black)
 		counter := fmt.Sprintf("%d / %d", idx, total)
 		if !bookStart.IsZero() {
-			counter += "  (" + formatElapsed(time.Since(bookStart)) + ")"
+			if elapsed := time.Since(bookStart); elapsed >= time.Second {
+				counter += "  (" + formatElapsed(elapsed) + ")"
+			}
 		}
 		ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.progressArea.Min.Y + a.layout.sy(30)}, counter)
 		ink.DrawRect(a.layout.progressBar, ink.Black)
