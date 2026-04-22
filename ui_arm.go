@@ -276,16 +276,6 @@ type layout struct {
 	pickerAreaBottom int
 }
 
-// connectivity records the last known network state, derived from the outcome
-// of the most recent probe or sync attempt.
-type connectivity int
-
-const (
-	connUnknown connectivity = iota
-	connOnline
-	connOffline
-)
-
 // computeLayout lays out the UI relative to the given screen size. Positions
 // are derived from the usable area after stripping generous safety margins
 // that guard against a PocketBook status bar at top and nav bar at bottom
@@ -469,7 +459,6 @@ type app struct {
 	bookCount   int
 	netStop           func()
 	layout            layout
-	connState         connectivity
 	lastTap           time.Time
 }
 
@@ -1486,15 +1475,14 @@ func (a *app) finishSyncWithError(err error) {
 }
 
 // ensureConnected wakes the Wi-Fi and verifies the server is reachable with
-// the configured credentials. Updates a.connState based on the outcome and
-// refreshes the client's server-type detection so the next WalkAll picks the
-// right path (CWA fast path vs generic recursive walk). Returns a user-facing
-// error on failure; nil on success. All UI actions that issue HTTP requests
-// to the server should call this first so the user gets a consistent,
-// readable error instead of a raw Go transport dump.
+// the configured credentials, and refreshes the client's server-type
+// detection so the next WalkAll picks the right path (CWA fast path vs
+// generic recursive walk). Returns a user-facing error on failure; nil on
+// success. All UI actions that issue HTTP requests to the server should
+// call this first so the user gets a consistent, readable error instead of
+// a raw Go transport dump.
 func (a *app) ensureConnected() error {
 	if err := ink.ConnectDefault(); err != nil {
-		a.connState = connOffline
 		return fmt.Errorf("No Wi-Fi connection. Open Network to configure.")
 	}
 	var err error
@@ -1505,13 +1493,11 @@ func (a *app) ensureConnected() error {
 		err = ProbeCWA(context.Background(), a.cfg.Host, a.cfg.User, a.cfg.Pass)
 	}
 	if err != nil {
-		a.connState = connOffline
 		return err
 	}
 	if a.cfg.Backend != BackendWebDAV && a.client != nil {
 		_ = a.client.DetectType() // non-fatal: falls back to generic walk
 	}
-	a.connState = connOnline
 	return nil
 }
 
@@ -1609,7 +1595,6 @@ func (a *app) drawSettings() {
 	a.update.mu.Lock()
 	if a.update.available && a.update.release.Version != "" {
 		updateTitle = "Install update " + a.update.release.Version
-		updateSub = "Current version " + version
 	}
 	a.update.mu.Unlock()
 	a.drawListRow(rowTitleFont, rowSubFont, a.layout.updateRow,
@@ -1634,6 +1619,10 @@ func (a *app) drawSectionLabel(f *ink.Font, label string, y int) {
 // the top edge, and an optional right-edge chevron for drill-downs.
 // Used by Settings, Shelf/Dir pickers, Profile list, and the first-run
 // backend picker so every list in the app shares one visual language.
+//
+// DrawString interprets Y as the top-left corner of the glyph box (see
+// drawCenteredText), so every position here is expressed as the text's
+// top edge, not its baseline.
 func (a *app) drawListRow(titleF, subF *ink.Font, r image.Rectangle, title, subtitle string, chevron bool) {
 	a.drawHairline(r.Min.X, r.Max.X, r.Min.Y)
 
@@ -1641,27 +1630,29 @@ func (a *app) drawListRow(titleF, subF *ink.Font, r image.Rectangle, title, subt
 	subH := a.layout.fpx(28)
 	gap := a.layout.sy(12)
 
+	titleF.SetActive(ink.Black)
 	if subtitle == "" {
-		titleY := r.Min.Y + (r.Dy()+titleH)/2
-		titleF.SetActive(ink.Black)
+		titleY := r.Min.Y + (r.Dy()-titleH)/2
 		ink.DrawString(image.Point{X: r.Min.X, Y: titleY}, truncate(title, 48))
 	} else {
 		totalH := titleH + gap + subH
-		titleY := r.Min.Y + (r.Dy()-totalH)/2 + titleH
-		subY := titleY + gap + subH
-		titleF.SetActive(ink.Black)
+		titleY := r.Min.Y + (r.Dy()-totalH)/2
+		subY := titleY + titleH + gap
 		ink.DrawString(image.Point{X: r.Min.X, Y: titleY}, truncate(title, 40))
 		subF.SetActive(ink.DarkGray)
 		ink.DrawString(image.Point{X: r.Min.X, Y: subY}, truncate(subtitle, 48))
 	}
 
 	if chevron {
-		chevronF := ink.OpenFont(ink.DefaultFontBold, a.layout.fpx(48), true)
-		defer chevronF.Close()
-		chevronF.SetActive(ink.DarkGray)
+		// Reuse titleF (same bold face) rather than opening a fresh
+		// font per row; picker screens can call this 10+ times per
+		// frame and per-row font handles are measurable on e-ink.
+		titleF.SetActive(ink.DarkGray)
+		ch := ">"
+		chW := ink.StringWidth(ch)
 		ink.DrawString(
-			image.Point{X: r.Max.X - a.layout.sx(30), Y: r.Min.Y + (r.Dy()+a.layout.fpx(48))/2 - a.layout.sy(8)},
-			">")
+			image.Point{X: r.Max.X - a.layout.sx(20) - chW, Y: r.Min.Y + (r.Dy()-titleH)/2},
+			ch)
 	}
 }
 
@@ -1963,7 +1954,7 @@ func (a *app) drawShelfPicker() {
 				parent = stackTitles[stackLen-1]
 			}
 			rowTitleFont.SetActive(ink.Black)
-			titleY := upRect.Min.Y + (upRect.Dy()+a.layout.fpx(36))/2
+			titleY := upRect.Min.Y + (upRect.Dy()-a.layout.fpx(36))/2
 			ink.DrawString(image.Point{X: upRect.Min.X + a.layout.sx(40), Y: titleY},
 				"< Back to "+truncate(parent, 32))
 			listTop += rowH
@@ -2022,7 +2013,7 @@ func (a *app) drawShelfPicker() {
 			smallFont.SetActive(ink.DarkGray)
 			pageLabelW := ink.StringWidth(pageLabel)
 			ink.DrawString(
-				image.Point{X: (a.layout.screen.X - pageLabelW) / 2, Y: btnY1 + (btnY2-btnY1+a.layout.fpx(26))/2},
+				image.Point{X: (a.layout.screen.X - pageLabelW) / 2, Y: btnY1 + (btnY2-btnY1-a.layout.fpx(26))/2},
 				pageLabel,
 			)
 		}
@@ -2045,7 +2036,6 @@ func (a *app) drawShelfPicker() {
 	a.picker.mu.Lock()
 	selected := append([]FilterOption(nil), a.picker.selected...)
 	curHref := a.picker.href
-	curTitleSaved := a.picker.title
 	a.picker.mu.Unlock()
 
 	alreadyIn := pickerContains(selected, curHref)
@@ -2097,8 +2087,6 @@ func (a *app) drawShelfPicker() {
 	a.picker.selectRect = selectRect
 	a.picker.doneRect = doneRect
 	a.picker.mu.Unlock()
-
-	_ = curTitleSaved // retained so future iterations can show the breadcrumb in the Add label
 
 	ink.DrawRect(a.layout.backButton, ink.Black)
 	drawCenteredText(btnFont, a.layout.backButton, "Back", a.layout.fpx(44))
@@ -2380,7 +2368,7 @@ func (a *app) drawDirPicker() {
 			upRect = image.Rect(a.layout.margin, listTop, a.layout.screen.X-a.layout.margin, listTop+rowH-a.layout.sy(20))
 			a.drawHairline(upRect.Min.X, upRect.Max.X, upRect.Min.Y)
 			rowTitleFont.SetActive(ink.Black)
-			titleY := upRect.Min.Y + (upRect.Dy()+a.layout.fpx(36))/2
+			titleY := upRect.Min.Y + (upRect.Dy()-a.layout.fpx(36))/2
 			parent := dirParent(path)
 			ink.DrawString(image.Point{X: upRect.Min.X + a.layout.sx(40), Y: titleY},
 				"< Back to "+truncate(parent, 32))
@@ -2428,7 +2416,7 @@ func (a *app) drawDirPicker() {
 			smallFont.SetActive(ink.DarkGray)
 			pageLabelW := ink.StringWidth(pageLabel)
 			ink.DrawString(
-				image.Point{X: (a.layout.screen.X - pageLabelW) / 2, Y: btnY1 + (btnY2-btnY1+a.layout.fpx(26))/2},
+				image.Point{X: (a.layout.screen.X - pageLabelW) / 2, Y: btnY1 + (btnY2-btnY1-a.layout.fpx(26))/2},
 				pageLabel,
 			)
 		}
@@ -3140,7 +3128,6 @@ func (a *app) deleteProfileByName(name string) {
 		}
 		a.cfg = nil
 		a.client = nil
-		a.connState = connUnknown
 		a.wizard = wizardState{step: stepWelcome}
 		a.screen = screenFirstRun
 		ink.Repaint()
@@ -3172,7 +3159,6 @@ func (a *app) reloadActiveConfig() {
 	a.cfg = cfg
 	a.store = store
 	a.client, _ = NewClient(cfg.Host, cfg.User, cfg.Pass)
-	a.connState = connUnknown
 	a.refreshMainStats()
 }
 
