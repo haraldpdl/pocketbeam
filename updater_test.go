@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bytes"
+	"compress/gzip"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -10,6 +12,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -185,6 +188,111 @@ func TestInstall_SwapsBinary(t *testing.T) {
 	}
 	if fi.Mode().Perm()&0o111 == 0 {
 		t.Errorf("target mode = %o, want +x", fi.Mode().Perm())
+	}
+}
+
+// newGzippedReleaseMock is like newReleaseMock but publishes a second
+// `pocketbeam.app.gz` asset alongside the raw binary and serves a
+// gzipped copy at /asset.gz. The release body records the SHA of the
+// decompressed binary, matching what the release.sh script emits.
+func newGzippedReleaseMock(t *testing.T, tagName, rawBody, sha string) *httptest.Server {
+	t.Helper()
+	var gzBuf bytes.Buffer
+	gzw := gzip.NewWriter(&gzBuf)
+	_, _ = gzw.Write([]byte(rawBody))
+	_ = gzw.Close()
+	gzBytes := gzBuf.Bytes()
+	rawBytes := []byte(rawBody)
+
+	var srv *httptest.Server
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/repos/x/pocketbeam/releases/latest":
+			body := fmt.Sprintf("some notes\nsha256: %s\nmore notes", sha)
+			fmt.Fprintf(w, `{"tag_name":%q,"body":%q,"assets":[{"name":%q,"browser_download_url":%q,"size":%d},{"name":%q,"browser_download_url":%q,"size":%d}]}`,
+				tagName, body,
+				assetName, srv.URL+"/asset", len(rawBytes),
+				assetNameCompressed, srv.URL+"/asset.gz", len(gzBytes))
+		case "/asset":
+			w.Header().Set("Content-Type", "application/octet-stream")
+			_, _ = w.Write(rawBytes)
+		case "/asset.gz":
+			w.Header().Set("Content-Type", "application/gzip")
+			_, _ = w.Write(gzBytes)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	return srv
+}
+
+func TestCheckLatest_PrefersCompressedAsset(t *testing.T) {
+	// Use a highly compressible body so the gzipped size is strictly
+	// smaller than the raw size; short bodies can otherwise grow past
+	// raw due to gzip's fixed header/trailer overhead.
+	body := strings.Repeat("pretend-arm-binary-contents-", 64)
+	sum := sha256.Sum256([]byte(body))
+	srv := newGzippedReleaseMock(t, "v0.4.2", body, hex.EncodeToString(sum[:]))
+	defer srv.Close()
+
+	_, rel, err := CheckLatest(context.Background(), srv.URL+"/api/v1/repos/x/pocketbeam/releases/latest", "v0.4.1")
+	if err != nil {
+		t.Fatalf("CheckLatest: %v", err)
+	}
+	if rel.CompressedURL == "" {
+		t.Fatalf("expected CompressedURL to be picked up from assets; rel=%+v", rel)
+	}
+	if rel.BinaryURL == "" {
+		t.Fatalf("expected BinaryURL to remain populated as fallback; rel=%+v", rel)
+	}
+	// BinarySize must reflect what Download actually fetches (compressed)
+	// so the progress bar percentage matches the bytes crossing the wire.
+	if rel.BinarySize >= int64(len(body)) {
+		t.Errorf("BinarySize = %d, expected compressed size (< raw %d)", rel.BinarySize, len(body))
+	}
+}
+
+func TestDownload_DecompressesGzipAndVerifiesSHA(t *testing.T) {
+	const body = "pocketbeam arm binary here, longer body to make gzip meaningful"
+	sum := sha256.Sum256([]byte(body))
+	srv := newGzippedReleaseMock(t, "v0.4.2", body, hex.EncodeToString(sum[:]))
+	defer srv.Close()
+
+	_, rel, err := CheckLatest(context.Background(), srv.URL+"/api/v1/repos/x/pocketbeam/releases/latest", "v0.4.1")
+	if err != nil {
+		t.Fatalf("CheckLatest: %v", err)
+	}
+
+	dir := t.TempDir()
+	staged := filepath.Join(dir, "pocketbeam.app.new")
+	if err := Download(context.Background(), rel, staged, nil); err != nil {
+		t.Fatalf("Download: %v", err)
+	}
+	got, err := os.ReadFile(staged)
+	if err != nil {
+		t.Fatalf("read staged: %v", err)
+	}
+	if string(got) != body {
+		t.Errorf("staged content mismatch: got %q", got)
+	}
+}
+
+func TestDownload_RejectsBadSHAOnCompressedStream(t *testing.T) {
+	const body = "valid gzip but SHA on release body is wrong"
+	const wrongHash = "0000000000000000000000000000000000000000000000000000000000000000"
+	srv := newGzippedReleaseMock(t, "v0.4.2", body, wrongHash)
+	defer srv.Close()
+
+	_, rel, err := CheckLatest(context.Background(), srv.URL+"/api/v1/repos/x/pocketbeam/releases/latest", "v0.4.1")
+	if err != nil {
+		t.Fatalf("CheckLatest: %v", err)
+	}
+	staged := filepath.Join(t.TempDir(), "pocketbeam.app.new")
+	if err := Download(context.Background(), rel, staged, nil); err == nil {
+		t.Errorf("expected sha256 mismatch error, got nil")
+	}
+	if _, statErr := os.Stat(staged); !os.IsNotExist(statErr) {
+		t.Errorf("failed gzip download left a file behind: %v", statErr)
 	}
 }
 

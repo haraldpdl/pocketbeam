@@ -70,9 +70,26 @@ if [[ "$MACHINE" != "2800" ]]; then
 fi
 
 SHA=$(sha256sum dist/pocketbeam.app | awk '{print $1}')
+
+# Compress a copy of the binary. The updater (v0.4.2+) prefers the .gz
+# asset and decompresses on the device, so every update pulls ~half the
+# bytes over Wi-Fi. Older installs still see pocketbeam.app and take the
+# uncompressed path. -9 picks the best ratio; -k keeps the raw binary
+# next to the .gz so both can be uploaded.
+echo "==> compress pocketbeam.app.gz"
+gzip -9 -k -f dist/pocketbeam.app
+if [[ ! -s dist/pocketbeam.app.gz ]]; then
+    echo "gzip produced an empty archive" >&2
+    git tag -d "$TAG"
+    exit 1
+fi
+RAW_SIZE=$(stat -c %s dist/pocketbeam.app)
+GZ_SIZE=$(stat -c %s dist/pocketbeam.app.gz)
+
 BODY="${SUMMARY}
 
-sha256: ${SHA} pocketbeam.app"
+sha256: ${SHA} pocketbeam.app
+Compressed download: ${GZ_SIZE} B (raw ${RAW_SIZE} B)"
 
 echo "==> push tag"
 git push origin "$TAG"
@@ -91,11 +108,18 @@ if [[ -z "$RELEASE_ID" || "$RELEASE_ID" == "null" ]]; then
     exit 1
 fi
 
-echo "==> upload asset"
+echo "==> upload pocketbeam.app"
 curl -fsS -X POST \
     -H "Authorization: token $TOKEN" \
     -F "attachment=@dist/pocketbeam.app" \
     "$GITEA/api/v1/repos/$REPO/releases/$RELEASE_ID/assets?name=pocketbeam.app" \
+    >/dev/null
+
+echo "==> upload pocketbeam.app.gz"
+curl -fsS -X POST \
+    -H "Authorization: token $TOKEN" \
+    -F "attachment=@dist/pocketbeam.app.gz" \
+    "$GITEA/api/v1/repos/$REPO/releases/$RELEASE_ID/assets?name=pocketbeam.app.gz" \
     >/dev/null
 
 echo "done: $GITEA/$REPO/releases/tag/$TAG"

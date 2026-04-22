@@ -1,6 +1,7 @@
 package main
 
 import (
+	"compress/gzip"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -32,11 +33,18 @@ var UserAgentFn = func() string {
 // the ARM .app asset, the asset byte size (for "X.Y MB" in the UI
 // pre-download), and a published SHA-256 checksum for integrity
 // verification.
+//
+// Releases since v0.4.2 also publish a gzip-compressed copy of the
+// binary as `pocketbeam.app.gz`. When present, Download prefers it and
+// decompresses on the fly, halving the bytes that flow over the
+// device's Wi-Fi. SHA256 always hashes the *decompressed* binary, so
+// integrity is preserved end-to-end either way.
 type Release struct {
-	Version   string // tag_name, e.g. "v0.1.0"; compared semver-wise
-	BinaryURL string
-	BinarySize int64 // asset size in bytes from the release manifest; 0 when absent
-	SHA256    string // lowercase hex; empty means the release body omitted it
+	Version       string // tag_name, e.g. "v0.1.0"; compared semver-wise
+	BinaryURL     string // raw .app asset (legacy + fallback for first-install tooling)
+	CompressedURL string // .app.gz asset; preferred by Download when non-empty
+	BinarySize    int64  // size of whatever Download will actually fetch (compressed when available, raw otherwise)
+	SHA256        string // lowercase hex of the decompressed binary; empty means the release body omitted it
 }
 
 // giteaRelease mirrors the fields we pull from the release API. The
@@ -51,9 +59,15 @@ type giteaRelease struct {
 	} `json:"assets"`
 }
 
-// assetName is the release asset the updater looks for. Keeping the
-// name stable across releases simplifies the GitHub Actions build.
-const assetName = "pocketbeam.app"
+// assetName is the raw release asset. Keeping the name stable across
+// releases simplifies the build script. assetNameCompressed is the
+// gzip-compressed copy published since v0.4.2; the updater prefers it
+// when present and falls back to the raw asset otherwise so downgrades
+// and freshly-flashed devices still work.
+const (
+	assetName           = "pocketbeam.app"
+	assetNameCompressed = "pocketbeam.app.gz"
+)
 
 // sha256Pattern extracts a sha256 hex digest from a release body. The
 // convention is `sha256: <64-hex-chars>` (case-insensitive) anywhere in
@@ -85,12 +99,22 @@ func CheckLatest(ctx context.Context, endpoint, currentVersion string) (newer bo
 		return false, Release{}, fmt.Errorf("parse release: %w", err)
 	}
 	rel.Version = g.TagName
+	var rawSize int64
 	for _, a := range g.Assets {
-		if a.Name == assetName {
+		switch a.Name {
+		case assetName:
 			rel.BinaryURL = a.URL
+			rawSize = a.Size
+		case assetNameCompressed:
+			rel.CompressedURL = a.URL
 			rel.BinarySize = a.Size
-			break
 		}
+	}
+	// BinarySize reflects what Download will actually fetch so the UI's
+	// progress bar shows accurate totals. Fall back to the raw asset
+	// size only when no compressed asset was published.
+	if rel.CompressedURL == "" {
+		rel.BinarySize = rawSize
 	}
 	if m := sha256Pattern.FindStringSubmatch(g.Body); len(m) == 2 {
 		rel.SHA256 = strings.ToLower(m[1])
@@ -98,20 +122,27 @@ func CheckLatest(ctx context.Context, endpoint, currentVersion string) (newer bo
 	return semverGreater(rel.Version, currentVersion), rel, nil
 }
 
-// Download streams rel.BinaryURL into destPath, verifying the SHA-256
-// as it goes. progress (if non-nil) is invoked periodically with the
-// cumulative bytes downloaded and the total from Content-Length (-1
-// when the server didn't announce one, so the UI can fall back to a
-// byte-counter). On failure the incomplete file is removed and the
-// hash mismatch is reported to the caller.
+// Download streams the release binary into destPath, verifying the
+// SHA-256 of the installable binary as it goes. Prefers rel.CompressedURL
+// (gzip-on-the-wire) and transparently decompresses into destPath,
+// falling back to rel.BinaryURL when no compressed asset was published.
+// progress (if non-nil) reports cumulative bytes downloaded over the
+// wire and the Content-Length total (-1 when unknown), so the UI's
+// percentage matches what's actually being fetched rather than the
+// final on-disk size. On failure the incomplete file is removed.
 func Download(ctx context.Context, rel Release, destPath string, progress func(written, total int64)) error {
-	if rel.BinaryURL == "" {
+	url := rel.CompressedURL
+	compressed := url != ""
+	if !compressed {
+		url = rel.BinaryURL
+	}
+	if url == "" {
 		return errors.New("release has no binary URL")
 	}
 	if err := os.MkdirAll(filepath.Dir(destPath), 0o755); err != nil {
 		return err
 	}
-	req, err := http.NewRequestWithContext(ctx, "GET", rel.BinaryURL, nil)
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
 		return err
 	}
@@ -122,17 +153,27 @@ func Download(ctx context.Context, rel Release, destPath string, progress func(w
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
-		return fmt.Errorf("GET %s: %s", rel.BinaryURL, resp.Status)
+		return fmt.Errorf("GET %s: %s", url, resp.Status)
 	}
-	total := resp.ContentLength
+	// Wire counter wraps the raw HTTP body so progress reflects bytes
+	// over Wi-Fi; when compressed we then layer a gzip reader on top so
+	// the hash and file writes see the decompressed binary.
+	var src io.Reader = &countingReader{r: resp.Body, total: resp.ContentLength, cb: progress}
+	if compressed {
+		gzr, err := gzip.NewReader(src)
+		if err != nil {
+			return fmt.Errorf("gzip reader: %w", err)
+		}
+		defer gzr.Close()
+		src = gzr
+	}
 	f, err := os.Create(destPath)
 	if err != nil {
 		return err
 	}
 	hasher := sha256.New()
 	w := io.MultiWriter(f, hasher)
-	reader := &countingReader{r: resp.Body, total: total, cb: progress}
-	if _, err := io.Copy(w, reader); err != nil {
+	if _, err := io.Copy(w, src); err != nil {
 		f.Close()
 		os.Remove(destPath)
 		return err
