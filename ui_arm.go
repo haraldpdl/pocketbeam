@@ -46,6 +46,17 @@ const (
 	systemScannerPath = "/ebrmain/bin/scanner.app"
 )
 
+// libRefreshState drives the animated trailing-dots spinner shown on
+// screenLibraryRefresh. A goroutine bumps dots on a ticker and pushes a
+// partial e-ink update for just the body line, so the title and the "This
+// closes on its own." line stay stable.
+type libRefreshState struct {
+	mu   sync.Mutex
+	dots int
+	stop chan struct{}
+	rect image.Rectangle
+}
+
 // wizardStep tracks where the user is in the first-run flow.
 type wizardStep int
 
@@ -249,6 +260,7 @@ type layout struct {
 	filterButton    image.Rectangle
 	deleteTglButton image.Rectangle
 	profilesButton  image.Rectangle
+	updateButton    image.Rectangle
 	backButton      image.Rectangle
 
 	// shelf picker: per-row tap rects computed dynamically in draw.
@@ -273,49 +285,57 @@ const (
 func computeLayout(sz image.Point) layout {
 	w, h := sz.X, sz.Y
 	scale := scaleFactor(sz)
-	sideMargin := int(60 * scale)
-	topSafe := int(100 * scale)
-	bottomSafe := int(180 * scale)
+	// sc scales a reference-device (1264x1680) pixel length to the current
+	// screen. Keeps every spacing in this function proportionate when the
+	// layout is computed for a smaller PocketBook panel.
+	sc := func(px int) int { return int(float64(px)*scale + 0.5) }
+	sideMargin := sc(60)
+	topSafe := sc(100)
+	bottomSafe := sc(180)
 	if w > 0 && w < 1200 {
-		sideMargin = int(40 * scale)
+		sideMargin = sc(40)
 	}
 	contentW := w - 2*sideMargin
 
 	// Main Sync Now button: centered, below the last-sync summary area.
-	syncY1 := topSafe + 420
-	syncBtn := image.Rect(sideMargin, syncY1, sideMargin+contentW, syncY1+200)
+	syncY1 := topSafe + sc(420)
+	syncBtn := image.Rect(sideMargin, syncY1, sideMargin+contentW, syncY1+sc(200))
 
 	// Progress strip: fixed position below the Sync button, above the bottom
 	// row. Covers counter + bar + current-book line.
-	progY1 := syncBtn.Max.Y + 60
-	progArea := image.Rect(sideMargin, progY1, sideMargin+contentW, progY1+240)
-	progBar := image.Rect(sideMargin, progY1+80, sideMargin+contentW, progY1+130)
+	progY1 := syncBtn.Max.Y + sc(60)
+	progArea := image.Rect(sideMargin, progY1, sideMargin+contentW, progY1+sc(240))
+	progBar := image.Rect(sideMargin, progY1+sc(80), sideMargin+contentW, progY1+sc(130))
 
 	// Bottom button row: Network | Settings | Quit, anchored from the bottom.
-	btnH := 100
+	btnH := sc(100)
+	btnGap := sc(40)
 	btnY2 := h - bottomSafe
 	btnY1 := btnY2 - btnH
-	btnW := (contentW - 2*40) / 3 // 3 buttons with two 40-px gaps between them
+	btnW := (contentW - 2*btnGap) / 3 // 3 buttons with two gaps between them
 	networkBtn := image.Rect(sideMargin, btnY1, sideMargin+btnW, btnY2)
-	settingsBtn := image.Rect(networkBtn.Max.X+40, btnY1, networkBtn.Max.X+40+btnW, btnY2)
+	settingsBtn := image.Rect(networkBtn.Max.X+btnGap, btnY1, networkBtn.Max.X+btnGap+btnW, btnY2)
 	quitBtn := image.Rect(w-sideMargin-btnW, btnY1, w-sideMargin, btnY2)
 
-	// Settings screen: four stacked big buttons (change server info,
-	// change filter, toggle delete-missing, switch/add server profile);
-	// Back in the bottom-left mirroring the main screen.
-	changeY1 := topSafe + 320
-	changeBtn := image.Rect(sideMargin, changeY1, sideMargin+contentW, changeY1+160)
-	filterY1 := changeY1 + 200
-	filterBtn := image.Rect(sideMargin, filterY1, sideMargin+contentW, filterY1+160)
-	deleteTglY1 := filterY1 + 200
-	deleteTglBtn := image.Rect(sideMargin, deleteTglY1, sideMargin+contentW, deleteTglY1+120)
-	profilesY1 := deleteTglY1 + 160
-	profilesBtn := image.Rect(sideMargin, profilesY1, sideMargin+contentW, profilesY1+120)
+	// Settings screen: five stacked big buttons (change server info,
+	// change filter/folder, toggle delete-missing, switch/add server
+	// profile, check for updates); Back in the bottom-left mirroring the
+	// main screen.
+	changeY1 := topSafe + sc(320)
+	changeBtn := image.Rect(sideMargin, changeY1, sideMargin+contentW, changeY1+sc(160))
+	filterY1 := changeY1 + sc(200)
+	filterBtn := image.Rect(sideMargin, filterY1, sideMargin+contentW, filterY1+sc(160))
+	deleteTglY1 := filterY1 + sc(200)
+	deleteTglBtn := image.Rect(sideMargin, deleteTglY1, sideMargin+contentW, deleteTglY1+sc(120))
+	profilesY1 := deleteTglY1 + sc(160)
+	profilesBtn := image.Rect(sideMargin, profilesY1, sideMargin+contentW, profilesY1+sc(120))
+	updateY1 := profilesY1 + sc(160)
+	updateBtn := image.Rect(sideMargin, updateY1, sideMargin+contentW, updateY1+sc(120))
 
 	// Shelf picker: rows live between the header (below topSafe) and the
 	// Back button (same position as bottom btnY1).
-	pickerTop := topSafe + 220
-	pickerBottom := btnY1 - 40
+	pickerTop := topSafe + sc(220)
+	pickerBottom := btnY1 - sc(40)
 
 	return layout{
 		screen:           sz,
@@ -331,6 +351,7 @@ func computeLayout(sz image.Point) layout {
 		filterButton:     filterBtn,
 		deleteTglButton:  deleteTglBtn,
 		profilesButton:   profilesBtn,
+		updateButton:     updateBtn,
 		backButton:       networkBtn,
 		pickerAreaTop:    pickerTop,
 		pickerAreaBottom: pickerBottom,
@@ -370,6 +391,20 @@ func (s layout) fpx(base int) int {
 	return int(float64(base)*s.scale + 0.5)
 }
 
+// sy scales a Y coordinate authored for the 1264x1680 reference device to
+// the current screen. Every hard-coded Y in a draw function should flow
+// through this so smaller PocketBook panels (Touch HD, Touch Lux 5) stay
+// proportionate instead of pushing content off the bottom.
+func (s layout) sy(base int) int {
+	return int(float64(base)*s.scale + 0.5)
+}
+
+// sx scales an X coordinate the same way. Used for sub-indents (e.g.,
+// bullet-list content) where the offset must scale with the page margin.
+func (s layout) sx(base int) int {
+	return int(float64(base)*s.scale + 0.5)
+}
+
 // tapDebounce is the minimum gap between two pointer events that will
 // both be treated as taps. PocketBook sometimes fires only a PointerDown
 // or only a PointerUp for a glancing touch; the bottom-row Network
@@ -394,6 +429,7 @@ type app struct {
 	profileList   profileListState
 	profileDetail profileDetailState
 	update        updateState
+	libRefresh    libRefreshState
 	lastSync    SyncSummary
 	hasLastSync bool
 	bookCount   int
@@ -401,7 +437,6 @@ type app struct {
 	layout            layout
 	connState         connectivity
 	lastTap           time.Time
-	updateFooterRect  image.Rectangle
 }
 
 // acceptTap returns true if the event should be treated as a tap. Accepts
@@ -650,29 +685,29 @@ func (a *app) drawWizard() {
 	switch a.wizard.step {
 	case stepWelcome:
 		title.SetActive(ink.Black)
-		ink.DrawString(image.Point{X: 80, Y: 200}, "pocketbeam")
+		ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(200)}, "pocketbeam")
 		body.SetActive(ink.Black)
-		ink.DrawString(image.Point{X: 80, Y: 280}, "Wireless sync from a book server.")
-		ink.DrawString(image.Point{X: 80, Y: 360}, "Supports:")
-		ink.DrawString(image.Point{X: 120, Y: 420}, "- Calibre-Web / any OPDS server")
-		ink.DrawString(image.Point{X: 120, Y: 470}, "- WebDAV (Nextcloud, Synology, ownCloud)")
-		ink.DrawString(image.Point{X: 80, Y: 620}, "Press OK or tap the screen to begin.")
+		ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(280)}, "Wireless sync from a book server.")
+		ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(360)}, "Supports:")
+		ink.DrawString(image.Point{X: a.layout.margin + a.layout.sx(60), Y: a.layout.sy(420)}, "- Calibre-Web / any OPDS server")
+		ink.DrawString(image.Point{X: a.layout.margin + a.layout.sx(60), Y: a.layout.sy(470)}, "- WebDAV (Nextcloud, Synology, ownCloud)")
+		ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(620)}, "Press OK or tap the screen to begin.")
 
 	case stepProfileName:
 		title.SetActive(ink.Black)
-		ink.DrawString(image.Point{X: 80, Y: 200}, "Name this profile")
+		ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(200)}, "Name this profile")
 		body.SetActive(ink.Black)
-		ink.DrawString(image.Point{X: 80, Y: 290}, "Short identifier for this server (no spaces).")
-		ink.DrawString(image.Point{X: 80, Y: 360}, "Tap or press OK to re-open the keyboard.")
+		ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(290)}, "Short identifier for this server (no spaces).")
+		ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(360)}, "Tap or press OK to re-open the keyboard.")
 		if a.wizard.name != "" {
-			ink.DrawString(image.Point{X: 80, Y: 480}, "Name: "+a.wizard.name)
+			ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(480)}, "Name: "+a.wizard.name)
 		}
 
 	case stepBackend:
 		title.SetActive(ink.Black)
-		ink.DrawString(image.Point{X: 80, Y: 200}, "Choose server type")
+		ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(200)}, "Choose server type")
 		body.SetActive(ink.Black)
-		ink.DrawString(image.Point{X: 80, Y: 290}, "Tap the option that matches your server.")
+		ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(290)}, "Tap the option that matches your server.")
 
 		btnFont := ink.OpenFont(ink.DefaultFontBold, a.layout.fpx(44), true)
 		defer btnFont.Close()
@@ -680,8 +715,8 @@ func (a *app) drawWizard() {
 
 		w := a.layout.screen.X
 		btnW := w - 2*a.layout.margin
-		a.wizard.opdsBtn = image.Rect(a.layout.margin, 380, a.layout.margin+btnW, 540)
-		a.wizard.webdavBtn = image.Rect(a.layout.margin, 580, a.layout.margin+btnW, 740)
+		a.wizard.opdsBtn = image.Rect(a.layout.margin, a.layout.sy(380), a.layout.margin+btnW, a.layout.sy(540))
+		a.wizard.webdavBtn = image.Rect(a.layout.margin, a.layout.sy(580), a.layout.margin+btnW, a.layout.sy(740))
 
 		ink.DrawRect(a.wizard.opdsBtn, ink.Black)
 		ink.DrawRect(a.wizard.opdsBtn.Inset(2), ink.Black)
@@ -693,7 +728,7 @@ func (a *app) drawWizard() {
 
 	case stepURL, stepUser, stepPass:
 		title.SetActive(ink.Black)
-		ink.DrawString(image.Point{X: 80, Y: 200}, "pocketbeam setup")
+		ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(200)}, "pocketbeam setup")
 		body.SetActive(ink.Black)
 		var prompt string
 		switch a.wizard.step {
@@ -704,34 +739,34 @@ func (a *app) drawWizard() {
 		case stepPass:
 			prompt = "Step 3 of 3: enter your password"
 		}
-		ink.DrawString(image.Point{X: 80, Y: 300}, prompt)
-		ink.DrawString(image.Point{X: 80, Y: 360}, "Tap the screen or press OK if the keyboard is not visible.")
+		ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(300)}, prompt)
+		ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(360)}, "Tap the screen or press OK if the keyboard is not visible.")
 		y := 500
 		if a.wizard.url != "" {
-			ink.DrawString(image.Point{X: 80, Y: y}, "Server: "+a.wizard.url)
+			ink.DrawString(image.Point{X: a.layout.margin, Y: y}, "Server: "+a.wizard.url)
 			y += 50
 		}
 		if a.wizard.user != "" {
-			ink.DrawString(image.Point{X: 80, Y: y}, "User: "+a.wizard.user)
+			ink.DrawString(image.Point{X: a.layout.margin, Y: y}, "User: "+a.wizard.user)
 		}
 
 	case stepTesting:
 		title.SetActive(ink.Black)
-		ink.DrawString(image.Point{X: 80, Y: 300}, "Testing connection...")
+		ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(300)}, "Testing connection...")
 		body.SetActive(ink.Black)
-		ink.DrawString(image.Point{X: 80, Y: 380}, a.wizard.url)
-		ink.ShowHourglassAt(image.Point{X: 80, Y: 480})
+		ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(380)}, a.wizard.url)
+		ink.ShowHourglassAt(image.Point{X: a.layout.margin, Y: a.layout.sy(480)})
 
 	case stepError:
 		title.SetActive(ink.Black)
-		ink.DrawString(image.Point{X: 80, Y: 200}, "Connection failed")
+		ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(200)}, "Connection failed")
 		body.SetActive(ink.Black)
 		msg := "Unknown error"
 		if a.wizard.err != nil {
 			msg = a.wizard.err.Error()
 		}
-		ink.DrawString(image.Point{X: 80, Y: 300}, msg)
-		ink.DrawString(image.Point{X: 80, Y: 620}, "Press OK or tap to try again.")
+		ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(300)}, msg)
+		ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(620)}, "Press OK or tap to try again.")
 	}
 }
 
@@ -980,34 +1015,23 @@ func (a *app) drawMain() {
 
 	// Header
 	title.SetActive(ink.Black)
-	ink.DrawString(image.Point{X: a.layout.margin, Y: 120}, "pocketbeam")
+	ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(120)}, "pocketbeam")
 
-	// Connection info + filter + status stacked tightly near the top
+	// Server + filter stacked tightly near the top
 	body.SetActive(ink.Black)
-	ink.DrawString(image.Point{X: a.layout.margin, Y: 210}, "Server: "+a.cfg.Host)
+	ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(210)}, "Server: "+a.cfg.Host)
 
-	ink.DrawString(image.Point{X: a.layout.margin, Y: 255}, "Filter: "+a.cfg.FilterLabel())
-
-	var connText string
-	switch a.connState {
-	case connOnline:
-		connText = "Status: connected"
-	case connOffline:
-		connText = "Status: offline"
-	default:
-		connText = "Status: not yet tested"
-	}
-	ink.DrawString(image.Point{X: a.layout.margin, Y: 300}, connText)
+	ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(255)}, "Filter: "+a.cfg.FilterLabel())
 
 	// Last-sync summary
 	if a.hasLastSync {
-		ink.DrawString(image.Point{X: a.layout.margin, Y: 360}, fmt.Sprintf("Last synced: %s", humanAgo(a.lastSync.At)))
-		ink.DrawString(image.Point{X: a.layout.margin, Y: 405}, fmt.Sprintf("%d books in library", a.bookCount))
+		ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(360)}, fmt.Sprintf("Last synced: %s", humanAgo(a.lastSync.At)))
+		ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(405)}, fmt.Sprintf("%d books in library", a.bookCount))
 		if a.lastSync.Failed > 0 {
-			ink.DrawString(image.Point{X: a.layout.margin, Y: 450}, fmt.Sprintf("%d failed (will retry next sync)", a.lastSync.Failed))
+			ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(450)}, fmt.Sprintf("%d failed (will retry next sync)", a.lastSync.Failed))
 		}
 	} else {
-		ink.DrawString(image.Point{X: a.layout.margin, Y: 360}, "Not yet synced. Tap Sync Now to begin.")
+		ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(360)}, "Not yet synced. Tap Sync Now to begin.")
 	}
 
 	// Update banner: drawn below the last-sync block when a newer
@@ -1018,7 +1042,7 @@ func (a *app) drawMain() {
 	updateVer := a.update.release.Version
 	a.update.mu.Unlock()
 	if updateAvail && updateVer != "" {
-		ink.DrawString(image.Point{X: a.layout.margin, Y: 495},
+		ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(495)},
 			"Update available: "+updateVer+"  (Settings → Check for updates)")
 	}
 
@@ -1069,7 +1093,7 @@ func (a *app) drawMainProgressContent(body *ink.Font) {
 	switch {
 	case planning:
 		body.SetActive(ink.Black)
-		ink.DrawString(image.Point{X: 80, Y: a.layout.progressArea.Min.Y + 30},
+		ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.progressArea.Min.Y + a.layout.sy(30)},
 			"Checking remote catalog and free space...")
 	case active:
 		body.SetActive(ink.Black)
@@ -1077,25 +1101,25 @@ func (a *app) drawMainProgressContent(body *ink.Font) {
 		if !bookStart.IsZero() {
 			counter += "  (" + formatElapsed(time.Since(bookStart)) + ")"
 		}
-		ink.DrawString(image.Point{X: 80, Y: a.layout.progressArea.Min.Y + 30}, counter)
+		ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.progressArea.Min.Y + a.layout.sy(30)}, counter)
 		ink.DrawRect(a.layout.progressBar, ink.Black)
 		if total > 0 {
 			fillW := (a.layout.progressBar.Dx() - 6) * idx / total
 			ink.FillArea(image.Rect(
-				a.layout.progressBar.Min.X+3,
-				a.layout.progressBar.Min.Y+3,
-				a.layout.progressBar.Min.X+3+fillW,
-				a.layout.progressBar.Max.Y-3,
+				a.layout.progressBar.Min.X + a.layout.sx(3),
+				a.layout.progressBar.Min.Y + a.layout.sy(3),
+				a.layout.progressBar.Min.X + a.layout.sx(3)+fillW,
+				a.layout.progressBar.Max.Y - a.layout.sy(3),
 			), ink.DarkGray)
 		}
-		ink.DrawString(image.Point{X: 80, Y: a.layout.progressArea.Min.Y + 180}, truncate(curAuthor+": "+curTitle, 60))
+		ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.progressArea.Min.Y + a.layout.sy(180)}, truncate(curAuthor+": "+curTitle, 60))
 	case syncErr != nil:
 		body.SetActive(ink.Black)
-		ink.DrawString(image.Point{X: 80, Y: a.layout.progressArea.Min.Y + 30}, "Last error:")
-		ink.DrawString(image.Point{X: 80, Y: a.layout.progressArea.Min.Y + 80}, truncate(syncErr.Error(), 60))
+		ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.progressArea.Min.Y + a.layout.sy(30)}, "Last error:")
+		ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.progressArea.Min.Y + a.layout.sy(80)}, truncate(syncErr.Error(), 60))
 	case unknown > 0:
 		body.SetActive(ink.Black)
-		ink.DrawString(image.Point{X: 80, Y: a.layout.progressArea.Min.Y + 30},
+		ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.progressArea.Min.Y + a.layout.sy(30)},
 			fmt.Sprintf("%d book(s) had unknown size; space estimate was a lower bound.", unknown))
 	}
 }
@@ -1328,6 +1352,7 @@ func (a *app) runSync() {
 	// main as before.
 	if !wasCancelled && (res.Downloaded > 0 || res.Deleted > 0) {
 		a.screen = screenLibraryRefresh
+		a.startLibRefreshSpinner()
 		ink.Repaint()
 		go a.runLibraryScanner()
 		return
@@ -1347,6 +1372,7 @@ func (a *app) runSync() {
 // case is the old "open Library to see new books" behaviour.
 func (a *app) runLibraryScanner() {
 	defer func() {
+		a.stopLibRefreshSpinner()
 		a.screen = screenMain
 		ink.Repaint()
 	}()
@@ -1460,12 +1486,12 @@ func (a *app) drawSettings() {
 
 	// Header
 	title.SetActive(ink.Black)
-	ink.DrawString(image.Point{X: 80, Y: 140}, "Settings")
+	ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(140)}, "Settings")
 
 	// Current config
 	body.SetActive(ink.Black)
-	ink.DrawString(image.Point{X: 80, Y: 260}, "Server: "+a.cfg.Host)
-	ink.DrawString(image.Point{X: 80, Y: 320}, "User:   "+a.cfg.User)
+	ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(260)}, "Server: "+a.cfg.Host)
+	ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(320)}, "User:   "+a.cfg.User)
 
 	// Filter / folder status line above the buttons
 	body.SetActive(ink.Black)
@@ -1479,7 +1505,7 @@ func (a *app) drawSettings() {
 	} else {
 		filterLabel = "Filter: " + a.cfg.FilterLabel()
 	}
-	ink.DrawString(image.Point{X: a.layout.margin, Y: 400}, filterLabel)
+	ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(400)}, filterLabel)
 
 	// Change-info button
 	ink.DrawRect(a.layout.changeButton, ink.Black)
@@ -1511,21 +1537,21 @@ func (a *app) drawSettings() {
 	ink.DrawRect(a.layout.profilesButton, ink.Black)
 	drawCenteredText(btnFont, a.layout.profilesButton, profileBtnText, a.layout.fpx(44))
 
-	// Footer: version line doubles as "Check for updates". The text
-	// tells the user the current version; tapping it opens the update
-	// screen. A pending update is advertised here in brackets so the
-	// tap target is obvious.
-	small.SetActive(ink.Black)
-	versionLine := "pocketbeam " + version + "  (tap for updates)"
+	// Update button: opens the update screen. Label reflects whether a
+	// newer release has already been detected by the background check.
+	updateLabel := "Check for updates"
 	a.update.mu.Lock()
 	if a.update.available && a.update.release.Version != "" {
-		versionLine = "pocketbeam " + version + "  →  " + a.update.release.Version + " available (tap to install)"
+		updateLabel = "Install update " + a.update.release.Version
 	}
 	a.update.mu.Unlock()
-	versionY := a.layout.backButton.Min.Y - 40
-	ink.DrawString(image.Point{X: a.layout.margin, Y: versionY}, versionLine)
-	// Remember the tappable strip for settingsPointer.
-	a.updateFooterRect = image.Rect(a.layout.margin, versionY-20, a.layout.screen.X-a.layout.margin, versionY+30)
+	ink.DrawRect(a.layout.updateButton, ink.Black)
+	drawCenteredText(btnFont, a.layout.updateButton, updateLabel, a.layout.fpx(44))
+
+	// Footer: current version, informational only.
+	small.SetActive(ink.Black)
+	versionY := a.layout.backButton.Min.Y - a.layout.sy(40)
+	ink.DrawString(image.Point{X: a.layout.margin, Y: versionY}, "pocketbeam "+version)
 
 	ink.DrawRect(a.layout.backButton, ink.Black)
 	btnFont.SetActive(ink.Black)
@@ -1572,7 +1598,7 @@ func (a *app) settingsPointer(e ink.PointerEvent) bool {
 	case p.In(a.layout.profilesButton):
 		a.openProfileList()
 		return true
-	case p.In(a.updateFooterRect):
+	case p.In(a.layout.updateButton):
 		a.openUpdateScreen()
 		return true
 	case p.In(a.layout.backButton):
@@ -1717,7 +1743,7 @@ func (a *app) drawShelfPicker() {
 	title := ink.OpenFont(ink.DefaultFontBold, a.layout.fpx(64), true)
 	defer title.Close()
 	title.SetActive(ink.Black)
-	ink.DrawString(image.Point{X: a.layout.margin, Y: 140}, "Select filter")
+	ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(140)}, "Select filter")
 
 	body := ink.OpenFont(ink.DefaultFont, a.layout.fpx(32), true)
 	defer body.Close()
@@ -1747,7 +1773,7 @@ func (a *app) drawShelfPicker() {
 	}
 	a.picker.mu.Unlock()
 	crumb := breadcrumbPath(append(stackTitles, curTitle), 55)
-	ink.DrawString(image.Point{X: a.layout.margin, Y: 220}, crumb)
+	ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(220)}, crumb)
 
 	// Reserve space at bottom for "Sync this level" + Back.
 	selectBtnH := 100
@@ -1757,11 +1783,11 @@ func (a *app) drawShelfPicker() {
 	var prevPageRect, nextPageRect image.Rectangle
 
 	if loading {
-		ink.DrawString(image.Point{X: a.layout.margin, Y: 300}, "Loading...")
-		ink.ShowHourglassAt(image.Point{X: a.layout.margin, Y: 360})
+		ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(300)}, "Loading...")
+		ink.ShowHourglassAt(image.Point{X: a.layout.margin, Y: a.layout.sy(360)})
 	} else if pickerErr != nil {
-		ink.DrawString(image.Point{X: a.layout.margin, Y: 300}, "Could not load feed:")
-		ink.DrawString(image.Point{X: a.layout.margin, Y: 350}, truncate(pickerErr.Error(), 60))
+		ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(300)}, "Could not load feed:")
+		ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(350)}, truncate(pickerErr.Error(), 60))
 	} else {
 		rowH := 90
 		pageBtnH := 60
@@ -1824,7 +1850,7 @@ func (a *app) drawShelfPicker() {
 			btnY1 := listTop + pageSize*rowH
 			btnY2 := btnY1 + pageBtnH
 			contentW := a.layout.screen.X - 2*a.layout.margin
-			half := (contentW - 40) / 2
+			half := (contentW - a.layout.sx(40)) / 2
 			if offset > 0 {
 				prevPageRect = image.Rect(a.layout.margin, btnY1, a.layout.margin+half, btnY2)
 				ink.DrawRect(prevPageRect, ink.Black)
@@ -1838,7 +1864,7 @@ func (a *app) drawShelfPicker() {
 			page := offset/pageSize + 1
 			total := (len(visibleSubs) + pageSize - 1) / pageSize
 			ink.DrawString(
-				image.Point{X: a.layout.margin, Y: btnY2 + 30},
+				image.Point{X: a.layout.margin, Y: btnY2 + a.layout.sy(30)},
 				fmt.Sprintf("Page %d of %d (%d items)", page, total, len(visibleSubs)),
 			)
 		}
@@ -1865,7 +1891,7 @@ func (a *app) drawShelfPicker() {
 	a.picker.mu.Unlock()
 
 	alreadyIn := pickerContains(selected, curHref)
-	selectY2 := a.layout.backButton.Min.Y - 40
+	selectY2 := a.layout.backButton.Min.Y - a.layout.sy(40)
 	selectY1 := selectY2 - selectBtnH
 	selectRect := image.Rect(a.layout.margin, selectY1, a.layout.screen.X-a.layout.margin, selectY2)
 	var doneRect image.Rectangle
@@ -2157,19 +2183,19 @@ func (a *app) drawDirPicker() {
 	a.dirPicker.mu.Unlock()
 
 	title.SetActive(ink.Black)
-	ink.DrawString(image.Point{X: a.layout.margin, Y: 140}, "Select folder")
+	ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(140)}, "Select folder")
 
 	body.SetActive(ink.Black)
-	ink.DrawString(image.Point{X: a.layout.margin, Y: 220}, "Currently in: "+truncate(path, 60))
+	ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(220)}, "Currently in: "+truncate(path, 60))
 
 	var prevPageRect, nextPageRect image.Rectangle
 
 	if loading {
-		ink.DrawString(image.Point{X: a.layout.margin, Y: 300}, "Loading...")
-		ink.ShowHourglassAt(image.Point{X: a.layout.margin, Y: 360})
+		ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(300)}, "Loading...")
+		ink.ShowHourglassAt(image.Point{X: a.layout.margin, Y: a.layout.sy(360)})
 	} else if pickErr != nil {
-		ink.DrawString(image.Point{X: a.layout.margin, Y: 300}, "Could not list folder:")
-		ink.DrawString(image.Point{X: a.layout.margin, Y: 350}, truncate(pickErr.Error(), 60))
+		ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(300)}, "Could not list folder:")
+		ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(350)}, truncate(pickErr.Error(), 60))
 	} else {
 		rowH := 90
 		pageBtnH := 60
@@ -2214,7 +2240,7 @@ func (a *app) drawDirPicker() {
 			btnY1 := listTop + pageSize*rowH
 			btnY2 := btnY1 + pageBtnH
 			contentW := a.layout.screen.X - 2*a.layout.margin
-			half := (contentW - 40) / 2
+			half := (contentW - a.layout.sx(40)) / 2
 			if offset > 0 {
 				prevPageRect = image.Rect(a.layout.margin, btnY1, a.layout.margin+half, btnY2)
 				ink.DrawRect(prevPageRect, ink.Black)
@@ -2228,7 +2254,7 @@ func (a *app) drawDirPicker() {
 			page := offset/pageSize + 1
 			total := (len(dirs) + pageSize - 1) / pageSize
 			ink.DrawString(
-				image.Point{X: a.layout.margin, Y: btnY2 + 30},
+				image.Point{X: a.layout.margin, Y: btnY2 + a.layout.sy(30)},
 				fmt.Sprintf("Page %d of %d (%d items)", page, total, len(dirs)),
 			)
 		}
@@ -2243,7 +2269,7 @@ func (a *app) drawDirPicker() {
 		a.dirPicker.mu.Unlock()
 
 		// Select button sits just above the Back button.
-		selectY2 := a.layout.backButton.Min.Y - 40
+		selectY2 := a.layout.backButton.Min.Y - a.layout.sy(40)
 		selectY1 := selectY2 - selectBtnH
 		selectRect := image.Rect(a.layout.margin, selectY1, a.layout.screen.X-a.layout.margin, selectY2)
 		ink.DrawRect(selectRect, ink.Black)
@@ -2443,13 +2469,13 @@ func (a *app) drawSpaceWarn() {
 	plan := a.spaceWarn.plan
 	a.spaceWarn.mu.Unlock()
 
-	ink.DrawString(image.Point{X: a.layout.margin, Y: 140}, "Not enough space")
+	ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(140)}, "Not enough space")
 
 	body.SetActive(ink.Black)
 	newCount := len(plan.NewBooks) + len(plan.UpdatedBooks)
 	needLine := fmt.Sprintf("%d book(s) need %s; %s free on device.",
 		newCount, formatBytes(plan.DownloadBytes), formatBytes(plan.FreeBytes))
-	ink.DrawString(image.Point{X: a.layout.margin, Y: 230}, needLine)
+	ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(230)}, needLine)
 
 	y := 300
 	if plan.UnknownSizes > 0 {
@@ -2466,14 +2492,14 @@ func (a *app) drawSpaceWarn() {
 	y += 30
 	ink.DrawString(image.Point{X: a.layout.margin, Y: y},
 		"Download anyway? Partial syncs are safe; the device")
-	ink.DrawString(image.Point{X: a.layout.margin, Y: y + 45},
+	ink.DrawString(image.Point{X: a.layout.margin, Y: y + a.layout.sy(45)},
 		"just stops when the disk fills up.")
 
 	btnH := 100
 	btnY2 := a.layout.backButton.Max.Y
 	btnY1 := btnY2 - btnH
 	contentW := a.layout.screen.X - 2*a.layout.margin
-	half := (contentW - 40) / 2
+	half := (contentW - a.layout.sx(40)) / 2
 	yesRect := image.Rect(a.layout.margin, btnY1, a.layout.margin+half, btnY2)
 	noRect := image.Rect(a.layout.screen.X-a.layout.margin-half, btnY1, a.layout.screen.X-a.layout.margin, btnY2)
 
@@ -2541,10 +2567,79 @@ func (a *app) drawLibraryRefresh() {
 	body.SetActive(ink.Black)
 
 	title.SetActive(ink.Black)
-	ink.DrawString(image.Point{X: a.layout.margin, Y: 300}, "Refreshing library")
+	ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(300)}, "Refreshing library")
 	body.SetActive(ink.Black)
-	ink.DrawString(image.Point{X: a.layout.margin, Y: 400}, "Indexing new books on the device.")
-	ink.DrawString(image.Point{X: a.layout.margin, Y: 450}, "This closes on its own.")
+
+	a.libRefresh.mu.Lock()
+	dots := a.libRefresh.dots
+	rect := image.Rect(a.layout.margin, a.layout.sy(380), a.layout.screen.X-a.layout.margin, a.layout.sy(430))
+	a.libRefresh.rect = rect
+	a.libRefresh.mu.Unlock()
+
+	ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(400)}, "Indexing new books on the device"+strings.Repeat(".", dots))
+	ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(450)}, "This closes on its own.")
+}
+
+// refreshLibRefreshDots redraws just the "Indexing..." body line with the
+// current dot count and pushes a partial e-ink update. Called from the
+// spinner ticker goroutine.
+func (a *app) refreshLibRefreshDots() {
+	body := ink.OpenFont(ink.DefaultFont, a.layout.fpx(32), true)
+	defer body.Close()
+	body.SetActive(ink.Black)
+
+	a.libRefresh.mu.Lock()
+	dots := a.libRefresh.dots
+	rect := a.libRefresh.rect
+	a.libRefresh.mu.Unlock()
+	if rect.Empty() {
+		return
+	}
+
+	ink.FillArea(rect, ink.White)
+	ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(400)}, "Indexing new books on the device"+strings.Repeat(".", dots))
+	ink.PartialUpdate(rect)
+}
+
+// startLibRefreshSpinner kicks off the trailing-dots animation on
+// screenLibraryRefresh. Idempotent: a second call stops the previous ticker
+// before starting a new one.
+func (a *app) startLibRefreshSpinner() {
+	a.libRefresh.mu.Lock()
+	if a.libRefresh.stop != nil {
+		close(a.libRefresh.stop)
+	}
+	stop := make(chan struct{})
+	a.libRefresh.stop = stop
+	a.libRefresh.dots = 0
+	a.libRefresh.mu.Unlock()
+
+	go func() {
+		t := time.NewTicker(600 * time.Millisecond)
+		defer t.Stop()
+		for {
+			select {
+			case <-stop:
+				return
+			case <-t.C:
+				a.libRefresh.mu.Lock()
+				a.libRefresh.dots = (a.libRefresh.dots + 1) % 4
+				a.libRefresh.mu.Unlock()
+				a.refreshLibRefreshDots()
+			}
+		}
+	}()
+}
+
+// stopLibRefreshSpinner halts the ticker started by startLibRefreshSpinner.
+// Safe to call when no spinner is running.
+func (a *app) stopLibRefreshSpinner() {
+	a.libRefresh.mu.Lock()
+	if a.libRefresh.stop != nil {
+		close(a.libRefresh.stop)
+		a.libRefresh.stop = nil
+	}
+	a.libRefresh.mu.Unlock()
 }
 
 // ---------- Delete-missing confirmation ----------
@@ -2598,24 +2693,24 @@ func (a *app) drawDeleteConfirm() {
 	pending := append([]LocalBook(nil), a.delConfirm.pending...)
 	a.delConfirm.mu.Unlock()
 
-	ink.DrawString(image.Point{X: a.layout.margin, Y: 140}, "Confirm deletion")
+	ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(140)}, "Confirm deletion")
 
 	body.SetActive(ink.Black)
-	ink.DrawString(image.Point{X: a.layout.margin, Y: 230},
+	ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(230)},
 		fmt.Sprintf("%d book(s) are no longer on the server.", len(pending)))
-	ink.DrawString(image.Point{X: a.layout.margin, Y: 280}, "Delete them from this device?")
+	ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(280)}, "Delete them from this device?")
 
 	// Preview up to 5 titles, indented.
 	const preview = 5
 	y := 360
 	for i, b := range pending {
 		if i == preview {
-			ink.DrawString(image.Point{X: a.layout.margin + 40, Y: y},
+			ink.DrawString(image.Point{X: a.layout.margin + a.layout.sx(40), Y: y},
 				fmt.Sprintf("... and %d more", len(pending)-preview))
 			break
 		}
 		label := b.Author + ": " + b.Title
-		ink.DrawString(image.Point{X: a.layout.margin + 40, Y: y}, truncate(label, 60))
+		ink.DrawString(image.Point{X: a.layout.margin + a.layout.sx(40), Y: y}, truncate(label, 60))
 		y += 50
 	}
 
@@ -2624,7 +2719,7 @@ func (a *app) drawDeleteConfirm() {
 	btnY2 := a.layout.backButton.Max.Y
 	btnY1 := btnY2 - btnH
 	contentW := a.layout.screen.X - 2*a.layout.margin
-	half := (contentW - 40) / 2
+	half := (contentW - a.layout.sx(40)) / 2
 	yesRect := image.Rect(a.layout.margin, btnY1, a.layout.margin+half, btnY2)
 	noRect := image.Rect(a.layout.screen.X-a.layout.margin-half, btnY1, a.layout.screen.X-a.layout.margin, btnY2)
 
@@ -2709,12 +2804,12 @@ func (a *app) drawProfileList() {
 	perr := a.profileList.err
 	a.profileList.mu.Unlock()
 
-	ink.DrawString(image.Point{X: a.layout.margin, Y: 140}, "Server profiles")
+	ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(140)}, "Server profiles")
 
 	if perr != nil {
 		body.SetActive(ink.Black)
-		ink.DrawString(image.Point{X: a.layout.margin, Y: 240}, "Could not list profiles:")
-		ink.DrawString(image.Point{X: a.layout.margin, Y: 290}, truncate(perr.Error(), 60))
+		ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(240)}, "Could not list profiles:")
+		ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(290)}, truncate(perr.Error(), 60))
 		ink.DrawRect(a.layout.backButton, ink.Black)
 		drawCenteredText(btnFont, a.layout.backButton, "Back", a.layout.fpx(44))
 		return
@@ -2743,7 +2838,7 @@ func (a *app) drawProfileList() {
 	// Only Add-new sits on the list now; per-profile actions moved to
 	// the detail panel.
 	btnH := 100
-	addY2 := a.layout.backButton.Min.Y - 40
+	addY2 := a.layout.backButton.Min.Y - a.layout.sy(40)
 	addY1 := addY2 - btnH
 	addRect := image.Rect(a.layout.margin, addY1, a.layout.screen.X-a.layout.margin, addY2)
 	ink.DrawRect(addRect, ink.Black)
@@ -2936,16 +3031,16 @@ func (a *app) drawProfileDetail() {
 	if isActive {
 		header += "  (active)"
 	}
-	ink.DrawString(image.Point{X: a.layout.margin, Y: 140}, truncate(header, 40))
+	ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(140)}, truncate(header, 40))
 
 	body.SetActive(ink.Black)
 	y := 240
 	if loadErr != nil {
 		ink.DrawString(image.Point{X: a.layout.margin, Y: y}, "Could not load profile:")
-		ink.DrawString(image.Point{X: a.layout.margin, Y: y + 50}, truncate(loadErr.Error(), 60))
+		ink.DrawString(image.Point{X: a.layout.margin, Y: y + a.layout.sy(50)}, truncate(loadErr.Error(), 60))
 	} else {
 		ink.DrawString(image.Point{X: a.layout.margin, Y: y}, "Backend: "+backend)
-		ink.DrawString(image.Point{X: a.layout.margin, Y: y + 50}, "Server:  "+truncate(host, 55))
+		ink.DrawString(image.Point{X: a.layout.margin, Y: y + a.layout.sy(50)}, "Server:  "+truncate(host, 55))
 	}
 
 	// Action stack anchored above Back: Delete (always) + Make active
@@ -3138,7 +3233,7 @@ func (a *app) drawUpdate() {
 	title := ink.OpenFont(ink.DefaultFontBold, a.layout.fpx(64), true)
 	defer title.Close()
 	title.SetActive(ink.Black)
-	ink.DrawString(image.Point{X: a.layout.margin, Y: 140}, "Updates")
+	ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(140)}, "Updates")
 
 	body := ink.OpenFont(ink.DefaultFont, a.layout.fpx(32), true)
 	defer body.Close()
@@ -3161,16 +3256,16 @@ func (a *app) drawUpdate() {
 	a.update.mu.Unlock()
 
 	body.SetActive(ink.Black)
-	ink.DrawString(image.Point{X: a.layout.margin, Y: 220}, "Installed: "+version)
+	ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(220)}, "Installed: "+version)
 
 	y := 280
 	switch {
 	case installed:
 		ink.DrawString(image.Point{X: a.layout.margin, Y: y}, "Update installed: "+rel.Version)
-		ink.DrawString(image.Point{X: a.layout.margin, Y: y + 50}, "Relaunching...")
+		ink.DrawString(image.Point{X: a.layout.margin, Y: y + a.layout.sy(50)}, "Relaunching...")
 	case installErr != nil:
 		ink.DrawString(image.Point{X: a.layout.margin, Y: y}, "Install failed:")
-		ink.DrawString(image.Point{X: a.layout.margin, Y: y + 50}, truncate(installErr.Error(), 60))
+		ink.DrawString(image.Point{X: a.layout.margin, Y: y + a.layout.sy(50)}, truncate(installErr.Error(), 60))
 	case downloading:
 		var line string
 		if total > 0 {
@@ -3203,7 +3298,7 @@ func (a *app) drawUpdate() {
 		ink.DrawString(image.Point{X: a.layout.margin, Y: y}, "Checking for updates...")
 	case checkErr != nil:
 		ink.DrawString(image.Point{X: a.layout.margin, Y: y}, "Could not check:")
-		ink.DrawString(image.Point{X: a.layout.margin, Y: y + 50}, truncate(checkErr.Error(), 60))
+		ink.DrawString(image.Point{X: a.layout.margin, Y: y + a.layout.sy(50)}, truncate(checkErr.Error(), 60))
 	case available:
 		line := "New version: " + rel.Version
 		if rel.BinarySize > 0 {
@@ -3211,7 +3306,7 @@ func (a *app) drawUpdate() {
 		}
 		ink.DrawString(image.Point{X: a.layout.margin, Y: y}, line)
 		if rel.SHA256 != "" {
-			ink.DrawString(image.Point{X: a.layout.margin, Y: y + 50}, "sha256: "+rel.SHA256[:12]+"...")
+			ink.DrawString(image.Point{X: a.layout.margin, Y: y + a.layout.sy(50)}, "sha256: "+rel.SHA256[:12]+"...")
 		}
 	default:
 		ink.DrawString(image.Point{X: a.layout.margin, Y: y}, "You are up to date.")
@@ -3225,7 +3320,7 @@ func (a *app) drawUpdate() {
 	btnH := 100
 	toggleH := 90
 	contentW := a.layout.screen.X - 2*a.layout.margin
-	toggleY2 := a.layout.backButton.Min.Y - 40
+	toggleY2 := a.layout.backButton.Min.Y - a.layout.sy(40)
 	toggleY1 := toggleY2 - toggleH
 	btnY2 := toggleY1 - 30
 	btnY1 := btnY2 - btnH
