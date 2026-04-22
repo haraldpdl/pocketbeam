@@ -255,12 +255,20 @@ type layout struct {
 	progressArea   image.Rectangle // the strip refreshed via PartialUpdate
 	progressBar    image.Rectangle
 
-	// settings screen
-	changeButton    image.Rectangle
-	filterButton    image.Rectangle
-	deleteTglButton image.Rectangle
-	profilesButton  image.Rectangle
-	updateButton    image.Rectangle
+	// settings screen: a stack of tappable rows grouped into three
+	// sections. Row rects are full-width tap targets; each has a bold
+	// title and a muted value subtitle. deleteToggle is a smaller pill
+	// drawn inside deleteRow, left in place for the pointer handler
+	// only because the whole row is tappable anyway.
+	serverRow       image.Rectangle
+	profileRow      image.Rectangle
+	filterRow       image.Rectangle
+	deleteRow       image.Rectangle
+	deleteToggle    image.Rectangle
+	updateRow       image.Rectangle
+	serverLabelY    int
+	libraryLabelY   int
+	aboutLabelY     int
 	backButton      image.Rectangle
 
 	// shelf picker: per-row tap rects computed dynamically in draw.
@@ -317,20 +325,42 @@ func computeLayout(sz image.Point) layout {
 	settingsBtn := image.Rect(networkBtn.Max.X+btnGap, btnY1, networkBtn.Max.X+btnGap+btnW, btnY2)
 	quitBtn := image.Rect(w-sideMargin-btnW, btnY1, w-sideMargin, btnY2)
 
-	// Settings screen: five stacked big buttons (change server info,
-	// change filter/folder, toggle delete-missing, switch/add server
-	// profile, check for updates); Back in the bottom-left mirroring the
-	// main screen.
-	changeY1 := topSafe + sc(320)
-	changeBtn := image.Rect(sideMargin, changeY1, sideMargin+contentW, changeY1+sc(160))
-	filterY1 := changeY1 + sc(200)
-	filterBtn := image.Rect(sideMargin, filterY1, sideMargin+contentW, filterY1+sc(160))
-	deleteTglY1 := filterY1 + sc(200)
-	deleteTglBtn := image.Rect(sideMargin, deleteTglY1, sideMargin+contentW, deleteTglY1+sc(120))
-	profilesY1 := deleteTglY1 + sc(160)
-	profilesBtn := image.Rect(sideMargin, profilesY1, sideMargin+contentW, profilesY1+sc(120))
-	updateY1 := profilesY1 + sc(160)
-	updateBtn := image.Rect(sideMargin, updateY1, sideMargin+contentW, updateY1+sc(120))
+	// Settings screen: list of full-width tappable rows grouped into
+	// SERVER / LIBRARY / ABOUT sections. Each section gets a small
+	// label; rows stretch the content width and are sized to divide the
+	// remaining vertical space evenly so the layout fits any panel.
+	settingsTop := topSafe + sc(220)
+	settingsBottom := btnY1 - sc(40)
+	sectionLabelH := sc(60)
+	settingsRowCount := 5
+	settingsSectionCount := 3
+	rowsH := (settingsBottom - settingsTop) - settingsSectionCount*sectionLabelH
+	settingsRowH := rowsH / settingsRowCount
+
+	sy := settingsTop
+	serverLabelY := sy + sc(44)
+	sy += sectionLabelH
+	serverRow := image.Rect(sideMargin, sy, sideMargin+contentW, sy+settingsRowH)
+	sy += settingsRowH
+	profileRow := image.Rect(sideMargin, sy, sideMargin+contentW, sy+settingsRowH)
+	sy += settingsRowH
+	libraryLabelY := sy + sc(44)
+	sy += sectionLabelH
+	filterRow := image.Rect(sideMargin, sy, sideMargin+contentW, sy+settingsRowH)
+	sy += settingsRowH
+	deleteRow := image.Rect(sideMargin, sy, sideMargin+contentW, sy+settingsRowH)
+	sy += settingsRowH
+	aboutLabelY := sy + sc(44)
+	sy += sectionLabelH
+	updateRow := image.Rect(sideMargin, sy, sideMargin+contentW, sy+settingsRowH)
+
+	// Delete-missing toggle pill: right-aligned inside deleteRow, sized
+	// to read clearly as a binary control.
+	toggleH := sc(60)
+	toggleW := sc(120)
+	toggleCY := (deleteRow.Min.Y + deleteRow.Max.Y) / 2
+	toggleX2 := deleteRow.Max.X - sc(20)
+	deleteToggle := image.Rect(toggleX2-toggleW, toggleCY-toggleH/2, toggleX2, toggleCY+toggleH/2)
 
 	// Shelf picker: rows live between the header (below topSafe) and the
 	// Back button (same position as bottom btnY1).
@@ -347,11 +377,15 @@ func computeLayout(sz image.Point) layout {
 		quitButton:       quitBtn,
 		progressArea:     progArea,
 		progressBar:      progBar,
-		changeButton:     changeBtn,
-		filterButton:     filterBtn,
-		deleteTglButton:  deleteTglBtn,
-		profilesButton:   profilesBtn,
-		updateButton:     updateBtn,
+		serverRow:        serverRow,
+		profileRow:       profileRow,
+		filterRow:        filterRow,
+		deleteRow:        deleteRow,
+		deleteToggle:     deleteToggle,
+		updateRow:        updateRow,
+		serverLabelY:     serverLabelY,
+		libraryLabelY:    libraryLabelY,
+		aboutLabelY:      aboutLabelY,
 		backButton:       networkBtn,
 		pickerAreaTop:    pickerTop,
 		pickerAreaBottom: pickerBottom,
@@ -686,86 +720,101 @@ func (a *app) drawWizard() {
 	case stepWelcome:
 		title.SetActive(ink.Black)
 		ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(200)}, "pocketbeam")
+		body.SetActive(ink.DarkGray)
+		ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(260)}, "Wireless sync from a book server.")
+		a.drawHairline(a.layout.margin, a.layout.screen.X-a.layout.margin, a.layout.sy(300))
+
 		body.SetActive(ink.Black)
-		ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(280)}, "Wireless sync from a book server.")
-		ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(360)}, "Supports:")
-		ink.DrawString(image.Point{X: a.layout.margin + a.layout.sx(60), Y: a.layout.sy(420)}, "- Calibre-Web / any OPDS server")
-		ink.DrawString(image.Point{X: a.layout.margin + a.layout.sx(60), Y: a.layout.sy(470)}, "- WebDAV (Nextcloud, Synology, ownCloud)")
-		ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(620)}, "Press OK or tap the screen to begin.")
+		ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(370)}, "Supported servers")
+		body.SetActive(ink.DarkGray)
+		ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(430)}, "· Calibre-Web and any OPDS catalog")
+		ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(480)}, "· Nextcloud, Synology, ownCloud, WebDAV")
+
+		body.SetActive(ink.Black)
+		ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(620)}, "Press OK or tap to begin.")
 
 	case stepProfileName:
 		title.SetActive(ink.Black)
 		ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(200)}, "Name this profile")
+		body.SetActive(ink.DarkGray)
+		ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(260)}, "Short identifier for this server (no spaces).")
+		a.drawHairline(a.layout.margin, a.layout.screen.X-a.layout.margin, a.layout.sy(300))
 		body.SetActive(ink.Black)
-		ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(290)}, "Short identifier for this server (no spaces).")
-		ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(360)}, "Tap or press OK to re-open the keyboard.")
+		ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(370)}, "Tap or press OK to re-open the keyboard.")
 		if a.wizard.name != "" {
+			body.SetActive(ink.DarkGray)
 			ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(480)}, "Name: "+a.wizard.name)
 		}
 
 	case stepBackend:
 		title.SetActive(ink.Black)
 		ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(200)}, "Choose server type")
-		body.SetActive(ink.Black)
-		ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(290)}, "Tap the option that matches your server.")
+		body.SetActive(ink.DarkGray)
+		ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(260)}, "Tap the option that matches your server.")
 
-		btnFont := ink.OpenFont(ink.DefaultFontBold, a.layout.fpx(44), true)
-		defer btnFont.Close()
-		btnFont.SetActive(ink.Black)
+		rowTitleFont := ink.OpenFont(ink.DefaultFontBold, a.layout.fpx(36), true)
+		defer rowTitleFont.Close()
+		rowSubFont := ink.OpenFont(ink.DefaultFont, a.layout.fpx(28), true)
+		defer rowSubFont.Close()
 
 		w := a.layout.screen.X
 		btnW := w - 2*a.layout.margin
-		a.wizard.opdsBtn = image.Rect(a.layout.margin, a.layout.sy(380), a.layout.margin+btnW, a.layout.sy(540))
-		a.wizard.webdavBtn = image.Rect(a.layout.margin, a.layout.sy(580), a.layout.margin+btnW, a.layout.sy(740))
+		a.wizard.opdsBtn = image.Rect(a.layout.margin, a.layout.sy(360), a.layout.margin+btnW, a.layout.sy(500))
+		a.wizard.webdavBtn = image.Rect(a.layout.margin, a.layout.sy(500), a.layout.margin+btnW, a.layout.sy(640))
 
-		ink.DrawRect(a.wizard.opdsBtn, ink.Black)
-		ink.DrawRect(a.wizard.opdsBtn.Inset(2), ink.Black)
-		drawCenteredText(btnFont, a.wizard.opdsBtn, "Calibre-Web / OPDS", a.layout.fpx(44))
-
-		ink.DrawRect(a.wizard.webdavBtn, ink.Black)
-		ink.DrawRect(a.wizard.webdavBtn.Inset(2), ink.Black)
-		drawCenteredText(btnFont, a.wizard.webdavBtn, "WebDAV / Nextcloud", a.layout.fpx(44))
+		a.drawListRow(rowTitleFont, rowSubFont, a.wizard.opdsBtn,
+			"Calibre-Web / OPDS", "Calibre-Web, COPS, and other OPDS catalogs", true)
+		a.drawListRow(rowTitleFont, rowSubFont, a.wizard.webdavBtn,
+			"WebDAV / Nextcloud", "Nextcloud, Synology, ownCloud, generic WebDAV", true)
+		a.drawHairline(a.wizard.webdavBtn.Min.X, a.wizard.webdavBtn.Max.X, a.wizard.webdavBtn.Max.Y)
 
 	case stepURL, stepUser, stepPass:
 		title.SetActive(ink.Black)
 		ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(200)}, "pocketbeam setup")
-		body.SetActive(ink.Black)
-		var prompt string
+		body.SetActive(ink.DarkGray)
+		var step, what string
 		switch a.wizard.step {
 		case stepURL:
-			prompt = "Step 1 of 3: enter your server URL"
+			step, what = "Step 1 of 3", "Server URL"
 		case stepUser:
-			prompt = "Step 2 of 3: enter your username"
+			step, what = "Step 2 of 3", "Username"
 		case stepPass:
-			prompt = "Step 3 of 3: enter your password"
+			step, what = "Step 3 of 3", "Password"
 		}
-		ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(300)}, prompt)
-		ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(360)}, "Tap the screen or press OK if the keyboard is not visible.")
-		y := 500
+		ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(260)}, step+"  ·  "+what)
+		a.drawHairline(a.layout.margin, a.layout.screen.X-a.layout.margin, a.layout.sy(300))
+		body.SetActive(ink.Black)
+		ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(370)}, "Tap or press OK to open the keyboard.")
+		body.SetActive(ink.DarkGray)
+		y := a.layout.sy(490)
 		if a.wizard.url != "" {
-			ink.DrawString(image.Point{X: a.layout.margin, Y: y}, "Server: "+a.wizard.url)
-			y += 50
+			ink.DrawString(image.Point{X: a.layout.margin, Y: y}, "Server: "+truncate(a.wizard.url, 48))
+			y += a.layout.sy(50)
 		}
 		if a.wizard.user != "" {
-			ink.DrawString(image.Point{X: a.layout.margin, Y: y}, "User: "+a.wizard.user)
+			ink.DrawString(image.Point{X: a.layout.margin, Y: y}, "User: "+truncate(a.wizard.user, 48))
 		}
 
 	case stepTesting:
 		title.SetActive(ink.Black)
-		ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(300)}, "Testing connection...")
-		body.SetActive(ink.Black)
-		ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(380)}, a.wizard.url)
+		ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(300)}, "Testing connection")
+		body.SetActive(ink.DarkGray)
+		ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(370)}, truncate(a.wizard.url, 55))
 		ink.ShowHourglassAt(image.Point{X: a.layout.margin, Y: a.layout.sy(480)})
 
 	case stepError:
 		title.SetActive(ink.Black)
 		ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(200)}, "Connection failed")
-		body.SetActive(ink.Black)
+		body.SetActive(ink.DarkGray)
+		ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(260)}, "Check that the server URL and credentials are correct.")
+		a.drawHairline(a.layout.margin, a.layout.screen.X-a.layout.margin, a.layout.sy(300))
 		msg := "Unknown error"
 		if a.wizard.err != nil {
 			msg = a.wizard.err.Error()
 		}
-		ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(300)}, msg)
+		body.SetActive(ink.Black)
+		ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(370)}, truncate(msg, 60))
+		body.SetActive(ink.DarkGray)
 		ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(620)}, "Press OK or tap to try again.")
 	}
 }
@@ -1003,52 +1052,82 @@ func (a *app) runProbe() {
 func (a *app) drawMain() {
 	title := ink.OpenFont(ink.DefaultFontBold, a.layout.fpx(64), true)
 	defer title.Close()
-	title.SetActive(ink.Black)
+
+	hero := ink.OpenFont(ink.DefaultFontBold, a.layout.fpx(48), true)
+	defer hero.Close()
 
 	body := ink.OpenFont(ink.DefaultFont, a.layout.fpx(32), true)
 	defer body.Close()
-	body.SetActive(ink.Black)
+
+	small := ink.OpenFont(ink.DefaultFont, a.layout.fpx(26), true)
+	defer small.Close()
 
 	btnFont := ink.OpenFont(ink.DefaultFontBold, a.layout.fpx(44), true)
 	defer btnFont.Close()
-	btnFont.SetActive(ink.Black)
 
-	// Header
+	// Title + host subtitle (host in muted gray so the filter/host context
+	// is present but secondary to the action area).
 	title.SetActive(ink.Black)
-	ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(120)}, "pocketbeam")
+	ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(140)}, "pocketbeam")
+	small.SetActive(ink.DarkGray)
+	subtitle := a.cfg.Host
+	if a.cfg.Backend == BackendWebDAV {
+		p := a.cfg.Path
+		if p == "" {
+			p = "/"
+		}
+		subtitle += "  ·  " + p
+	} else {
+		subtitle += "  ·  " + a.cfg.FilterLabel()
+	}
+	ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(190)}, truncate(subtitle, 60))
 
-	// Server + filter stacked tightly near the top
-	body.SetActive(ink.Black)
-	ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(210)}, "Server: "+a.cfg.Host)
+	// Hairline under the header.
+	a.drawHairline(a.layout.margin, a.layout.screen.X-a.layout.margin, a.layout.sy(220))
 
-	ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(255)}, "Filter: "+a.cfg.FilterLabel())
-
-	// Last-sync summary
+	// Status hero: emphatic primary line + muted supporting details.
+	statusY := a.layout.sy(300)
+	hero.SetActive(ink.Black)
+	body.SetActive(ink.DarkGray)
 	if a.hasLastSync {
-		ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(360)}, fmt.Sprintf("Last synced: %s", humanAgo(a.lastSync.At)))
-		ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(405)}, fmt.Sprintf("%d books in library", a.bookCount))
+		ink.DrawString(image.Point{X: a.layout.margin, Y: statusY},
+			"Last synced "+humanAgo(a.lastSync.At))
+		ink.DrawString(image.Point{X: a.layout.margin, Y: statusY + a.layout.sy(60)},
+			fmt.Sprintf("%d books in library", a.bookCount))
 		if a.lastSync.Failed > 0 {
-			ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(450)}, fmt.Sprintf("%d failed (will retry next sync)", a.lastSync.Failed))
+			ink.DrawString(image.Point{X: a.layout.margin, Y: statusY + a.layout.sy(110)},
+				fmt.Sprintf("%d failed — will retry next sync", a.lastSync.Failed))
 		}
 	} else {
-		ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(360)}, "Not yet synced. Tap Sync Now to begin.")
+		ink.DrawString(image.Point{X: a.layout.margin, Y: statusY}, "Not yet synced")
+		ink.DrawString(image.Point{X: a.layout.margin, Y: statusY + a.layout.sy(60)},
+			"Tap Sync Now to begin")
 	}
 
-	// Update banner: drawn below the last-sync block when a newer
-	// release has been detected. Non-clickable on the main screen to
-	// keep the layout stable; the user opens Settings to install.
+	// Update badge: dark-gray filled strip sitting above the sync button
+	// when a newer release is waiting. Informational only; the install
+	// lives in Settings → About.
 	a.update.mu.Lock()
 	updateAvail := a.update.available
 	updateVer := a.update.release.Version
 	a.update.mu.Unlock()
 	if updateAvail && updateVer != "" {
-		ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(495)},
-			"Update available: "+updateVer+"  (Settings → Check for updates)")
+		badge := image.Rect(
+			a.layout.margin,
+			a.layout.syncButton.Min.Y-a.layout.sy(80),
+			a.layout.screen.X-a.layout.margin,
+			a.layout.syncButton.Min.Y-a.layout.sy(20),
+		)
+		ink.FillArea(badge, ink.LightGray)
+		small.SetActive(ink.Black)
+		drawCenteredText(small, badge,
+			"Update "+updateVer+" available in Settings",
+			a.layout.fpx(26))
 	}
 
-	// Sync Now / Cancel button. The rect is the same either way so the
-	// user always finds the primary action in the same spot; only the
-	// label + handler swap while sync is active.
+	// Primary action: Sync Now (or Stop during an active sync). Kept as
+	// the screen's most prominent element — double border signals
+	// primary.
 	ink.DrawRect(a.layout.syncButton, ink.Black)
 	ink.DrawRect(a.layout.syncButton.Inset(2), ink.Black)
 	btnFont.SetActive(ink.Black)
@@ -1062,7 +1141,8 @@ func (a *app) drawMain() {
 	// the sync it is refreshed in-place via drawMainProgress + PartialUpdate).
 	a.drawMainProgressContent(body)
 
-	// Bottom buttons: Network, Settings, Quit
+	// Bottom action row: secondary actions styled with a single border so
+	// they read as lighter than the primary Sync button.
 	ink.DrawRect(a.layout.networkButton, ink.Black)
 	ink.DrawRect(a.layout.settingsButton, ink.Black)
 	ink.DrawRect(a.layout.quitButton, ink.Black)
@@ -1472,92 +1552,146 @@ func formatElapsed(d time.Duration) string {
 func (a *app) drawSettings() {
 	title := ink.OpenFont(ink.DefaultFontBold, a.layout.fpx(64), true)
 	defer title.Close()
-	title.SetActive(ink.Black)
 
-	body := ink.OpenFont(ink.DefaultFont, a.layout.fpx(32), true)
-	defer body.Close()
-	body.SetActive(ink.Black)
+	rowTitleFont := ink.OpenFont(ink.DefaultFontBold, a.layout.fpx(36), true)
+	defer rowTitleFont.Close()
+
+	rowSubFont := ink.OpenFont(ink.DefaultFont, a.layout.fpx(28), true)
+	defer rowSubFont.Close()
+
+	sectionFont := ink.OpenFont(ink.DefaultFontBold, a.layout.fpx(24), true)
+	defer sectionFont.Close()
 
 	btnFont := ink.OpenFont(ink.DefaultFontBold, a.layout.fpx(44), true)
 	defer btnFont.Close()
-	btnFont.SetActive(ink.Black)
-
-	small := ink.OpenFont(ink.DefaultFont, a.layout.fpx(26), true)
-	defer small.Close()
-	small.SetActive(ink.Black)
 
 	// Header
 	title.SetActive(ink.Black)
 	ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(140)}, "Settings")
 
-	// Current config
-	body.SetActive(ink.Black)
-	ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(260)}, "Server: "+a.cfg.Host)
-	ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(320)}, "User:   "+a.cfg.User)
+	// SERVER section
+	a.drawSectionLabel(sectionFont, "SERVER", a.layout.serverLabelY)
+	a.drawListRow(rowTitleFont, rowSubFont, a.layout.serverRow,
+		"Server", truncate(a.cfg.Host, 40), true)
+	a.drawListRow(rowTitleFont, rowSubFont, a.layout.profileRow,
+		"Profile", a.cfg.Profile, true)
+	a.drawHairline(a.layout.profileRow.Min.X, a.layout.profileRow.Max.X, a.layout.profileRow.Max.Y)
 
-	// Filter / folder status line above the buttons
-	body.SetActive(ink.Black)
-	var filterLabel string
+	// LIBRARY section
+	a.drawSectionLabel(sectionFont, "LIBRARY", a.layout.libraryLabelY)
+	filterTitle := "Sync filter"
+	var filterValue string
 	if a.cfg.Backend == BackendWebDAV {
-		p := a.cfg.Path
-		if p == "" {
-			p = "/"
+		filterTitle = "Sync folder"
+		filterValue = a.cfg.Path
+		if filterValue == "" {
+			filterValue = "/"
 		}
-		filterLabel = "Folder: " + p
 	} else {
-		filterLabel = "Filter: " + a.cfg.FilterLabel()
+		filterValue = a.cfg.FilterLabel()
 	}
-	ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(400)}, filterLabel)
+	a.drawListRow(rowTitleFont, rowSubFont, a.layout.filterRow,
+		filterTitle, filterValue, true)
 
-	// Change-info button
-	ink.DrawRect(a.layout.changeButton, ink.Black)
-	ink.DrawRect(a.layout.changeButton.Inset(2), ink.Black)
-	btnFont.SetActive(ink.Black)
-	drawCenteredText(btnFont, a.layout.changeButton, "Change server info", a.layout.fpx(44))
-
-	// Change-filter / folder button (label varies by backend).
-	filterBtnText := "Change sync filter"
-	if a.cfg.Backend == BackendWebDAV {
-		filterBtnText = "Change sync folder"
-	}
-	ink.DrawRect(a.layout.filterButton, ink.Black)
-	ink.DrawRect(a.layout.filterButton.Inset(2), ink.Black)
-	drawCenteredText(btnFont, a.layout.filterButton, filterBtnText, a.layout.fpx(44))
-
-	// Delete-missing toggle: drawn as a single tap-to-cycle button whose
-	// label reflects the current state. Single border (not inset) to read
-	// as lighter-weight than the two primary actions.
-	delLabel := "Delete missing: off  (tap to enable)"
+	deleteSub := "Keep books removed on server"
 	if a.cfg.DeleteMissing {
-		delLabel = "Delete missing: on  (tap to disable)"
+		deleteSub = "Remove books deleted on server"
 	}
-	ink.DrawRect(a.layout.deleteTglButton, ink.Black)
-	drawCenteredText(btnFont, a.layout.deleteTglButton, delLabel, a.layout.fpx(44))
+	a.drawListRow(rowTitleFont, rowSubFont, a.layout.deleteRow,
+		"Delete missing", deleteSub, false)
+	a.drawToggle(a.layout.deleteToggle, a.cfg.DeleteMissing)
+	a.drawHairline(a.layout.deleteRow.Min.X, a.layout.deleteRow.Max.X, a.layout.deleteRow.Max.Y)
 
-	// Switch / add server profile.
-	profileBtnText := fmt.Sprintf("Profile: %s  (switch or add)", a.cfg.Profile)
-	ink.DrawRect(a.layout.profilesButton, ink.Black)
-	drawCenteredText(btnFont, a.layout.profilesButton, profileBtnText, a.layout.fpx(44))
-
-	// Update button: opens the update screen. Label reflects whether a
-	// newer release has already been detected by the background check.
-	updateLabel := "Check for updates"
+	// ABOUT section
+	a.drawSectionLabel(sectionFont, "ABOUT", a.layout.aboutLabelY)
+	updateTitle := "Check for updates"
+	updateSub := "Current version " + version
 	a.update.mu.Lock()
 	if a.update.available && a.update.release.Version != "" {
-		updateLabel = "Install update " + a.update.release.Version
+		updateTitle = "Install update " + a.update.release.Version
+		updateSub = "Current version " + version
 	}
 	a.update.mu.Unlock()
-	ink.DrawRect(a.layout.updateButton, ink.Black)
-	drawCenteredText(btnFont, a.layout.updateButton, updateLabel, a.layout.fpx(44))
+	a.drawListRow(rowTitleFont, rowSubFont, a.layout.updateRow,
+		updateTitle, updateSub, true)
+	a.drawHairline(a.layout.updateRow.Min.X, a.layout.updateRow.Max.X, a.layout.updateRow.Max.Y)
 
-	// Footer: current version, informational only.
-	small.SetActive(ink.Black)
-	versionY := a.layout.backButton.Min.Y - a.layout.sy(40)
-	ink.DrawString(image.Point{X: a.layout.margin, Y: versionY}, "pocketbeam "+version)
-
+	// Back button in the bottom-left, matching other screens.
 	ink.DrawRect(a.layout.backButton, ink.Black)
 	btnFont.SetActive(ink.Black)
 	drawCenteredText(btnFont, a.layout.backButton, "Back", a.layout.fpx(44))
+}
+
+// drawSectionLabel paints a small, muted all-caps header above a
+// group of rows.
+func (a *app) drawSectionLabel(f *ink.Font, label string, y int) {
+	f.SetActive(ink.DarkGray)
+	ink.DrawString(image.Point{X: a.layout.margin, Y: y}, label)
+}
+
+// drawListRow paints one full-width tappable row with a bold title on
+// top, an optional muted subtitle underneath, a hairline separator along
+// the top edge, and an optional right-edge chevron for drill-downs.
+// Used by Settings, Shelf/Dir pickers, Profile list, and the first-run
+// backend picker so every list in the app shares one visual language.
+func (a *app) drawListRow(titleF, subF *ink.Font, r image.Rectangle, title, subtitle string, chevron bool) {
+	a.drawHairline(r.Min.X, r.Max.X, r.Min.Y)
+
+	titleH := a.layout.fpx(36)
+	subH := a.layout.fpx(28)
+	gap := a.layout.sy(12)
+
+	if subtitle == "" {
+		titleY := r.Min.Y + (r.Dy()+titleH)/2
+		titleF.SetActive(ink.Black)
+		ink.DrawString(image.Point{X: r.Min.X, Y: titleY}, truncate(title, 48))
+	} else {
+		totalH := titleH + gap + subH
+		titleY := r.Min.Y + (r.Dy()-totalH)/2 + titleH
+		subY := titleY + gap + subH
+		titleF.SetActive(ink.Black)
+		ink.DrawString(image.Point{X: r.Min.X, Y: titleY}, truncate(title, 40))
+		subF.SetActive(ink.DarkGray)
+		ink.DrawString(image.Point{X: r.Min.X, Y: subY}, truncate(subtitle, 48))
+	}
+
+	if chevron {
+		chevronF := ink.OpenFont(ink.DefaultFontBold, a.layout.fpx(48), true)
+		defer chevronF.Close()
+		chevronF.SetActive(ink.DarkGray)
+		ink.DrawString(
+			image.Point{X: r.Max.X - a.layout.sx(30), Y: r.Min.Y + (r.Dy()+a.layout.fpx(48))/2 - a.layout.sy(8)},
+			">")
+	}
+}
+
+// drawHairline paints a 1-pixel light-gray horizontal rule. The shared
+// separator element for list rows and section dividers across every
+// screen.
+func (a *app) drawHairline(x1, x2, y int) {
+	ink.FillArea(image.Rect(x1, y, x2, y+1), ink.LightGray)
+}
+
+// drawToggle paints a two-position pill indicating a boolean
+// setting. On: filled dark with the thumb on the right. Off: filled light
+// with the thumb on the left. Sharp-edged because rounded rects are not
+// part of the ink package and fake rounding reads worse on e-ink than a
+// clean rectangle.
+func (a *app) drawToggle(r image.Rectangle, on bool) {
+	ink.DrawRect(r, ink.Black)
+	inset := r.Inset(a.layout.sx(4))
+	thumbW := inset.Dy()
+	if on {
+		ink.FillArea(inset, ink.DarkGray)
+		thumb := image.Rect(inset.Max.X-thumbW, inset.Min.Y, inset.Max.X, inset.Max.Y)
+		ink.FillArea(thumb, ink.Black)
+		ink.DrawRect(thumb, ink.White)
+	} else {
+		ink.FillArea(inset, ink.LightGray)
+		thumb := image.Rect(inset.Min.X, inset.Min.Y, inset.Min.X+thumbW, inset.Max.Y)
+		ink.FillArea(thumb, ink.White)
+		ink.DrawRect(thumb, ink.Black)
+	}
 }
 
 func (a *app) settingsKey(e ink.KeyEvent) bool {
@@ -1582,25 +1716,25 @@ func (a *app) settingsPointer(e ink.PointerEvent) bool {
 	}
 	p := e.Point
 	switch {
-	case p.In(a.layout.changeButton):
+	case p.In(a.layout.serverRow):
 		a.startChangeInfo()
 		return true
-	case p.In(a.layout.filterButton):
+	case p.In(a.layout.profileRow):
+		a.openProfileList()
+		return true
+	case p.In(a.layout.filterRow):
 		if a.cfg.Backend == BackendWebDAV {
 			a.openDirPicker(a.cfg.Path)
 		} else {
 			a.openShelfPicker()
 		}
 		return true
-	case p.In(a.layout.deleteTglButton):
+	case p.In(a.layout.deleteRow):
 		a.cfg.DeleteMissing = !a.cfg.DeleteMissing
 		_ = SaveConfig(a.cfgPath, a.cfg)
 		ink.Repaint()
 		return true
-	case p.In(a.layout.profilesButton):
-		a.openProfileList()
-		return true
-	case p.In(a.layout.updateButton):
+	case p.In(a.layout.updateRow):
 		a.openUpdateScreen()
 		return true
 	case p.In(a.layout.backButton):
@@ -1751,6 +1885,13 @@ func (a *app) drawShelfPicker() {
 	defer body.Close()
 	body.SetActive(ink.Black)
 
+	rowTitleFont := ink.OpenFont(ink.DefaultFontBold, a.layout.fpx(36), true)
+	defer rowTitleFont.Close()
+	rowSubFont := ink.OpenFont(ink.DefaultFont, a.layout.fpx(28), true)
+	defer rowSubFont.Close()
+	smallFont := ink.OpenFont(ink.DefaultFont, a.layout.fpx(26), true)
+	defer smallFont.Close()
+
 	btnFont := ink.OpenFont(ink.DefaultFontBold, a.layout.fpx(44), true)
 	defer btnFont.Close()
 	btnFont.SetActive(ink.Black)
@@ -1775,12 +1916,14 @@ func (a *app) drawShelfPicker() {
 	}
 	a.picker.mu.Unlock()
 	crumb := breadcrumbPath(append(stackTitles, curTitle), 55)
-	ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(220)}, crumb)
+	smallFont.SetActive(ink.DarkGray)
+	ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(210)}, crumb)
+	a.drawHairline(a.layout.margin, a.layout.screen.X-a.layout.margin, a.layout.sy(240))
 
 	// Reserve space at bottom for "Sync this level" + Back.
-	selectBtnH := 100
+	selectBtnH := a.layout.sy(100)
 	areaTop := a.layout.pickerAreaTop
-	areaBottom := a.layout.pickerAreaBottom - selectBtnH - 40
+	areaBottom := a.layout.pickerAreaBottom - selectBtnH - a.layout.sy(40)
 
 	var prevPageRect, nextPageRect image.Rectangle
 
@@ -1791,8 +1934,8 @@ func (a *app) drawShelfPicker() {
 		ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(300)}, "Could not load feed:")
 		ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(350)}, truncate(pickerErr.Error(), 60))
 	} else {
-		rowH := 90
-		pageBtnH := 60
+		rowH := a.layout.sy(110)
+		pageBtnH := a.layout.sy(60)
 		atRoot := stackLen == 0
 		// Suppress navigation rows whose server-advertised count is zero
 		// (opds:count == 0). Servers that don't advertise counts leave
@@ -1806,17 +1949,23 @@ func (a *app) drawShelfPicker() {
 		}
 
 		// Up-row: fixed above the paginated window so the user can go
-		// up from any page. Styled deliberately unlike the content rows
-		// (narrower, left-aligned, "←" prefix) so it doesn't look like
-		// just another tappable subsection.
+		// up from any page. Rendered as a full-width list row with a
+		// left-aligned "< Back" label so it shares the app-wide row
+		// idiom; still visually distinct from the subsection chevron
+		// rows because its chevron points the other way.
 		listTop := areaTop
 		var upRect image.Rectangle
 		if !atRoot {
-			upW := (a.layout.screen.X - 2*a.layout.margin) / 3
-			upH := rowH - 20
-			upRect = image.Rect(a.layout.margin, listTop, a.layout.margin+upW, listTop+upH)
-			ink.DrawRect(upRect, ink.Black)
-			drawCenteredText(btnFont, upRect, "← back", a.layout.fpx(44))
+			upRect = image.Rect(a.layout.margin, listTop, a.layout.screen.X-a.layout.margin, listTop+rowH-a.layout.sy(20))
+			a.drawHairline(upRect.Min.X, upRect.Max.X, upRect.Min.Y)
+			parent := "previous level"
+			if stackLen > 0 {
+				parent = stackTitles[stackLen-1]
+			}
+			rowTitleFont.SetActive(ink.Black)
+			titleY := upRect.Min.Y + (upRect.Dy()+a.layout.fpx(36))/2
+			ink.DrawString(image.Point{X: upRect.Min.X + a.layout.sx(40), Y: titleY},
+				"< Back to "+truncate(parent, 32))
 			listTop += rowH
 		}
 
@@ -1824,7 +1973,7 @@ func (a *app) drawShelfPicker() {
 		// viewport (used for Prev/Next steps and the "Page N" label);
 		// the last page may render fewer rows.
 		visibleArea := areaBottom - listTop
-		pageSize := (visibleArea - pageBtnH - 20) / rowH
+		pageSize := (visibleArea - pageBtnH - a.layout.sy(20)) / rowH
 		if pageSize < 1 {
 			pageSize = 1
 		}
@@ -1835,39 +1984,46 @@ func (a *app) drawShelfPicker() {
 		rects := make([]image.Rectangle, 0, end-offset)
 		for i := offset; i < end; i++ {
 			sub := visibleSubs[i]
-			label := sub.Name
+			var subtitle string
 			if sub.CountKnown {
-				label = fmt.Sprintf("%s  (%d)", sub.Name, sub.Count)
+				subtitle = fmt.Sprintf("%d books", sub.Count)
 			}
 			y1 := listTop + (i-offset)*rowH
-			rect := image.Rect(a.layout.margin, y1, a.layout.screen.X-a.layout.margin, y1+rowH-20)
+			rect := image.Rect(a.layout.margin, y1, a.layout.screen.X-a.layout.margin, y1+rowH)
 			rects = append(rects, rect)
-			ink.DrawRect(rect, ink.Black)
-			drawCenteredText(btnFont, rect, truncate(label, 40), a.layout.fpx(44))
+			a.drawListRow(rowTitleFont, rowSubFont, rect, sub.Name, subtitle, true)
+		}
+		if n := len(rects); n > 0 {
+			last := rects[n-1]
+			a.drawHairline(last.Min.X, last.Max.X, last.Max.Y)
 		}
 
-		// Page buttons + label appear only when subsections overflow a
-		// page. The fixed up-row doesn't count.
+		// Page nav: subtle subtle single-border buttons with a muted
+		// page indicator between them. Shown only when subsections
+		// overflow a page.
 		if len(visibleSubs) > pageSize {
-			btnY1 := listTop + pageSize*rowH
+			btnY1 := listTop + pageSize*rowH + a.layout.sy(20)
 			btnY2 := btnY1 + pageBtnH
 			contentW := a.layout.screen.X - 2*a.layout.margin
-			half := (contentW - a.layout.sx(40)) / 2
+			navBtnW := contentW / 4
 			if offset > 0 {
-				prevPageRect = image.Rect(a.layout.margin, btnY1, a.layout.margin+half, btnY2)
+				prevPageRect = image.Rect(a.layout.margin, btnY1, a.layout.margin+navBtnW, btnY2)
 				ink.DrawRect(prevPageRect, ink.Black)
 				drawCenteredText(btnFont, prevPageRect, "< Prev", a.layout.fpx(44))
 			}
 			if end < len(visibleSubs) {
-				nextPageRect = image.Rect(a.layout.screen.X-a.layout.margin-half, btnY1, a.layout.screen.X-a.layout.margin, btnY2)
+				nextPageRect = image.Rect(a.layout.screen.X-a.layout.margin-navBtnW, btnY1, a.layout.screen.X-a.layout.margin, btnY2)
 				ink.DrawRect(nextPageRect, ink.Black)
 				drawCenteredText(btnFont, nextPageRect, "Next >", a.layout.fpx(44))
 			}
 			page := offset/pageSize + 1
 			total := (len(visibleSubs) + pageSize - 1) / pageSize
+			pageLabel := fmt.Sprintf("Page %d of %d  ·  %d items", page, total, len(visibleSubs))
+			smallFont.SetActive(ink.DarkGray)
+			pageLabelW := ink.StringWidth(pageLabel)
 			ink.DrawString(
-				image.Point{X: a.layout.margin, Y: btnY2 + a.layout.sy(30)},
-				fmt.Sprintf("Page %d of %d (%d items)", page, total, len(visibleSubs)),
+				image.Point{X: (a.layout.screen.X - pageLabelW) / 2, Y: btnY1 + (btnY2-btnY1+a.layout.fpx(26))/2},
+				pageLabel,
 			)
 		}
 
@@ -2170,7 +2326,13 @@ func (a *app) drawDirPicker() {
 
 	body := ink.OpenFont(ink.DefaultFont, a.layout.fpx(32), true)
 	defer body.Close()
-	body.SetActive(ink.Black)
+
+	rowTitleFont := ink.OpenFont(ink.DefaultFontBold, a.layout.fpx(36), true)
+	defer rowTitleFont.Close()
+	rowSubFont := ink.OpenFont(ink.DefaultFont, a.layout.fpx(28), true)
+	defer rowSubFont.Close()
+	smallFont := ink.OpenFont(ink.DefaultFont, a.layout.fpx(26), true)
+	defer smallFont.Close()
 
 	btnFont := ink.OpenFont(ink.DefaultFontBold, a.layout.fpx(44), true)
 	defer btnFont.Close()
@@ -2187,42 +2349,46 @@ func (a *app) drawDirPicker() {
 	title.SetActive(ink.Black)
 	ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(140)}, "Select folder")
 
-	body.SetActive(ink.Black)
-	ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(220)}, "Currently in: "+truncate(path, 60))
+	smallFont.SetActive(ink.DarkGray)
+	ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(210)}, truncate(path, 60))
+	a.drawHairline(a.layout.margin, a.layout.screen.X-a.layout.margin, a.layout.sy(240))
 
 	var prevPageRect, nextPageRect image.Rectangle
 
 	if loading {
+		body.SetActive(ink.Black)
 		ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(300)}, "Loading...")
 		ink.ShowHourglassAt(image.Point{X: a.layout.margin, Y: a.layout.sy(360)})
 	} else if pickErr != nil {
+		body.SetActive(ink.Black)
 		ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(300)}, "Could not list folder:")
 		ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(350)}, truncate(pickErr.Error(), 60))
 	} else {
-		rowH := 90
-		pageBtnH := 60
+		rowH := a.layout.sy(110)
+		pageBtnH := a.layout.sy(60)
 		areaTop := a.layout.pickerAreaTop
 		// Reserve space at the bottom for the "Sync this folder" button.
-		selectBtnH := 100
-		areaBottom := a.layout.pickerAreaBottom - selectBtnH - 40
+		selectBtnH := a.layout.sy(100)
+		areaBottom := a.layout.pickerAreaBottom - selectBtnH - a.layout.sy(40)
 
 		atRoot := path == "/" || path == ""
 
-		// Up-row: narrow, left-aligned, "←" prefix so it doesn't look
-		// like another tappable subdirectory.
+		// Up-row: full-width list-row styled, "<" on the left.
 		listTop := areaTop
 		var upRect image.Rectangle
 		if !atRoot {
-			upW := (a.layout.screen.X - 2*a.layout.margin) / 3
-			upH := rowH - 20
-			upRect = image.Rect(a.layout.margin, listTop, a.layout.margin+upW, listTop+upH)
-			ink.DrawRect(upRect, ink.Black)
-			drawCenteredText(btnFont, upRect, "← back", a.layout.fpx(44))
+			upRect = image.Rect(a.layout.margin, listTop, a.layout.screen.X-a.layout.margin, listTop+rowH-a.layout.sy(20))
+			a.drawHairline(upRect.Min.X, upRect.Max.X, upRect.Min.Y)
+			rowTitleFont.SetActive(ink.Black)
+			titleY := upRect.Min.Y + (upRect.Dy()+a.layout.fpx(36))/2
+			parent := dirParent(path)
+			ink.DrawString(image.Point{X: upRect.Min.X + a.layout.sx(40), Y: titleY},
+				"< Back to "+truncate(parent, 32))
 			listTop += rowH
 		}
 
 		visibleArea := areaBottom - listTop
-		pageSize := (visibleArea - pageBtnH - 20) / rowH
+		pageSize := (visibleArea - pageBtnH - a.layout.sy(20)) / rowH
 		if pageSize < 1 {
 			pageSize = 1
 		}
@@ -2233,31 +2399,37 @@ func (a *app) drawDirPicker() {
 		rects := make([]image.Rectangle, 0, end-offset)
 		for i := offset; i < end; i++ {
 			y1 := listTop + (i-offset)*rowH
-			rect := image.Rect(a.layout.margin, y1, a.layout.screen.X-a.layout.margin, y1+rowH-20)
+			rect := image.Rect(a.layout.margin, y1, a.layout.screen.X-a.layout.margin, y1+rowH)
 			rects = append(rects, rect)
-			ink.DrawRect(rect, ink.Black)
-			drawCenteredText(btnFont, rect, truncate(dirs[i]+"/", 40), a.layout.fpx(44))
+			a.drawListRow(rowTitleFont, rowSubFont, rect, dirs[i], "", true)
+		}
+		if n := len(rects); n > 0 {
+			last := rects[n-1]
+			a.drawHairline(last.Min.X, last.Max.X, last.Max.Y)
 		}
 		if len(dirs) > pageSize {
-			btnY1 := listTop + pageSize*rowH
+			btnY1 := listTop + pageSize*rowH + a.layout.sy(20)
 			btnY2 := btnY1 + pageBtnH
 			contentW := a.layout.screen.X - 2*a.layout.margin
-			half := (contentW - a.layout.sx(40)) / 2
+			navBtnW := contentW / 4
 			if offset > 0 {
-				prevPageRect = image.Rect(a.layout.margin, btnY1, a.layout.margin+half, btnY2)
+				prevPageRect = image.Rect(a.layout.margin, btnY1, a.layout.margin+navBtnW, btnY2)
 				ink.DrawRect(prevPageRect, ink.Black)
 				drawCenteredText(btnFont, prevPageRect, "< Prev", a.layout.fpx(44))
 			}
 			if end < len(dirs) {
-				nextPageRect = image.Rect(a.layout.screen.X-a.layout.margin-half, btnY1, a.layout.screen.X-a.layout.margin, btnY2)
+				nextPageRect = image.Rect(a.layout.screen.X-a.layout.margin-navBtnW, btnY1, a.layout.screen.X-a.layout.margin, btnY2)
 				ink.DrawRect(nextPageRect, ink.Black)
 				drawCenteredText(btnFont, nextPageRect, "Next >", a.layout.fpx(44))
 			}
 			page := offset/pageSize + 1
 			total := (len(dirs) + pageSize - 1) / pageSize
+			pageLabel := fmt.Sprintf("Page %d of %d  ·  %d items", page, total, len(dirs))
+			smallFont.SetActive(ink.DarkGray)
+			pageLabelW := ink.StringWidth(pageLabel)
 			ink.DrawString(
-				image.Point{X: a.layout.margin, Y: btnY2 + a.layout.sy(30)},
-				fmt.Sprintf("Page %d of %d (%d items)", page, total, len(dirs)),
+				image.Point{X: (a.layout.screen.X - pageLabelW) / 2, Y: btnY1 + (btnY2-btnY1+a.layout.fpx(26))/2},
+				pageLabel,
 			)
 		}
 
@@ -2284,6 +2456,23 @@ func (a *app) drawDirPicker() {
 
 	ink.DrawRect(a.layout.backButton, ink.Black)
 	drawCenteredText(btnFont, a.layout.backButton, "Back", a.layout.fpx(44))
+}
+
+// dirParent returns a human-readable label for the parent of an absolute
+// WebDAV path. The root is shown as "/".
+func dirParent(p string) string {
+	if p == "" || p == "/" {
+		return "/"
+	}
+	p = strings.TrimSuffix(p, "/")
+	i := strings.LastIndex(p, "/")
+	if i < 0 {
+		return "/"
+	}
+	if i == 0 {
+		return "/"
+	}
+	return p[strings.LastIndex(p[:i], "/")+1 : i]
 }
 
 func (a *app) dirPickerKey(e ink.KeyEvent) bool {
@@ -2472,32 +2661,41 @@ func (a *app) drawSpaceWarn() {
 	a.spaceWarn.mu.Unlock()
 
 	ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(140)}, "Not enough space")
+	body.SetActive(ink.DarkGray)
+	ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(200)},
+		"This sync needs more room than the device has.")
+	a.drawHairline(a.layout.margin, a.layout.screen.X-a.layout.margin, a.layout.sy(240))
 
-	body.SetActive(ink.Black)
+	hero := ink.OpenFont(ink.DefaultFontBold, a.layout.fpx(40), true)
+	defer hero.Close()
+	hero.SetActive(ink.Black)
 	newCount := len(plan.NewBooks) + len(plan.UpdatedBooks)
-	needLine := fmt.Sprintf("%d book(s) need %s; %s free on device.",
-		newCount, formatBytes(plan.DownloadBytes), formatBytes(plan.FreeBytes))
-	ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(230)}, needLine)
+	ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(310)},
+		fmt.Sprintf("%d books · %s needed", newCount, formatBytes(plan.DownloadBytes)))
+	body.SetActive(ink.DarkGray)
+	ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(365)},
+		fmt.Sprintf("%s free on device", formatBytes(plan.FreeBytes)))
 
-	y := 300
+	y := a.layout.sy(440)
 	if plan.UnknownSizes > 0 {
 		ink.DrawString(image.Point{X: a.layout.margin, Y: y},
-			fmt.Sprintf("(%d book(s) had unknown size; total is a lower bound.)", plan.UnknownSizes))
-		y += 50
+			fmt.Sprintf("%d books had unknown size; total is a lower bound.", plan.UnknownSizes))
+		y += a.layout.sy(50)
 	}
 	if plan.ReclaimableBytes > 0 {
 		ink.DrawString(image.Point{X: a.layout.margin, Y: y},
-			fmt.Sprintf("Up to %s will be freed after delete-missing.",
+			fmt.Sprintf("Up to %s freed after delete-missing.",
 				formatBytes(plan.ReclaimableBytes)))
-		y += 50
+		y += a.layout.sy(50)
 	}
-	y += 30
+	y += a.layout.sy(30)
+	body.SetActive(ink.Black)
 	ink.DrawString(image.Point{X: a.layout.margin, Y: y},
-		"Download anyway? Partial syncs are safe; the device")
+		"Download anyway? Partial syncs are safe — the device")
 	ink.DrawString(image.Point{X: a.layout.margin, Y: y + a.layout.sy(45)},
 		"just stops when the disk fills up.")
 
-	btnH := 100
+	btnH := a.layout.sy(100)
 	btnY2 := a.layout.backButton.Max.Y
 	btnY1 := btnY2 - btnH
 	contentW := a.layout.screen.X - 2*a.layout.margin
@@ -2510,7 +2708,6 @@ func (a *app) drawSpaceWarn() {
 	drawCenteredText(btnFont, yesRect, "Download", a.layout.fpx(44))
 
 	ink.DrawRect(noRect, ink.Black)
-	ink.DrawRect(noRect.Inset(2), ink.Black)
 	drawCenteredText(btnFont, noRect, "Cancel", a.layout.fpx(44))
 
 	a.spaceWarn.mu.Lock()
@@ -2696,41 +2893,45 @@ func (a *app) drawDeleteConfirm() {
 	a.delConfirm.mu.Unlock()
 
 	ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(140)}, "Confirm deletion")
+	body.SetActive(ink.DarkGray)
+	ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(200)},
+		fmt.Sprintf("%d books are no longer on the server.", len(pending)))
+	a.drawHairline(a.layout.margin, a.layout.screen.X-a.layout.margin, a.layout.sy(240))
 
 	body.SetActive(ink.Black)
-	ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(230)},
-		fmt.Sprintf("%d book(s) are no longer on the server.", len(pending)))
-	ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(280)}, "Delete them from this device?")
+	ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(310)},
+		"Delete them from this device?")
 
-	// Preview up to 5 titles, indented.
+	// Preview up to 5 titles, indented and muted.
 	const preview = 5
-	y := 360
+	body.SetActive(ink.DarkGray)
+	y := a.layout.sy(380)
 	for i, b := range pending {
 		if i == preview {
 			ink.DrawString(image.Point{X: a.layout.margin + a.layout.sx(40), Y: y},
-				fmt.Sprintf("... and %d more", len(pending)-preview))
+				fmt.Sprintf("… and %d more", len(pending)-preview))
 			break
 		}
-		label := b.Author + ": " + b.Title
+		label := b.Author + " — " + b.Title
 		ink.DrawString(image.Point{X: a.layout.margin + a.layout.sx(40), Y: y}, truncate(label, 60))
-		y += 50
+		y += a.layout.sy(50)
 	}
 
-	// Yes / No buttons side by side, above the bottom safe margin.
-	btnH := 100
+	// Primary: Delete; Secondary: Keep. Keep lives on the left as the
+	// safer option (Back key maps to it too).
+	btnH := a.layout.sy(100)
 	btnY2 := a.layout.backButton.Max.Y
 	btnY1 := btnY2 - btnH
 	contentW := a.layout.screen.X - 2*a.layout.margin
 	half := (contentW - a.layout.sx(40)) / 2
-	yesRect := image.Rect(a.layout.margin, btnY1, a.layout.margin+half, btnY2)
-	noRect := image.Rect(a.layout.screen.X-a.layout.margin-half, btnY1, a.layout.screen.X-a.layout.margin, btnY2)
+	noRect := image.Rect(a.layout.margin, btnY1, a.layout.margin+half, btnY2)
+	yesRect := image.Rect(a.layout.screen.X-a.layout.margin-half, btnY1, a.layout.screen.X-a.layout.margin, btnY2)
 
 	ink.DrawRect(yesRect, ink.Black)
 	ink.DrawRect(yesRect.Inset(2), ink.Black)
 	drawCenteredText(btnFont, yesRect, "Delete", a.layout.fpx(44))
 
 	ink.DrawRect(noRect, ink.Black)
-	ink.DrawRect(noRect.Inset(2), ink.Black)
 	drawCenteredText(btnFont, noRect, "Keep", a.layout.fpx(44))
 
 	a.delConfirm.mu.Lock()
@@ -2794,7 +2995,11 @@ func (a *app) drawProfileList() {
 
 	body := ink.OpenFont(ink.DefaultFont, a.layout.fpx(32), true)
 	defer body.Close()
-	body.SetActive(ink.Black)
+
+	rowTitleFont := ink.OpenFont(ink.DefaultFontBold, a.layout.fpx(36), true)
+	defer rowTitleFont.Close()
+	rowSubFont := ink.OpenFont(ink.DefaultFont, a.layout.fpx(28), true)
+	defer rowSubFont.Close()
 
 	btnFont := ink.OpenFont(ink.DefaultFontBold, a.layout.fpx(44), true)
 	defer btnFont.Close()
@@ -2817,29 +3022,30 @@ func (a *app) drawProfileList() {
 		return
 	}
 
-	// Every profile is a tap target; tapping opens the per-profile
-	// detail panel where Make-active and Delete live. The active
-	// profile carries a "• ... (active)" marker so the user can tell
-	// at a glance which one is current, but it's still a full button
-	// so the detail panel is reachable for e.g. deleting it directly.
-	rowH := 90
+	// One list row per profile. Tap anywhere on the row to open the
+	// detail panel. The active profile shows "Active" as its subtitle so
+	// users can see at a glance which one they're on.
+	rowH := a.layout.sy(110)
 	areaTop := a.layout.pickerAreaTop
 	rects := make([]image.Rectangle, 0, len(names))
 	for i, n := range names {
 		y1 := areaTop + i*rowH
-		rect := image.Rect(a.layout.margin, y1, a.layout.screen.X-a.layout.margin, y1+rowH-20)
+		rect := image.Rect(a.layout.margin, y1, a.layout.screen.X-a.layout.margin, y1+rowH)
 		rects = append(rects, rect)
-		ink.DrawRect(rect, ink.Black)
-		label := n
+		sub := ""
 		if n == active {
-			label = "• " + n + "  (active)"
+			sub = "Active"
 		}
-		drawCenteredText(btnFont, rect, truncate(label, 40), a.layout.fpx(44))
+		a.drawListRow(rowTitleFont, rowSubFont, rect, n, sub, true)
+	}
+	if n := len(rects); n > 0 {
+		last := rects[n-1]
+		a.drawHairline(last.Min.X, last.Max.X, last.Max.Y)
 	}
 
-	// Only Add-new sits on the list now; per-profile actions moved to
-	// the detail panel.
-	btnH := 100
+	// Primary action: Add new server, sized like the Sync buttons so it
+	// reads as the same kind of commit action.
+	btnH := a.layout.sy(100)
 	addY2 := a.layout.backButton.Min.Y - a.layout.sy(40)
 	addY1 := addY2 - btnH
 	addRect := image.Rect(a.layout.margin, addY1, a.layout.screen.X-a.layout.margin, addY2)
@@ -3029,29 +3235,33 @@ func (a *app) drawProfileDetail() {
 	confirming := a.profileDetail.confirmDelete
 	a.profileDetail.mu.Unlock()
 
-	header := "Profile: " + name
+	ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(140)}, truncate(name, 40))
+	body.SetActive(ink.DarkGray)
+	status := "Profile"
 	if isActive {
-		header += "  (active)"
+		status = "Profile · Active"
 	}
-	ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(140)}, truncate(header, 40))
+	ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(200)}, status)
+	a.drawHairline(a.layout.margin, a.layout.screen.X-a.layout.margin, a.layout.sy(240))
 
 	body.SetActive(ink.Black)
-	y := 240
 	if loadErr != nil {
-		ink.DrawString(image.Point{X: a.layout.margin, Y: y}, "Could not load profile:")
-		ink.DrawString(image.Point{X: a.layout.margin, Y: y + a.layout.sy(50)}, truncate(loadErr.Error(), 60))
+		ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(310)}, "Could not load profile:")
+		body.SetActive(ink.DarkGray)
+		ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(360)}, truncate(loadErr.Error(), 60))
 	} else {
-		ink.DrawString(image.Point{X: a.layout.margin, Y: y}, "Backend: "+backend)
-		ink.DrawString(image.Point{X: a.layout.margin, Y: y + a.layout.sy(50)}, "Server:  "+truncate(host, 55))
+		ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(310)}, backend)
+		body.SetActive(ink.DarkGray)
+		ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(360)}, truncate(host, 55))
 	}
 
 	// Action stack anchored above Back: Delete (always) + Make active
 	// (only when this profile isn't the active one).
-	btnH := 100
+	btnH := a.layout.sy(100)
 	backMin := a.layout.backButton.Min.Y
-	delY2 := backMin - 40
+	delY2 := backMin - a.layout.sy(40)
 	delY1 := delY2 - btnH
-	makeActiveY2 := delY1 - 30
+	makeActiveY2 := delY1 - a.layout.sy(30)
 	makeActiveY1 := makeActiveY2 - btnH
 	contentW := a.layout.screen.X - 2*a.layout.margin
 
@@ -3239,7 +3449,14 @@ func (a *app) drawUpdate() {
 
 	body := ink.OpenFont(ink.DefaultFont, a.layout.fpx(32), true)
 	defer body.Close()
-	body.SetActive(ink.Black)
+
+	hero := ink.OpenFont(ink.DefaultFontBold, a.layout.fpx(40), true)
+	defer hero.Close()
+
+	rowTitleFont := ink.OpenFont(ink.DefaultFontBold, a.layout.fpx(36), true)
+	defer rowTitleFont.Close()
+	rowSubFont := ink.OpenFont(ink.DefaultFont, a.layout.fpx(28), true)
+	defer rowSubFont.Close()
 
 	btnFont := ink.OpenFont(ink.DefaultFontBold, a.layout.fpx(44), true)
 	defer btnFont.Close()
@@ -3257,33 +3474,41 @@ func (a *app) drawUpdate() {
 	installed := a.update.installed
 	a.update.mu.Unlock()
 
-	body.SetActive(ink.Black)
-	ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(220)}, "Installed: "+version)
+	body.SetActive(ink.DarkGray)
+	ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(200)}, "Installed version "+version)
+	a.drawHairline(a.layout.margin, a.layout.screen.X-a.layout.margin, a.layout.sy(240))
 
-	y := 280
+	y := a.layout.sy(310)
 	switch {
 	case installed:
-		ink.DrawString(image.Point{X: a.layout.margin, Y: y}, "Update installed: "+rel.Version)
-		ink.DrawString(image.Point{X: a.layout.margin, Y: y + a.layout.sy(50)}, "Relaunching...")
+		hero.SetActive(ink.Black)
+		ink.DrawString(image.Point{X: a.layout.margin, Y: y}, "Installed "+rel.Version)
+		body.SetActive(ink.DarkGray)
+		ink.DrawString(image.Point{X: a.layout.margin, Y: y + a.layout.sy(55)}, "Relaunching…")
 	case installErr != nil:
-		ink.DrawString(image.Point{X: a.layout.margin, Y: y}, "Install failed:")
-		ink.DrawString(image.Point{X: a.layout.margin, Y: y + a.layout.sy(50)}, truncate(installErr.Error(), 60))
+		hero.SetActive(ink.Black)
+		ink.DrawString(image.Point{X: a.layout.margin, Y: y}, "Install failed")
+		body.SetActive(ink.DarkGray)
+		ink.DrawString(image.Point{X: a.layout.margin, Y: y + a.layout.sy(55)}, truncate(installErr.Error(), 60))
 	case downloading:
+		hero.SetActive(ink.Black)
+		headline := "Downloading " + rel.Version
+		ink.DrawString(image.Point{X: a.layout.margin, Y: y}, headline)
+		body.SetActive(ink.DarkGray)
 		var line string
 		if total > 0 {
 			pct := int(100 * downloaded / total)
 			if pct > 100 {
 				pct = 100
 			}
-			line = fmt.Sprintf("Downloading %s  %d%%  (%d / %d KB)", rel.Version, pct, downloaded/1024, total/1024)
+			line = fmt.Sprintf("%d%%  ·  %d / %d KB", pct, downloaded/1024, total/1024)
 		} else {
-			line = fmt.Sprintf("Downloading %s  (%d KB received)", rel.Version, downloaded/1024)
+			line = fmt.Sprintf("%d KB received", downloaded/1024)
 		}
-		ink.DrawString(image.Point{X: a.layout.margin, Y: y}, line)
-		// Progress bar drawn below the status line when a total is known.
+		ink.DrawString(image.Point{X: a.layout.margin, Y: y + a.layout.sy(55)}, line)
 		if total > 0 {
-			barY1 := y + 40
-			barY2 := barY1 + 40
+			barY1 := y + a.layout.sy(90)
+			barY2 := barY1 + a.layout.sy(30)
 			barX1 := a.layout.margin
 			barX2 := a.layout.screen.X - a.layout.margin
 			bar := image.Rect(barX1, barY1, barX2, barY2)
@@ -3293,41 +3518,61 @@ func (a *app) drawUpdate() {
 				fillW = bar.Dx() - 6
 			}
 			if fillW > 0 {
-				ink.FillArea(image.Rect(barX1+3, barY1+3, barX1+3+fillW, barY2-3), ink.DarkGray)
+				ink.FillArea(image.Rect(barX1+a.layout.sx(3), barY1+a.layout.sy(3), barX1+a.layout.sx(3)+fillW, barY2-a.layout.sy(3)), ink.DarkGray)
 			}
 		}
 	case checking:
-		ink.DrawString(image.Point{X: a.layout.margin, Y: y}, "Checking for updates...")
+		hero.SetActive(ink.Black)
+		ink.DrawString(image.Point{X: a.layout.margin, Y: y}, "Checking for updates…")
 	case checkErr != nil:
-		ink.DrawString(image.Point{X: a.layout.margin, Y: y}, "Could not check:")
-		ink.DrawString(image.Point{X: a.layout.margin, Y: y + a.layout.sy(50)}, truncate(checkErr.Error(), 60))
+		hero.SetActive(ink.Black)
+		ink.DrawString(image.Point{X: a.layout.margin, Y: y}, "Could not check")
+		body.SetActive(ink.DarkGray)
+		ink.DrawString(image.Point{X: a.layout.margin, Y: y + a.layout.sy(55)}, truncate(checkErr.Error(), 60))
 	case available:
-		line := "New version: " + rel.Version
+		hero.SetActive(ink.Black)
+		headline := rel.Version + " is available"
+		ink.DrawString(image.Point{X: a.layout.margin, Y: y}, headline)
+		body.SetActive(ink.DarkGray)
+		detail := "Tap Install now to update"
 		if rel.BinarySize > 0 {
-			line += "  (" + formatBytes(rel.BinarySize) + ")"
+			detail = formatBytes(rel.BinarySize) + "  ·  " + detail
 		}
-		ink.DrawString(image.Point{X: a.layout.margin, Y: y}, line)
+		ink.DrawString(image.Point{X: a.layout.margin, Y: y + a.layout.sy(55)}, detail)
 		if rel.SHA256 != "" {
-			ink.DrawString(image.Point{X: a.layout.margin, Y: y + a.layout.sy(50)}, "sha256: "+rel.SHA256[:12]+"...")
+			ink.DrawString(image.Point{X: a.layout.margin, Y: y + a.layout.sy(105)}, "sha256 "+rel.SHA256[:12]+"…")
 		}
 	default:
-		ink.DrawString(image.Point{X: a.layout.margin, Y: y}, "You are up to date.")
+		hero.SetActive(ink.Black)
+		ink.DrawString(image.Point{X: a.layout.margin, Y: y}, "You are up to date")
 	}
 
-	// Action buttons. The primary button is either "Install now" when
-	// a newer release is ready or "Check for updates" for a manual
-	// refresh. Below it sits the automatic-checks toggle, which is
-	// always shown so users can disable weekly checks without editing
-	// the config file by hand.
-	btnH := 100
-	toggleH := 90
+	// Auto-check toggle row: list-row style matching Settings.
+	btnH := a.layout.sy(100)
+	toggleH := a.layout.sy(110)
 	contentW := a.layout.screen.X - 2*a.layout.margin
 	toggleY2 := a.layout.backButton.Min.Y - a.layout.sy(40)
 	toggleY1 := toggleY2 - toggleH
-	btnY2 := toggleY1 - 30
+	btnY2 := toggleY1 - a.layout.sy(30)
 	btnY1 := btnY2 - btnH
-	primary := image.Rect(a.layout.margin, btnY1, a.layout.margin+contentW, btnY2)
 
+	toggleRect := image.Rect(a.layout.margin, toggleY1, a.layout.margin+contentW, toggleY2)
+	autoSub := "Check once a week"
+	if !a.cfg.CheckUpdates {
+		autoSub = "Disabled"
+	}
+	a.drawListRow(rowTitleFont, rowSubFont, toggleRect,
+		"Automatic update checks", autoSub, false)
+	togPillH := a.layout.sy(60)
+	togPillW := a.layout.sx(120)
+	togCY := (toggleRect.Min.Y + toggleRect.Max.Y) / 2
+	togX2 := toggleRect.Max.X - a.layout.sx(20)
+	togRect := image.Rect(togX2-togPillW, togCY-togPillH/2, togX2, togCY+togPillH/2)
+	a.drawToggle(togRect, a.cfg.CheckUpdates)
+	a.drawHairline(toggleRect.Min.X, toggleRect.Max.X, toggleRect.Max.Y)
+
+	// Primary action row (either Install now or Check for updates).
+	primary := image.Rect(a.layout.margin, btnY1, a.layout.margin+contentW, btnY2)
 	var installBtn, checkBtn image.Rectangle
 	if available && !installed && !downloading {
 		installBtn = primary
@@ -3335,22 +3580,10 @@ func (a *app) drawUpdate() {
 		ink.DrawRect(installBtn.Inset(2), ink.Black)
 		drawCenteredText(btnFont, installBtn, "Install now", a.layout.fpx(44))
 	} else if !downloading && !installed && !checking {
-		// Suppress the manual check button while a check is already in
-		// flight; the status line above reads "Checking for updates..."
-		// which would otherwise fight the button's "Check for updates"
-		// label and confuse users about whether the check is happening.
 		checkBtn = primary
 		ink.DrawRect(checkBtn, ink.Black)
 		drawCenteredText(btnFont, checkBtn, "Check for updates", a.layout.fpx(44))
 	}
-
-	toggleRect := image.Rect(a.layout.margin, toggleY1, a.layout.margin+contentW, toggleY2)
-	toggleLabel := "Automatic weekly checks: off  (tap to enable)"
-	if a.cfg.CheckUpdates {
-		toggleLabel = "Automatic weekly checks: on  (tap to disable)"
-	}
-	ink.DrawRect(toggleRect, ink.Black)
-	drawCenteredText(btnFont, toggleRect, toggleLabel, a.layout.fpx(44))
 
 	a.update.mu.Lock()
 	a.update.installBtn = installBtn
