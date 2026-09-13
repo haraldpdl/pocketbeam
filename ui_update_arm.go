@@ -260,17 +260,16 @@ func (a *app) drawUpdateStatus(u updateSnapshot) {
 
 // refreshUpdateProgress repaints the status block from the download
 // goroutine and pushes only that strip. The reader already throttles the
-// callback to percentage changes; keeping each of those off the
-// full-repaint path is what stops an install from flashing the whole
-// panel a hundred times.
+// callback; keeping each of those off the full-repaint path is what
+// stops an install from flashing the whole panel a hundred times.
+//
+// The user can leave mid-download, so the draw runs under DrawIfOn:
+// whatever screen replaced this one owns those pixels.
 func (a *app) refreshUpdateProgress() {
-	// The user can leave mid-download; whatever screen replaced this one
-	// owns those pixels now.
-	if a.Screen() != screenUpdate {
-		return
-	}
-	a.drawUpdateStatus(a.update.snapshot())
-	ink.PartialUpdate(a.updateStatusArea())
+	a.DrawIfOn(screenUpdate, func() {
+		a.drawUpdateStatus(a.update.snapshot())
+		ink.PartialUpdate(a.updateStatusArea())
+	})
 }
 
 func (a *app) drawUpdate() {

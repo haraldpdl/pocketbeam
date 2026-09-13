@@ -214,11 +214,16 @@ func (a *app) drawMainProgressContent(body *ink.Font) {
 }
 
 // refreshProgress redraws only the progress strip and pushes it with a
-// partial e-ink update, so the rest of the main screen stays stable.
+// partial e-ink update, so the rest of the main screen stays stable. A
+// sync keeps running while the user is elsewhere - on Settings, or on
+// the deletion prompt the sync itself raised - so the draw runs under
+// DrawIfOn and is dropped whenever the main screen is not the one up.
 func (a *app) refreshProgress() {
-	body := a.font(ink.DefaultFont, 32)
-	a.drawMainProgressContent(body)
-	ink.PartialUpdate(a.layout.progressArea)
+	a.DrawIfOn(screenMain, func() {
+		body := a.font(ink.DefaultFont, 32)
+		a.drawMainProgressContent(body)
+		ink.PartialUpdate(a.layout.progressArea)
+	})
 }
 
 func (a *app) mainKey(e ink.KeyEvent) bool {
@@ -585,20 +590,21 @@ func (a *app) drawLibraryRefresh() {
 // current dot count and pushes a partial e-ink update. Called from the
 // spinner ticker goroutine.
 func (a *app) refreshLibRefreshDots() {
-	body := a.font(ink.DefaultFont, 32)
-	body.SetActive(ink.Black)
+	a.DrawIfOn(screenLibraryRefresh, func() {
+		a.libRefresh.mu.Lock()
+		dots := a.libRefresh.dots
+		rect := a.libRefresh.rect
+		a.libRefresh.mu.Unlock()
+		if rect.Empty() {
+			return
+		}
 
-	a.libRefresh.mu.Lock()
-	dots := a.libRefresh.dots
-	rect := a.libRefresh.rect
-	a.libRefresh.mu.Unlock()
-	if rect.Empty() {
-		return
-	}
-
-	ink.FillArea(rect, ink.White)
-	ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(400)}, "Indexing new books on the device"+strings.Repeat(".", dots))
-	ink.PartialUpdate(rect)
+		body := a.font(ink.DefaultFont, 32)
+		body.SetActive(ink.Black)
+		ink.FillArea(rect, ink.White)
+		ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(400)}, "Indexing new books on the device"+strings.Repeat(".", dots))
+		ink.PartialUpdate(rect)
+	})
 }
 
 // startLibRefreshSpinner kicks off the trailing-dots animation on

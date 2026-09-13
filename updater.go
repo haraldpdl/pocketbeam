@@ -15,6 +15,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // UserAgentFn returns the HTTP User-Agent used by updater requests.
@@ -240,6 +241,15 @@ func Install(stagedPath, targetPath string) error {
 // a KB counter, so the step is what bounds the repaints instead.
 const progressByteStep = 512 << 10
 
+// progressMinInterval is the shortest gap between progress callbacks.
+// Percentage points alone do not bound the repaints on a fast link: a
+// 4 MB asset that arrives in eight seconds still steps through a hundred
+// of them, and each one costs the UI a grayscale partial update the
+// panel needs a few hundred milliseconds for. The display queue then
+// lags the transfer instead of tracking it. Four updates a second is
+// already more than the user can read.
+const progressMinInterval = 250 * time.Millisecond
+
 // countingReader wraps an io.Reader and invokes cb with the running
 // total + the announced Content-Length (or -1 when unknown). Gives the
 // UI enough information to show a percentage bar when the server
@@ -254,8 +264,20 @@ type countingReader struct {
 	n        int64
 	total    int64
 	cb       func(written, total int64)
-	reported int64 // c.n as of the last callback; 0 until the first one
-	pct      int   // percentage passed to the last callback, -1 when unknown
+	reported int64     // c.n as of the last callback; 0 until the first one
+	pct      int       // percentage passed to the last callback, -1 when unknown
+	last     time.Time // when the last callback went out
+	// now reads the clock; nil means time.Now. Injected by the tests so
+	// the time floor is pinned by the test rather than by how fast the
+	// machine runs.
+	now func() time.Time
+}
+
+func (c *countingReader) clock() time.Time {
+	if c.now != nil {
+		return c.now()
+	}
+	return time.Now()
 }
 
 func (c *countingReader) Read(p []byte) (int, error) {
@@ -269,16 +291,20 @@ func (c *countingReader) Read(p []byte) (int, error) {
 
 // report decides whether the bytes read so far are worth a callback and
 // records what was reported. The first bytes always are: that call is
-// what hands the UI the announced total. After that a known total
-// reports once per whole percentage point, and an unknown one once per
-// progressByteStep.
+// what hands the UI the announced total. After that a callback needs
+// both progressMinInterval since the last one and something new to show:
+// a whole percentage point with a known total, progressByteStep without
+// one.
 func (c *countingReader) report() bool {
+	now := c.clock()
 	pct := -1
 	if c.total > 0 {
 		pct = int(100 * c.n / c.total)
 	}
 	switch {
 	case c.reported == 0: // nothing reported yet
+	case now.Sub(c.last) < progressMinInterval:
+		return false
 	case pct >= 0:
 		if pct == c.pct {
 			return false
@@ -288,6 +314,7 @@ func (c *countingReader) report() bool {
 	}
 	c.reported = c.n
 	c.pct = pct
+	c.last = now
 	return true
 }
 

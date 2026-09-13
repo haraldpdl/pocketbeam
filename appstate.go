@@ -85,6 +85,15 @@ type mainStats struct {
 type appState struct {
 	mu sync.Mutex
 
+	// drawMu serializes screen transitions against the partial draws the
+	// background goroutines push. Testing the screen and drawing are two
+	// steps: without this lock a goroutine can pass the test, the event
+	// loop can switch screens and repaint, and the goroutine then paints
+	// its strip over the new screen with nothing queued to clean it up.
+	// It is not mu because the draw callbacks reach back into the
+	// accessors, which take mu themselves.
+	drawMu sync.Mutex
+
 	screen screen
 	// cfg is immutable once published. Edits go through UpdateConfig,
 	// which mutates a copy and swaps the pointer in, so a goroutine that
@@ -104,11 +113,31 @@ func (s *appState) Screen() screen {
 }
 
 // SetScreen records a screen transition. Repainting stays with the
-// caller: some transitions arm a spinner or open a keyboard first.
+// caller: some transitions arm a spinner or open a keyboard first. It
+// waits for any in-flight DrawIfOn, so a transition never lands in the
+// middle of a background goroutine's draw.
 func (s *appState) SetScreen(to screen) {
+	s.drawMu.Lock()
+	defer s.drawMu.Unlock()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.screen = to
+}
+
+// DrawIfOn runs draw only while the app is on want, and blocks screen
+// transitions for its duration. Every draw a goroutine outside the
+// InkView event loop pushes goes through here: the goroutine owns those
+// pixels only as long as the screen it drew for is still up.
+func (s *appState) DrawIfOn(want screen, draw func()) {
+	s.drawMu.Lock()
+	defer s.drawMu.Unlock()
+	s.mu.Lock()
+	cur := s.screen
+	s.mu.Unlock()
+	if cur != want {
+		return
+	}
+	draw()
 }
 
 // Config returns the active profile's config, or nil when no profile is

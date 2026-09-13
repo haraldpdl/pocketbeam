@@ -242,3 +242,67 @@ func TestBackTarget(t *testing.T) {
 		})
 	}
 }
+
+// TestDrawIfOnSkipsAfterScreenChange pins the no-op half of the rule: a
+// draw queued for a screen the app has already left must not run.
+func TestDrawIfOnSkipsAfterScreenChange(t *testing.T) {
+	var s appState
+	s.SetScreen(screenUpdate)
+	s.SetScreen(screenSettings)
+
+	ran := false
+	s.DrawIfOn(screenUpdate, func() { ran = true })
+	if ran {
+		t.Error("draw ran for a screen the app had already left")
+	}
+	s.DrawIfOn(screenSettings, func() { ran = true })
+	if !ran {
+		t.Error("draw for the current screen did not run")
+	}
+}
+
+// TestDrawIfOnBlocksScreenChange pins the atomic half: a screen
+// transition raised while a draw is in flight waits for that draw
+// instead of landing in the middle of it, which is what would leave a
+// background goroutine's strip painted over the next screen.
+func TestDrawIfOnBlocksScreenChange(t *testing.T) {
+	var s appState
+	s.SetScreen(screenUpdate)
+
+	drawing := make(chan struct{})
+	release := make(chan struct{})
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() { // stands in for the download goroutine
+		defer wg.Done()
+		s.DrawIfOn(screenUpdate, func() {
+			close(drawing)
+			<-release
+		})
+	}()
+
+	<-drawing
+	wg.Add(1)
+	go func() { // stands in for a Back tap on the event loop
+		defer wg.Done()
+		s.SetScreen(screenSettings)
+	}()
+
+	// While the draw holds the lock the transition cannot take effect,
+	// so the screen the draw is painting for stays up.
+	deadline := time.Now().Add(50 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		if got := s.Screen(); got != screenUpdate {
+			close(release)
+			wg.Wait()
+			t.Fatalf("screen became %v while a draw was in flight", got)
+		}
+	}
+	close(release)
+	wg.Wait()
+
+	if got := s.Screen(); got != screenSettings {
+		t.Errorf("screen after the transition = %v, want screenSettings", got)
+	}
+}

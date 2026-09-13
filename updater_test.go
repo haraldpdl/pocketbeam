@@ -12,10 +12,12 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"testing/iotest"
+	"time"
 )
 
 func TestSemverGreater(t *testing.T) {
@@ -515,9 +517,24 @@ func TestInstall_FailedRenameRemovesStaged(t *testing.T) {
 	}
 }
 
+// stepClock returns a clock that advances by step on every call, so the
+// reader's time floor is decided by the test rather than by how fast the
+// machine runs the reads.
+func stepClock(step time.Duration) func() time.Time {
+	base := time.Unix(0, 0)
+	var calls int64
+	return func() time.Time {
+		t := base.Add(time.Duration(calls) * step)
+		calls++
+		return t
+	}
+}
+
 // TestCountingReader_ThrottlesToPercentChanges pins the rule that keeps a
 // download from costing one e-ink refresh per 32 KB read: with a known
-// total the callback fires once per whole percentage point.
+// total the callback fires once per whole percentage point. The clock
+// runs a second per read here so the time floor never binds and the
+// percentage rule is what the assertions see.
 func TestCountingReader_ThrottlesToPercentChanges(t *testing.T) {
 	const total = 1 << 20
 	var pcts []int
@@ -526,6 +543,7 @@ func TestCountingReader_ThrottlesToPercentChanges(t *testing.T) {
 		// throttle is what decides how many callbacks come out.
 		r:     iotest.OneByteReader(bytes.NewReader(make([]byte, total))),
 		total: total,
+		now:   stepClock(time.Second),
 		cb: func(written, tot int64) {
 			if tot != total {
 				t.Errorf("progress total = %d, want %d", tot, total)
@@ -560,6 +578,7 @@ func TestCountingReader_UnknownTotalStepsByBytes(t *testing.T) {
 	c := &countingReader{
 		r:     iotest.OneByteReader(bytes.NewReader(make([]byte, size))),
 		total: -1,
+		now:   stepClock(time.Second),
 		cb: func(written, tot int64) {
 			if tot != -1 {
 				t.Errorf("progress total = %d, want -1", tot)
@@ -581,5 +600,37 @@ func TestCountingReader_UnknownTotalStepsByBytes(t *testing.T) {
 		if got[i] != want[i] {
 			t.Fatalf("callbacks = %v, want %v", got, want)
 		}
+	}
+}
+
+// TestCountingReader_ThrottlesToTimeFloor covers the fast link the
+// percentage rule alone does not bound: bytes arriving quickly enough to
+// step a percentage point every 100 ms must still not produce more than
+// one callback per progressMinInterval.
+func TestCountingReader_ThrottlesToTimeFloor(t *testing.T) {
+	const total = 1000 // one byte per read => a percentage point per 10 reads
+	var got []int64
+	c := &countingReader{
+		r:     iotest.OneByteReader(bytes.NewReader(make([]byte, total))),
+		total: total,
+		// 10 ms per read: percentage points come 100 ms apart, well
+		// inside the 250 ms floor.
+		now: stepClock(10 * time.Millisecond),
+		cb: func(written, tot int64) {
+			got = append(got, written)
+		},
+	}
+	if _, err := io.Copy(io.Discard, c); err != nil {
+		t.Fatalf("Copy: %v", err)
+	}
+	c.flush()
+	// The first read, then one every 25 reads (250 ms), then the flush.
+	var want []int64
+	for n := int64(1); n <= total; n += int64(progressMinInterval / (10 * time.Millisecond)) {
+		want = append(want, n)
+	}
+	want = append(want, total)
+	if !slices.Equal(got, want) {
+		t.Fatalf("callbacks = %v, want %v", got, want)
 	}
 }
