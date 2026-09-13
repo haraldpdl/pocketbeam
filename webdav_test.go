@@ -282,6 +282,50 @@ func TestWebDAVSource_SharesNegotiatedAuth(t *testing.T) {
 	}
 }
 
+// TestWebDAVSource_SharesConnectionPool pins that ProbeWebDAV and a
+// separately built sync source share one connection pool. Each caller
+// builds its own WebDAVSource, so the pool has to live at package level
+// (webdavTransport) or every probe and picker level would dial afresh
+// and leave an idle connection behind in its own transport.
+//
+// The bound is 2, not 1: a fresh gowebdav Authorizer probes the server
+// with an X-Gowebdav-Inhibit-Redirect request whose body it closes
+// unread, which discards that connection, and the real request dials
+// again. With the shared pool the sync source's negotiation reuses the
+// probe's connection (2 in total); with a per-source transport it dials
+// twice on its own (3).
+func TestWebDAVSource_SharesConnectionPool(t *testing.T) {
+	const stamp = "Mon, 02 Jan 2006 15:04:05 GMT"
+	srv := httptest.NewUnstartedServer(webdavMockHandler(webdavPropfindResponses{
+		"/Books/": propfindResponse([]webdavEntry{
+			{href: "/Books/", isDir: true, mtime: stamp},
+			{href: "/Books/only.epub", mtime: stamp},
+		}),
+	}))
+	var conns atomic.Int32
+	srv.Config.ConnState = func(_ net.Conn, st http.ConnState) {
+		if st == http.StateNew {
+			conns.Add(1)
+		}
+	}
+	srv.Start()
+	defer srv.Close()
+
+	if err := ProbeWebDAV(context.Background(), srv.URL, "", "", "/Books"); err != nil {
+		t.Fatalf("ProbeWebDAV: %v", err)
+	}
+	books, err := NewWebDAVSource(srv.URL, "", "", "/Books").List(context.Background())
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(books) != 1 {
+		t.Fatalf("got %d books, want 1", len(books))
+	}
+	if got := conns.Load(); got > 2 {
+		t.Errorf("server saw %d connections, want at most 2 (probe and sync share the pool)", got)
+	}
+}
+
 func TestNormaliseRoot(t *testing.T) {
 	cases := map[string]string{
 		"":            "/",

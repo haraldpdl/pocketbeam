@@ -21,15 +21,21 @@ import (
 //
 // gowebdav has no context-aware API, so every operation builds a
 // short-lived client whose transport injects the caller's context (see
-// client). The negotiated auth method lives in the shared Authorizer and
-// the connection pool in the shared transport, so per-call clients cost
+// client). The negotiated auth method lives in the source's Authorizer
+// and the connection pool in webdavTransport, so per-call clients cost
 // nothing extra on the wire.
 type WebDAVSource struct {
-	host      string
-	auth      gowebdav.Authorizer
-	transport http.RoundTripper
-	Root      string // absolute path on the server, e.g. "/Books/Fiction"
+	host string
+	auth gowebdav.Authorizer
+	Root string // absolute path on the server, e.g. "/Books/Fiction"
 }
+
+// webdavTransport is the one connection pool for every WebDAV client.
+// ProbeWebDAV, the directory picker and the sync source each build their
+// own WebDAVSource; sharing the pool lets the listing reuse the probe's
+// keep-alive connection instead of paying a fresh TCP+TLS handshake per
+// source and leaving an idle connection behind for each one.
+var webdavTransport = newTransport()
 
 // extToFormat maps supported ebook/comic extensions to the OPDS-style mime
 // types the rest of pocketbeam keys on (see formatExt in sync.go).
@@ -88,10 +94,9 @@ func classifyWebDAVError(err error) error {
 // use ProbeWebDAV up front to validate credentials.
 func NewWebDAVSource(host, user, pass, rootPath string) *WebDAVSource {
 	return &WebDAVSource{
-		host:      host,
-		auth:      gowebdav.NewAutoAuth(user, pass),
-		transport: newTransport(),
-		Root:      normaliseRoot(rootPath),
+		host: host,
+		auth: gowebdav.NewAutoAuth(user, pass),
+		Root: normaliseRoot(rootPath),
 	}
 }
 
@@ -102,7 +107,7 @@ func NewWebDAVSource(host, user, pass, rootPath string) *WebDAVSource {
 func (s *WebDAVSource) client(ctx context.Context) *gowebdav.Client {
 	c := gowebdav.NewAuthClient(s.host, s.auth)
 	c.SetHeader("User-Agent", "pocketbeam/"+version)
-	c.SetTransport(ctxTransport{ctx: ctx, base: s.transport})
+	c.SetTransport(ctxTransport{ctx: ctx, base: webdavTransport})
 	return c
 }
 
