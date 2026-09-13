@@ -306,3 +306,50 @@ func TestDrawIfOnBlocksScreenChange(t *testing.T) {
 		t.Errorf("screen after the transition = %v, want screenSettings", got)
 	}
 }
+
+// TestDrawFullExcludesPartialDraw pins that a full repaint and a
+// background goroutine's partial one cannot overlap: they share
+// InkView's single active face, and a full pass clears the screen before
+// it redraws, so an interleaved partial draw renders in the wrong face
+// or is wiped by the clear.
+func TestDrawFullExcludesPartialDraw(t *testing.T) {
+	var s appState
+	s.SetScreen(screenMain)
+
+	full := make(chan struct{})
+	release := make(chan struct{})
+	partialRan := make(chan struct{})
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() { // stands in for the event loop running Draw
+		defer wg.Done()
+		s.DrawFull(func() {
+			close(full)
+			<-release
+		})
+	}()
+
+	<-full
+	wg.Add(1)
+	go func() { // stands in for the sync progress ticker
+		defer wg.Done()
+		s.DrawIfOn(screenMain, func() { close(partialRan) })
+	}()
+
+	select {
+	case <-partialRan:
+		close(release)
+		wg.Wait()
+		t.Fatal("partial draw ran while a full repaint was in flight")
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(release)
+
+	select {
+	case <-partialRan:
+	case <-time.After(time.Second):
+		t.Fatal("partial draw did not run after the full repaint finished")
+	}
+	wg.Wait()
+}

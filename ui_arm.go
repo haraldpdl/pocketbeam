@@ -184,7 +184,8 @@ func (a *app) Init() error {
 }
 
 func (a *app) Close() error {
-	a.closeFonts()
+	// Cached faces are deliberately not closed here; see fontCache in
+	// ui_draw_arm.go.
 	if store := a.Store(); store != nil {
 		_ = store.Close()
 	}
@@ -194,7 +195,17 @@ func (a *app) Close() error {
 	return nil
 }
 
+// Draw paints the current screen. InkView runs it from the event loop
+// for the repaints ink.Repaint queues, including the ones background
+// goroutines queue, so it runs under DrawFull: ClearScreen, the screen
+// and FullUpdate have to land as one pass, or a progress tick's partial
+// draw interleaves with it and paints in the wrong face or over a
+// freshly cleared screen.
 func (a *app) Draw() {
+	a.DrawFull(a.drawCurrentScreen)
+}
+
+func (a *app) drawCurrentScreen() {
 	// Every repaint starts without the busy icon; a screen that is still
 	// loading raises it again below. This is what takes the hourglass
 	// down when a picker fetch fails or the user leaves mid-load.

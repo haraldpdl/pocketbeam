@@ -85,13 +85,15 @@ type mainStats struct {
 type appState struct {
 	mu sync.Mutex
 
-	// drawMu serializes screen transitions against the partial draws the
-	// background goroutines push. Testing the screen and drawing are two
-	// steps: without this lock a goroutine can pass the test, the event
-	// loop can switch screens and repaint, and the goroutine then paints
-	// its strip over the new screen with nothing queued to clean it up.
-	// It is not mu because the draw callbacks reach back into the
-	// accessors, which take mu themselves.
+	// drawMu serializes every repaint - the event loop's full passes
+	// (DrawFull) and the partial ones the background goroutines push
+	// (DrawIfOn) - against each other and against screen transitions.
+	// Testing the screen and drawing are two steps: without this lock a
+	// goroutine can pass the test, the event loop can switch screens and
+	// repaint, and the goroutine then paints its strip over the new
+	// screen with nothing queued to clean it up. It is not mu because
+	// the draw callbacks reach back into the accessors, which take mu
+	// themselves.
 	drawMu sync.Mutex
 
 	screen screen
@@ -137,6 +139,18 @@ func (s *appState) DrawIfOn(want screen, draw func()) {
 	if cur != want {
 		return
 	}
+	draw()
+}
+
+// DrawFull runs a whole-screen repaint under the same lock DrawIfOn
+// takes, so a full pass and a goroutine's partial one cannot interleave.
+// They share InkView's single active face and colour, and a full pass
+// clears the screen before it draws, so an unserialized overlap renders
+// labels in the wrong face or leaves a blank band where the partial draw
+// landed between the clear and the redraw.
+func (s *appState) DrawFull(draw func()) {
+	s.drawMu.Lock()
+	defer s.drawMu.Unlock()
 	draw()
 }
 

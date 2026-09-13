@@ -25,8 +25,14 @@ type fontKey struct {
 // that cost on every repaint - including the ones a download or sync
 // progress tick fires several times a second. A face is immutable once
 // opened (SetActive only selects it and a colour for the draw calls that
-// follow), so one handle per family and size serves the whole app and is
-// closed on exit.
+// follow), so one handle per family and size serves the whole app.
+//
+// The faces live for the process lifetime deliberately: InkView calls
+// Close from its event loop on EVT_EXIT without joining our draw
+// goroutines, so closing a shared handle there could free an ifont a
+// progress tick is between SetActive and DrawString on. The relaunch
+// path (syscall.Exec) already relies on the process teardown to release
+// them.
 //
 // mu guards the map because the goroutines that push partial updates
 // (sync progress, update download, the library-refresh spinner) draw
@@ -37,33 +43,29 @@ type fontCache struct {
 }
 
 // font returns the shared face for family at base px, scaled for this
-// screen. A face InkView refuses to open is cached as nil instead of
-// being retried on every draw; ink.Font's methods are nil-safe, so that
-// text simply does not appear, exactly as before.
+// screen. Only a face that opened is memoised: OpenFont can fail
+// transiently (memory pressure while the sync goroutine streams a book,
+// a briefly busy /ebrmain mount), and caching that nil would retire the
+// size for the rest of the session - ink.Font's methods are nil-safe, so
+// DrawString would silently keep painting in whichever face was last
+// active. Retrying costs one failed open per draw and the text is back
+// on the next pass, which is how it behaved before the cache.
 func (a *app) font(family string, base int) *ink.Font {
 	k := fontKey{family: family, px: a.layout.fpx(base)}
 	a.fonts.mu.Lock()
 	defer a.fonts.mu.Unlock()
-	if f, ok := a.fonts.m[k]; ok {
+	if f := a.fonts.m[k]; f != nil {
 		return f
 	}
 	f := ink.OpenFont(k.family, k.px, true)
+	if f == nil {
+		return nil
+	}
 	if a.fonts.m == nil {
 		a.fonts.m = make(map[fontKey]*ink.Font)
 	}
 	a.fonts.m[k] = f
 	return f
-}
-
-// closeFonts releases every cached face. Called from app.Close; the
-// relaunch path skips it because exec replaces the process wholesale.
-func (a *app) closeFonts() {
-	a.fonts.mu.Lock()
-	defer a.fonts.mu.Unlock()
-	for k, f := range a.fonts.m {
-		f.Close()
-		delete(a.fonts.m, k)
-	}
 }
 
 // drawCenteredText writes s centered inside rect using the given font. fontPx
