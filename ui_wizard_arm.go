@@ -14,12 +14,10 @@ import (
 )
 
 func (a *app) drawWizard() {
-	title := ink.OpenFont(ink.DefaultFontBold, a.layout.fpx(54), true)
-	defer title.Close()
+	title := a.font(ink.DefaultFontBold, 54)
 	title.SetActive(ink.Black)
 
-	body := ink.OpenFont(ink.DefaultFont, a.layout.fpx(32), true)
-	defer body.Close()
+	body := a.font(ink.DefaultFont, 32)
 	body.SetActive(ink.Black)
 
 	// One snapshot for the whole pass: the probe goroutine can move the
@@ -63,10 +61,8 @@ func (a *app) drawWizard() {
 		body.SetActive(ink.DarkGray)
 		ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(260)}, "Tap the option that matches your server.")
 
-		rowTitleFont := ink.OpenFont(ink.DefaultFontBold, a.layout.fpx(36), true)
-		defer rowTitleFont.Close()
-		rowSubFont := ink.OpenFont(ink.DefaultFont, a.layout.fpx(28), true)
-		defer rowSubFont.Close()
+		rowTitleFont := a.font(ink.DefaultFontBold, 36)
+		rowSubFont := a.font(ink.DefaultFont, 28)
 
 		w := a.layout.screen.X
 		btnW := w - 2*a.layout.margin

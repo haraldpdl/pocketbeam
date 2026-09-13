@@ -67,23 +67,14 @@ func (a *app) openProfileList() {
 }
 
 func (a *app) drawProfileList() {
-	title := ink.OpenFont(ink.DefaultFontBold, a.layout.fpx(64), true)
-	defer title.Close()
+	title := a.font(ink.DefaultFontBold, 64)
 	title.SetActive(ink.Black)
 
-	body := ink.OpenFont(ink.DefaultFont, a.layout.fpx(32), true)
-	defer body.Close()
-
-	rowTitleFont := ink.OpenFont(ink.DefaultFontBold, a.layout.fpx(36), true)
-	defer rowTitleFont.Close()
-	rowSubFont := ink.OpenFont(ink.DefaultFont, a.layout.fpx(28), true)
-	defer rowSubFont.Close()
-
-	btnFont := ink.OpenFont(ink.DefaultFontBold, a.layout.fpx(44), true)
-	defer btnFont.Close()
-
-	smallFont := ink.OpenFont(ink.DefaultFont, a.layout.fpx(26), true)
-	defer smallFont.Close()
+	body := a.font(ink.DefaultFont, 32)
+	rowTitleFont := a.font(ink.DefaultFontBold, 36)
+	rowSubFont := a.font(ink.DefaultFont, 28)
+	btnFont := a.font(ink.DefaultFontBold, 44)
+	smallFont := a.font(ink.DefaultFont, 26)
 
 	a.profileList.mu.Lock()
 	names := append([]string(nil), a.profileList.names...)
@@ -309,16 +300,13 @@ func (a *app) openProfileDetail(name string) {
 }
 
 func (a *app) drawProfileDetail() {
-	title := ink.OpenFont(ink.DefaultFontBold, a.layout.fpx(64), true)
-	defer title.Close()
+	title := a.font(ink.DefaultFontBold, 64)
 	title.SetActive(ink.Black)
 
-	body := ink.OpenFont(ink.DefaultFont, a.layout.fpx(32), true)
-	defer body.Close()
+	body := a.font(ink.DefaultFont, 32)
 	body.SetActive(ink.Black)
 
-	btnFont := ink.OpenFont(ink.DefaultFontBold, a.layout.fpx(44), true)
-	defer btnFont.Close()
+	btnFont := a.font(ink.DefaultFontBold, 44)
 
 	a.profileDetail.mu.Lock()
 	name := a.profileDetail.name

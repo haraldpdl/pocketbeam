@@ -107,22 +107,14 @@ func (a *app) fetchDirEntries(ctx context.Context, cancel context.CancelFunc, p 
 }
 
 func (a *app) drawDirPicker() {
-	title := ink.OpenFont(ink.DefaultFontBold, a.layout.fpx(64), true)
-	defer title.Close()
+	title := a.font(ink.DefaultFontBold, 64)
 	title.SetActive(ink.Black)
 
-	body := ink.OpenFont(ink.DefaultFont, a.layout.fpx(32), true)
-	defer body.Close()
-
-	rowTitleFont := ink.OpenFont(ink.DefaultFontBold, a.layout.fpx(36), true)
-	defer rowTitleFont.Close()
-	rowSubFont := ink.OpenFont(ink.DefaultFont, a.layout.fpx(28), true)
-	defer rowSubFont.Close()
-	smallFont := ink.OpenFont(ink.DefaultFont, a.layout.fpx(26), true)
-	defer smallFont.Close()
-
-	btnFont := ink.OpenFont(ink.DefaultFontBold, a.layout.fpx(44), true)
-	defer btnFont.Close()
+	body := a.font(ink.DefaultFont, 32)
+	rowTitleFont := a.font(ink.DefaultFontBold, 36)
+	rowSubFont := a.font(ink.DefaultFont, 28)
+	smallFont := a.font(ink.DefaultFont, 26)
+	btnFont := a.font(ink.DefaultFontBold, 44)
 
 	a.dirPicker.mu.Lock()
 	loading := a.dirPicker.loading

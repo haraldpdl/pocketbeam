@@ -65,20 +65,11 @@ type syncState struct {
 }
 
 func (a *app) drawMain() {
-	title := ink.OpenFont(ink.DefaultFontBold, a.layout.fpx(64), true)
-	defer title.Close()
-
-	hero := ink.OpenFont(ink.DefaultFontBold, a.layout.fpx(48), true)
-	defer hero.Close()
-
-	body := ink.OpenFont(ink.DefaultFont, a.layout.fpx(32), true)
-	defer body.Close()
-
-	small := ink.OpenFont(ink.DefaultFont, a.layout.fpx(26), true)
-	defer small.Close()
-
-	btnFont := ink.OpenFont(ink.DefaultFontBold, a.layout.fpx(44), true)
-	defer btnFont.Close()
+	title := a.font(ink.DefaultFontBold, 64)
+	hero := a.font(ink.DefaultFontBold, 48)
+	body := a.font(ink.DefaultFont, 32)
+	small := a.font(ink.DefaultFont, 26)
+	btnFont := a.font(ink.DefaultFontBold, 44)
 
 	cfg := a.Config()
 	stats := a.Stats()
@@ -225,8 +216,7 @@ func (a *app) drawMainProgressContent(body *ink.Font) {
 // refreshProgress redraws only the progress strip and pushes it with a
 // partial e-ink update, so the rest of the main screen stays stable.
 func (a *app) refreshProgress() {
-	body := ink.OpenFont(ink.DefaultFont, a.layout.fpx(32), true)
-	defer body.Close()
+	body := a.font(ink.DefaultFont, 32)
 	a.drawMainProgressContent(body)
 	ink.PartialUpdate(a.layout.progressArea)
 }
@@ -571,12 +561,10 @@ func formatElapsed(d time.Duration) string {
 // backdrop the user returns to when scanner exits, right before the
 // goroutine flips back to screenMain.
 func (a *app) drawLibraryRefresh() {
-	title := ink.OpenFont(ink.DefaultFontBold, a.layout.fpx(54), true)
-	defer title.Close()
+	title := a.font(ink.DefaultFontBold, 54)
 	title.SetActive(ink.Black)
 
-	body := ink.OpenFont(ink.DefaultFont, a.layout.fpx(32), true)
-	defer body.Close()
+	body := a.font(ink.DefaultFont, 32)
 	body.SetActive(ink.Black)
 
 	title.SetActive(ink.Black)
@@ -597,8 +585,7 @@ func (a *app) drawLibraryRefresh() {
 // current dot count and pushes a partial e-ink update. Called from the
 // spinner ticker goroutine.
 func (a *app) refreshLibRefreshDots() {
-	body := ink.OpenFont(ink.DefaultFont, a.layout.fpx(32), true)
-	defer body.Close()
+	body := a.font(ink.DefaultFont, 32)
 	body.SetActive(ink.Black)
 
 	a.libRefresh.mu.Lock()

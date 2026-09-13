@@ -15,6 +15,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"testing/iotest"
 )
 
 func TestSemverGreater(t *testing.T) {
@@ -511,5 +512,74 @@ func TestInstall_FailedRenameRemovesStaged(t *testing.T) {
 	}
 	if _, err := os.Stat(staged); !os.IsNotExist(err) {
 		t.Errorf("staged file should be cleaned up after a failed install: %v", err)
+	}
+}
+
+// TestCountingReader_ThrottlesToPercentChanges pins the rule that keeps a
+// download from costing one e-ink refresh per 32 KB read: with a known
+// total the callback fires once per whole percentage point.
+func TestCountingReader_ThrottlesToPercentChanges(t *testing.T) {
+	const total = 1 << 20
+	var pcts []int
+	c := &countingReader{
+		// One byte per read: the finest possible granularity, so the
+		// throttle is what decides how many callbacks come out.
+		r:     iotest.OneByteReader(bytes.NewReader(make([]byte, total))),
+		total: total,
+		cb: func(written, tot int64) {
+			if tot != total {
+				t.Errorf("progress total = %d, want %d", tot, total)
+			}
+			pcts = append(pcts, int(100*written/tot))
+		},
+	}
+	n, err := io.Copy(io.Discard, c)
+	if err != nil || n != total {
+		t.Fatalf("Copy = (%d, %v), want (%d, nil)", n, err, total)
+	}
+	c.flush()
+	// A million reads, of which only the 101 distinct percentages
+	// (0 through 100) may reach the UI.
+	if len(pcts) != 101 {
+		t.Fatalf("callbacks = %d, want 101 (one per percentage point)", len(pcts))
+	}
+	for i, p := range pcts {
+		if p != i {
+			t.Fatalf("callback %d reported %d%%, want %d%%", i, p, i)
+		}
+	}
+}
+
+// TestCountingReader_UnknownTotalStepsByBytes covers the chunked-transfer
+// case: no Content-Length means no percentage to watch, so the callback
+// is bounded by progressByteStep instead, and the final count is always
+// reported.
+func TestCountingReader_UnknownTotalStepsByBytes(t *testing.T) {
+	const size = 2*progressByteStep + 1000
+	var got []int64
+	c := &countingReader{
+		r:     iotest.OneByteReader(bytes.NewReader(make([]byte, size))),
+		total: -1,
+		cb: func(written, tot int64) {
+			if tot != -1 {
+				t.Errorf("progress total = %d, want -1", tot)
+			}
+			got = append(got, written)
+		},
+	}
+	if _, err := io.Copy(io.Discard, c); err != nil {
+		t.Fatalf("Copy: %v", err)
+	}
+	c.flush()
+	// A million-odd reads, of which only the first, the two step
+	// boundaries and the closing flush may reach the UI.
+	want := []int64{1, progressByteStep + 1, 2*progressByteStep + 1, size}
+	if len(got) != len(want) {
+		t.Fatalf("callbacks = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("callbacks = %v, want %v", got, want)
+		}
 	}
 }

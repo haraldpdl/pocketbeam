@@ -133,7 +133,8 @@ func CheckLatest(ctx context.Context, endpoint, currentVersion string) (newer bo
 // progress (if non-nil) reports cumulative bytes downloaded over the
 // wire and the Content-Length total (-1 when unknown), so the UI's
 // percentage matches what's actually being fetched rather than the
-// final on-disk size. The verified file is flushed to the medium before
+// final on-disk size; it is called when that percentage changes, not on
+// every read. The verified file is flushed to the medium before
 // Download returns, so the Install rename that follows cannot publish a
 // binary whose bytes never reached storage. On failure the incomplete
 // file is removed.
@@ -173,7 +174,8 @@ func Download(ctx context.Context, rel Release, destPath string, progress func(w
 	// Wire counter wraps the raw HTTP body so progress reflects bytes
 	// over Wi-Fi; when compressed we then layer a gzip reader on top so
 	// the hash and file writes see the decompressed binary.
-	var src io.Reader = &countingReader{r: resp.Body, total: resp.ContentLength, cb: progress}
+	counter := &countingReader{r: resp.Body, total: resp.ContentLength, cb: progress}
+	var src io.Reader = counter
 	if compressed {
 		gzr, err := gzip.NewReader(src)
 		if err != nil {
@@ -193,6 +195,7 @@ func Download(ctx context.Context, rel Release, destPath string, progress func(w
 		os.Remove(destPath)
 		return err
 	}
+	counter.flush()
 	if err := syncClose(f); err != nil {
 		os.Remove(destPath)
 		return err
@@ -231,24 +234,71 @@ func Install(stagedPath, targetPath string) error {
 	return nil
 }
 
+// progressByteStep is how many bytes must arrive between progress
+// callbacks when the server announced no Content-Length. Without a total
+// there is no percentage to watch for changes, and the UI falls back to
+// a KB counter, so the step is what bounds the repaints instead.
+const progressByteStep = 512 << 10
+
 // countingReader wraps an io.Reader and invokes cb with the running
-// total + the announced Content-Length (or -1 when unknown) after each
-// read. Gives the UI enough information to show a percentage bar when
-// the server advertised a size and a raw byte counter otherwise.
+// total + the announced Content-Length (or -1 when unknown). Gives the
+// UI enough information to show a percentage bar when the server
+// advertised a size and a raw byte counter otherwise.
+//
+// The callback fires on meaningful progress rather than on every read:
+// each call costs the caller an e-ink refresh, and a 32 KB read of a
+// multi-megabyte binary moves the displayed percentage by a fraction the
+// user cannot see. See report for the exact rule.
 type countingReader struct {
-	r     io.Reader
-	n     int64
-	total int64
-	cb    func(written, total int64)
+	r        io.Reader
+	n        int64
+	total    int64
+	cb       func(written, total int64)
+	reported int64 // c.n as of the last callback; 0 until the first one
+	pct      int   // percentage passed to the last callback, -1 when unknown
 }
 
 func (c *countingReader) Read(p []byte) (int, error) {
 	n, err := c.r.Read(p)
 	c.n += int64(n)
-	if c.cb != nil && n > 0 {
+	if c.cb != nil && n > 0 && c.report() {
 		c.cb(c.n, c.total)
 	}
 	return n, err
+}
+
+// report decides whether the bytes read so far are worth a callback and
+// records what was reported. The first bytes always are: that call is
+// what hands the UI the announced total. After that a known total
+// reports once per whole percentage point, and an unknown one once per
+// progressByteStep.
+func (c *countingReader) report() bool {
+	pct := -1
+	if c.total > 0 {
+		pct = int(100 * c.n / c.total)
+	}
+	switch {
+	case c.reported == 0: // nothing reported yet
+	case pct >= 0:
+		if pct == c.pct {
+			return false
+		}
+	case c.n-c.reported < progressByteStep:
+		return false
+	}
+	c.reported = c.n
+	c.pct = pct
+	return true
+}
+
+// flush reports the final byte count when throttling swallowed it, so a
+// finished transfer always leaves the UI on the real total instead of on
+// whatever the last throttled callback said.
+func (c *countingReader) flush() {
+	if c.cb != nil && c.n != c.reported {
+		c.reported = c.n
+		c.cb(c.n, c.total)
+	}
 }
 
 // semverGreater returns true when a > b, treating leading 'v' and any

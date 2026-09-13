@@ -7,9 +7,64 @@ package main
 import (
 	"fmt"
 	"image"
+	"sync"
 
 	ink "github.com/dennwc/inkview"
 )
+
+// fontKey identifies one opened face: the family plus the already-scaled
+// pixel height.
+type fontKey struct {
+	family string
+	px     int
+}
+
+// fontCache holds the faces the screens draw with. ink.OpenFont reads
+// and parses the face from the device's filesystem on every call, and
+// each screen needs four to six of them, so opening them per draw put
+// that cost on every repaint - including the ones a download or sync
+// progress tick fires several times a second. A face is immutable once
+// opened (SetActive only selects it and a colour for the draw calls that
+// follow), so one handle per family and size serves the whole app and is
+// closed on exit.
+//
+// mu guards the map because the goroutines that push partial updates
+// (sync progress, update download, the library-refresh spinner) draw
+// outside the InkView event loop.
+type fontCache struct {
+	mu sync.Mutex
+	m  map[fontKey]*ink.Font
+}
+
+// font returns the shared face for family at base px, scaled for this
+// screen. A face InkView refuses to open is cached as nil instead of
+// being retried on every draw; ink.Font's methods are nil-safe, so that
+// text simply does not appear, exactly as before.
+func (a *app) font(family string, base int) *ink.Font {
+	k := fontKey{family: family, px: a.layout.fpx(base)}
+	a.fonts.mu.Lock()
+	defer a.fonts.mu.Unlock()
+	if f, ok := a.fonts.m[k]; ok {
+		return f
+	}
+	f := ink.OpenFont(k.family, k.px, true)
+	if a.fonts.m == nil {
+		a.fonts.m = make(map[fontKey]*ink.Font)
+	}
+	a.fonts.m[k] = f
+	return f
+}
+
+// closeFonts releases every cached face. Called from app.Close; the
+// relaunch path skips it because exec replaces the process wholesale.
+func (a *app) closeFonts() {
+	a.fonts.mu.Lock()
+	defer a.fonts.mu.Unlock()
+	for k, f := range a.fonts.m {
+		f.Close()
+		delete(a.fonts.m, k)
+	}
+}
 
 // drawCenteredText writes s centered inside rect using the given font. fontPx
 // is the font's pixel height (used for vertical centering since DrawString
@@ -105,6 +160,26 @@ func (a *app) drawToggle(r image.Rectangle, on bool) {
 		ink.FillArea(thumb, ink.White)
 		ink.DrawRect(thumb, ink.Black)
 	}
+}
+
+// drawToggleRow paints a list row whose value is a boolean: title,
+// subtitle, the pill right-aligned inside the row, and the closing
+// hairline. Shared by Settings (delete missing) and the update screen
+// (automatic checks) so both read and refresh identically.
+func (a *app) drawToggleRow(titleF, subF *ink.Font, r image.Rectangle, title, subtitle string, on bool) {
+	a.drawListRow(titleF, subF, r, title, subtitle, false)
+	a.drawToggle(a.layout.togglePill(r), on)
+	a.drawHairline(r.Min.X, r.Max.X, r.Max.Y)
+}
+
+// refreshToggleRow repaints one toggle row in place and pushes only that
+// strip to the panel. Flipping a toggle changes nothing else on the
+// screen, so routing it through Draw would clear and re-flash the whole
+// panel for a pill that moved a few millimetres.
+func (a *app) refreshToggleRow(r image.Rectangle, title, subtitle string, on bool) {
+	ink.FillArea(r, ink.White)
+	a.drawToggleRow(a.font(ink.DefaultFontBold, 36), a.font(ink.DefaultFont, 28), r, title, subtitle, on)
+	ink.PartialUpdate(r)
 }
 
 // listRow is one row for drawPagedList: a bold title plus an optional

@@ -36,6 +36,37 @@ type updateState struct {
 	backBtn     image.Rectangle
 }
 
+// updateSnapshot is one consistent read of updateState. Drawing takes
+// the lock once and works from the copy, so a check or a download
+// landing mid-pass is never observed half applied.
+type updateSnapshot struct {
+	checking    bool
+	available   bool
+	rel         Release
+	checkErr    error
+	downloading bool
+	downloaded  int64
+	total       int64
+	installErr  error
+	installed   bool
+}
+
+func (u *updateState) snapshot() updateSnapshot {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	return updateSnapshot{
+		checking:    u.checking,
+		available:   u.available,
+		rel:         u.release,
+		checkErr:    u.checkErr,
+		downloading: u.downloading,
+		downloaded:  u.downloaded,
+		total:       u.total,
+		installErr:  u.installErr,
+		installed:   u.installed,
+	}
+}
+
 // updateCheckMinInterval bounds how often the background check hits
 // the release endpoint. Weekly matches how often a new release is
 // realistically cut and keeps background traffic low on metered
@@ -130,80 +161,70 @@ func (a *app) openUpdateScreen() {
 	}
 }
 
-func (a *app) drawUpdate() {
-	title := ink.OpenFont(ink.DefaultFontBold, a.layout.fpx(64), true)
-	defer title.Close()
-	title.SetActive(ink.Black)
-	ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(140)}, "Updates")
+// autoCheckTitle names the automatic-checks row; autoCheckSubtitle is
+// its value line. Both the full draw and the in-place refresh that
+// follows a tap on the row go through these.
+const autoCheckTitle = "Automatic update checks"
 
-	body := ink.OpenFont(ink.DefaultFont, a.layout.fpx(32), true)
-	defer body.Close()
+func autoCheckSubtitle(on bool) string {
+	if on {
+		return "Check once a week"
+	}
+	return "Disabled"
+}
 
-	hero := ink.OpenFont(ink.DefaultFontBold, a.layout.fpx(40), true)
-	defer hero.Close()
+// updateStatusArea is the strip drawUpdateStatus owns: headline, detail
+// line and the download bar. Refreshed on its own while a download runs
+// so a progress tick costs one partial update instead of a full-screen
+// repaint.
+func (a *app) updateStatusArea() image.Rectangle {
+	return image.Rect(a.layout.margin, a.layout.sy(300),
+		a.layout.screen.X-a.layout.margin, a.layout.sy(460))
+}
 
-	rowTitleFont := ink.OpenFont(ink.DefaultFontBold, a.layout.fpx(36), true)
-	defer rowTitleFont.Close()
-	rowSubFont := ink.OpenFont(ink.DefaultFont, a.layout.fpx(28), true)
-	defer rowSubFont.Close()
-
-	btnFont := ink.OpenFont(ink.DefaultFontBold, a.layout.fpx(44), true)
-	defer btnFont.Close()
-
-	cfg := a.Config()
-
-	a.update.mu.Lock()
-	checking := a.update.checking
-	rel := a.update.release
-	checkErr := a.update.checkErr
-	available := a.update.available
-	downloading := a.update.downloading
-	downloaded := a.update.downloaded
-	total := a.update.total
-	installErr := a.update.installErr
-	installed := a.update.installed
-	a.update.mu.Unlock()
-
-	body.SetActive(ink.DarkGray)
-	ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(200)}, "Installed version "+version)
-	a.drawHairline(a.layout.margin, a.layout.screen.X-a.layout.margin, a.layout.sy(240))
+// drawUpdateStatus paints whichever of the flow's states u describes.
+// It clears its own area first so it can be called on its own, outside a
+// full repaint.
+func (a *app) drawUpdateStatus(u updateSnapshot) {
+	hero := a.font(ink.DefaultFontBold, 40)
+	body := a.font(ink.DefaultFont, 32)
+	ink.FillArea(a.updateStatusArea(), ink.White)
 
 	y := a.layout.sy(310)
 	switch {
-	case installed:
+	case u.installed:
 		hero.SetActive(ink.Black)
-		ink.DrawString(image.Point{X: a.layout.margin, Y: y}, "Installed "+rel.Version)
+		ink.DrawString(image.Point{X: a.layout.margin, Y: y}, "Installed "+u.rel.Version)
 		body.SetActive(ink.DarkGray)
 		ink.DrawString(image.Point{X: a.layout.margin, Y: y + a.layout.sy(55)}, "Relaunching…")
-	case installErr != nil:
+	case u.installErr != nil:
 		hero.SetActive(ink.Black)
 		ink.DrawString(image.Point{X: a.layout.margin, Y: y}, "Install failed")
 		body.SetActive(ink.DarkGray)
-		ink.DrawString(image.Point{X: a.layout.margin, Y: y + a.layout.sy(55)}, truncate(installErr.Error(), 60))
-	case downloading:
+		ink.DrawString(image.Point{X: a.layout.margin, Y: y + a.layout.sy(55)}, truncate(u.installErr.Error(), 60))
+	case u.downloading:
 		hero.SetActive(ink.Black)
-		headline := "Downloading " + rel.Version
-		ink.DrawString(image.Point{X: a.layout.margin, Y: y}, headline)
+		ink.DrawString(image.Point{X: a.layout.margin, Y: y}, "Downloading "+u.rel.Version)
 		body.SetActive(ink.DarkGray)
 		var line string
-		if total > 0 {
-			pct := int(100 * downloaded / total)
+		if u.total > 0 {
+			pct := int(100 * u.downloaded / u.total)
 			if pct > 100 {
 				pct = 100
 			}
-			line = fmt.Sprintf("%d%%  ·  %d / %d KB", pct, downloaded/1024, total/1024)
+			line = fmt.Sprintf("%d%%  ·  %d / %d KB", pct, u.downloaded/1024, u.total/1024)
 		} else {
-			line = fmt.Sprintf("%d KB received", downloaded/1024)
+			line = fmt.Sprintf("%d KB received", u.downloaded/1024)
 		}
 		ink.DrawString(image.Point{X: a.layout.margin, Y: y + a.layout.sy(55)}, line)
-		if total > 0 {
+		if u.total > 0 {
 			barY1 := y + a.layout.sy(90)
 			barY2 := barY1 + a.layout.sy(30)
 			barX1 := a.layout.margin
 			barX2 := a.layout.screen.X - a.layout.margin
 			bar := image.Rect(barX1, barY1, barX2, barY2)
 			ink.DrawRect(bar, ink.Black)
-			fillW := int(int64(bar.Dx()-6) * downloaded / total)
+			fillW := int(int64(bar.Dx()-6) * u.downloaded / u.total)
 			if fillW > bar.Dx()-6 {
 				fillW = bar.Dx() - 6
 			}
@@ -211,31 +232,64 @@ func (a *app) drawUpdate() {
 				ink.FillArea(image.Rect(barX1+a.layout.sx(3), barY1+a.layout.sy(3), barX1+a.layout.sx(3)+fillW, barY2-a.layout.sy(3)), ink.DarkGray)
 			}
 		}
-	case checking:
+	case u.checking:
 		hero.SetActive(ink.Black)
 		ink.DrawString(image.Point{X: a.layout.margin, Y: y}, "Checking for updates…")
-	case checkErr != nil:
+	case u.checkErr != nil:
 		hero.SetActive(ink.Black)
 		ink.DrawString(image.Point{X: a.layout.margin, Y: y}, "Could not check")
 		body.SetActive(ink.DarkGray)
-		ink.DrawString(image.Point{X: a.layout.margin, Y: y + a.layout.sy(55)}, truncate(checkErr.Error(), 60))
-	case available:
+		ink.DrawString(image.Point{X: a.layout.margin, Y: y + a.layout.sy(55)}, truncate(u.checkErr.Error(), 60))
+	case u.available:
 		hero.SetActive(ink.Black)
-		headline := rel.Version + " is available"
-		ink.DrawString(image.Point{X: a.layout.margin, Y: y}, headline)
+		ink.DrawString(image.Point{X: a.layout.margin, Y: y}, u.rel.Version+" is available")
 		body.SetActive(ink.DarkGray)
 		detail := "Tap Install now to update"
-		if rel.BinarySize > 0 {
-			detail = formatBytes(rel.BinarySize) + "  ·  " + detail
+		if u.rel.BinarySize > 0 {
+			detail = formatBytes(u.rel.BinarySize) + "  ·  " + detail
 		}
 		ink.DrawString(image.Point{X: a.layout.margin, Y: y + a.layout.sy(55)}, detail)
-		if rel.SHA256 != "" {
-			ink.DrawString(image.Point{X: a.layout.margin, Y: y + a.layout.sy(105)}, "sha256 "+rel.SHA256[:12]+"…")
+		if u.rel.SHA256 != "" {
+			ink.DrawString(image.Point{X: a.layout.margin, Y: y + a.layout.sy(105)}, "sha256 "+u.rel.SHA256[:12]+"…")
 		}
 	default:
 		hero.SetActive(ink.Black)
 		ink.DrawString(image.Point{X: a.layout.margin, Y: y}, "You are up to date")
 	}
+}
+
+// refreshUpdateProgress repaints the status block from the download
+// goroutine and pushes only that strip. The reader already throttles the
+// callback to percentage changes; keeping each of those off the
+// full-repaint path is what stops an install from flashing the whole
+// panel a hundred times.
+func (a *app) refreshUpdateProgress() {
+	// The user can leave mid-download; whatever screen replaced this one
+	// owns those pixels now.
+	if a.Screen() != screenUpdate {
+		return
+	}
+	a.drawUpdateStatus(a.update.snapshot())
+	ink.PartialUpdate(a.updateStatusArea())
+}
+
+func (a *app) drawUpdate() {
+	title := a.font(ink.DefaultFontBold, 64)
+	body := a.font(ink.DefaultFont, 32)
+	rowTitleFont := a.font(ink.DefaultFontBold, 36)
+	rowSubFont := a.font(ink.DefaultFont, 28)
+	btnFont := a.font(ink.DefaultFontBold, 44)
+
+	cfg := a.Config()
+	u := a.update.snapshot()
+
+	title.SetActive(ink.Black)
+	ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(140)}, "Updates")
+	body.SetActive(ink.DarkGray)
+	ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(200)}, "Installed version "+version)
+	a.drawHairline(a.layout.margin, a.layout.screen.X-a.layout.margin, a.layout.sy(240))
+
+	a.drawUpdateStatus(u)
 
 	// Auto-check toggle row: list-row style matching Settings.
 	btnH := a.layout.sy(100)
@@ -247,29 +301,18 @@ func (a *app) drawUpdate() {
 	btnY1 := btnY2 - btnH
 
 	toggleRect := image.Rect(a.layout.margin, toggleY1, a.layout.margin+contentW, toggleY2)
-	autoSub := "Check once a week"
-	if !cfg.CheckUpdates {
-		autoSub = "Disabled"
-	}
-	a.drawListRow(rowTitleFont, rowSubFont, toggleRect,
-		"Automatic update checks", autoSub, false)
-	togPillH := a.layout.sy(60)
-	togPillW := a.layout.sx(120)
-	togCY := (toggleRect.Min.Y + toggleRect.Max.Y) / 2
-	togX2 := toggleRect.Max.X - a.layout.sx(20)
-	togRect := image.Rect(togX2-togPillW, togCY-togPillH/2, togX2, togCY+togPillH/2)
-	a.drawToggle(togRect, cfg.CheckUpdates)
-	a.drawHairline(toggleRect.Min.X, toggleRect.Max.X, toggleRect.Max.Y)
+	a.drawToggleRow(rowTitleFont, rowSubFont, toggleRect,
+		autoCheckTitle, autoCheckSubtitle(cfg.CheckUpdates), cfg.CheckUpdates)
 
 	// Primary action row (either Install now or Check for updates).
 	primary := image.Rect(a.layout.margin, btnY1, a.layout.margin+contentW, btnY2)
 	var installBtn, checkBtn image.Rectangle
-	if available && !installed && !downloading {
+	if u.available && !u.installed && !u.downloading {
 		installBtn = primary
 		ink.DrawRect(installBtn, ink.Black)
 		ink.DrawRect(installBtn.Inset(2), ink.Black)
 		drawCenteredText(btnFont, installBtn, "Install now", a.layout.fpx(44))
-	} else if !downloading && !installed && !checking {
+	} else if !u.downloading && !u.installed && !u.checking {
 		checkBtn = primary
 		ink.DrawRect(checkBtn, ink.Black)
 		drawCenteredText(btnFont, checkBtn, "Check for updates", a.layout.fpx(44))
@@ -327,8 +370,12 @@ func (a *app) updatePointer(e ink.PointerEvent) bool {
 		return true
 	}
 	if !toggleBtn.Empty() && e.Point.In(toggleBtn) {
-		a.saveConfigChange(func(c *Config) { c.CheckUpdates = !c.CheckUpdates })
-		ink.Repaint()
+		// Only the row itself changes, so it redraws in place rather
+		// than re-flashing the screen.
+		if cfg := a.saveConfigChange(func(c *Config) { c.CheckUpdates = !c.CheckUpdates }); cfg != nil {
+			a.refreshToggleRow(toggleBtn, autoCheckTitle,
+				autoCheckSubtitle(cfg.CheckUpdates), cfg.CheckUpdates)
+		}
 		return true
 	}
 	return false
@@ -353,6 +400,7 @@ func (a *app) runUpdateInstall() {
 	rel := a.update.release
 	a.update.downloading = true
 	a.update.downloaded = 0
+	a.update.total = -1 // until this response's Content-Length arrives
 	a.update.installErr = nil
 	a.update.installed = false
 	a.update.mu.Unlock()
@@ -371,7 +419,7 @@ func (a *app) runUpdateInstall() {
 		a.update.downloaded = n
 		a.update.total = total
 		a.update.mu.Unlock()
-		ink.Repaint()
+		a.refreshUpdateProgress()
 	})
 	if err != nil {
 		a.failUpdate(fmt.Errorf("download: %w", err))

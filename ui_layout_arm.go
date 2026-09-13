@@ -29,14 +29,13 @@ type layout struct {
 
 	// settings screen: a stack of tappable rows grouped into three
 	// sections. Row rects are full-width tap targets; each has a bold
-	// title and a muted value subtitle. deleteToggle is a smaller pill
-	// drawn inside deleteRow, left in place for the pointer handler
-	// only because the whole row is tappable anyway.
+	// title and a muted value subtitle. The delete-missing pill sits
+	// inside deleteRow and is derived from it via togglePill; the whole
+	// row is the tap target.
 	serverRow     image.Rectangle
 	profileRow    image.Rectangle
 	filterRow     image.Rectangle
 	deleteRow     image.Rectangle
-	deleteToggle  image.Rectangle
 	updateRow     image.Rectangle
 	serverLabelY  int
 	libraryLabelY int
@@ -116,14 +115,6 @@ func computeLayout(sz image.Point) layout {
 	sy += sectionLabelH
 	updateRow := image.Rect(sideMargin, sy, sideMargin+contentW, sy+settingsRowH)
 
-	// Delete-missing toggle pill: right-aligned inside deleteRow, sized
-	// to read clearly as a binary control.
-	toggleH := sc(60)
-	toggleW := sc(120)
-	toggleCY := (deleteRow.Min.Y + deleteRow.Max.Y) / 2
-	toggleX2 := deleteRow.Max.X - sc(20)
-	deleteToggle := image.Rect(toggleX2-toggleW, toggleCY-toggleH/2, toggleX2, toggleCY+toggleH/2)
-
 	// Shelf picker: rows live between the header (below topSafe) and the
 	// Back button (same position as bottom btnY1).
 	pickerTop := topSafe + sc(220)
@@ -143,7 +134,6 @@ func computeLayout(sz image.Point) layout {
 		profileRow:       profileRow,
 		filterRow:        filterRow,
 		deleteRow:        deleteRow,
-		deleteToggle:     deleteToggle,
 		updateRow:        updateRow,
 		serverLabelY:     serverLabelY,
 		libraryLabelY:    libraryLabelY,
@@ -193,6 +183,19 @@ func (s layout) fpx(base int) int {
 // proportionate instead of pushing content off the bottom.
 func (s layout) sy(base int) int {
 	return int(float64(base)*s.scale + 0.5)
+}
+
+// togglePill returns the toggle rect for a boolean list row: a pill
+// sized to read clearly as a binary control, right-aligned inside the
+// row. Derived from the row rather than stored so every toggle row
+// (Settings' delete-missing, the update screen's automatic checks) gets
+// the same geometry.
+func (s layout) togglePill(row image.Rectangle) image.Rectangle {
+	h := s.sy(60)
+	w := s.sx(120)
+	cy := (row.Min.Y + row.Max.Y) / 2
+	x2 := row.Max.X - s.sx(20)
+	return image.Rect(x2-w, cy-h/2, x2, cy+h/2)
 }
 
 // rowH is the height of one full-width list row. Every stacked-row

@@ -70,6 +70,9 @@ type app struct {
 	libRefresh    libRefreshState
 	netStop       func()
 	layout        layout
+	// fonts holds every face the screens draw with, opened once; see
+	// fontCache in ui_draw_arm.go.
+	fonts fontCache
 	// taps gates the pointer stream for every screen; see taps.go.
 	taps tapGate
 	// hourglass tracks whether InkView is currently showing the busy
@@ -181,6 +184,7 @@ func (a *app) Init() error {
 }
 
 func (a *app) Close() error {
+	a.closeFonts()
 	if store := a.Store(); store != nil {
 		_ = store.Close()
 	}
@@ -354,15 +358,18 @@ func (a *app) refreshMainStats() {
 // saveConfigChange applies fn to the active config and persists the
 // result. The edit lands on a copy that then replaces the published
 // pointer, so a goroutine holding the old config keeps a consistent view
-// instead of seeing a half-applied change.
-func (a *app) saveConfigChange(fn func(*Config)) {
+// instead of seeing a half-applied change. The new config is returned
+// for callers that redraw the setting they just changed, and is nil when
+// no profile is active.
+func (a *app) saveConfigChange(fn func(*Config)) *Config {
 	cfg := a.UpdateConfig(fn)
 	if cfg == nil {
-		return
+		return nil
 	}
 	if err := SaveConfig(a.cfgPath, cfg); err != nil {
 		log.Printf("save config: %v", err)
 	}
+	return cfg
 }
 
 func (a *app) syncActive() bool {

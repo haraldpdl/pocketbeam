@@ -89,16 +89,13 @@ func formatBytes(b int64) string {
 }
 
 func (a *app) drawSpaceWarn() {
-	title := ink.OpenFont(ink.DefaultFontBold, a.layout.fpx(64), true)
-	defer title.Close()
+	title := a.font(ink.DefaultFontBold, 64)
 	title.SetActive(ink.Black)
 
-	body := ink.OpenFont(ink.DefaultFont, a.layout.fpx(32), true)
-	defer body.Close()
+	body := a.font(ink.DefaultFont, 32)
 	body.SetActive(ink.Black)
 
-	btnFont := ink.OpenFont(ink.DefaultFontBold, a.layout.fpx(44), true)
-	defer btnFont.Close()
+	btnFont := a.font(ink.DefaultFontBold, 44)
 
 	a.spaceWarn.mu.Lock()
 	plan := a.spaceWarn.plan
@@ -111,8 +108,7 @@ func (a *app) drawSpaceWarn() {
 		"This sync needs more room than the device has.")
 	a.drawHairline(a.layout.margin, a.layout.screen.X-a.layout.margin, a.layout.sy(240))
 
-	hero := ink.OpenFont(ink.DefaultFontBold, a.layout.fpx(40), true)
-	defer hero.Close()
+	hero := a.font(ink.DefaultFontBold, 40)
 	hero.SetActive(ink.Black)
 	newCount := len(plan.NewBooks) + len(plan.UpdatedBooks)
 	ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(310)},
@@ -224,16 +220,13 @@ func (a *app) answerDelete(ok bool) {
 }
 
 func (a *app) drawDeleteConfirm() {
-	title := ink.OpenFont(ink.DefaultFontBold, a.layout.fpx(64), true)
-	defer title.Close()
+	title := a.font(ink.DefaultFontBold, 64)
 	title.SetActive(ink.Black)
 
-	body := ink.OpenFont(ink.DefaultFont, a.layout.fpx(32), true)
-	defer body.Close()
+	body := a.font(ink.DefaultFont, 32)
 	body.SetActive(ink.Black)
 
-	btnFont := ink.OpenFont(ink.DefaultFontBold, a.layout.fpx(44), true)
-	defer btnFont.Close()
+	btnFont := a.font(ink.DefaultFontBold, 44)
 
 	a.delConfirm.mu.Lock()
 	pending := append([]LocalBook(nil), a.delConfirm.pending...)

@@ -8,21 +8,24 @@ import (
 	ink "github.com/dennwc/inkview"
 )
 
+// deleteMissingTitle names the delete-missing row; deleteMissingSubtitle
+// is its value line. Both the full draw and the in-place refresh that
+// follows a tap on the row go through these.
+const deleteMissingTitle = "Delete missing"
+
+func deleteMissingSubtitle(on bool) string {
+	if on {
+		return "Remove books deleted on server"
+	}
+	return "Keep books removed on server"
+}
+
 func (a *app) drawSettings() {
-	title := ink.OpenFont(ink.DefaultFontBold, a.layout.fpx(64), true)
-	defer title.Close()
-
-	rowTitleFont := ink.OpenFont(ink.DefaultFontBold, a.layout.fpx(36), true)
-	defer rowTitleFont.Close()
-
-	rowSubFont := ink.OpenFont(ink.DefaultFont, a.layout.fpx(28), true)
-	defer rowSubFont.Close()
-
-	sectionFont := ink.OpenFont(ink.DefaultFontBold, a.layout.fpx(24), true)
-	defer sectionFont.Close()
-
-	btnFont := ink.OpenFont(ink.DefaultFontBold, a.layout.fpx(44), true)
-	defer btnFont.Close()
+	title := a.font(ink.DefaultFontBold, 64)
+	rowTitleFont := a.font(ink.DefaultFontBold, 36)
+	rowSubFont := a.font(ink.DefaultFont, 28)
+	sectionFont := a.font(ink.DefaultFontBold, 24)
+	btnFont := a.font(ink.DefaultFontBold, 44)
 
 	cfg := a.Config()
 
@@ -54,14 +57,8 @@ func (a *app) drawSettings() {
 	a.drawListRow(rowTitleFont, rowSubFont, a.layout.filterRow,
 		filterTitle, filterValue, true)
 
-	deleteSub := "Keep books removed on server"
-	if cfg.DeleteMissing {
-		deleteSub = "Remove books deleted on server"
-	}
-	a.drawListRow(rowTitleFont, rowSubFont, a.layout.deleteRow,
-		"Delete missing", deleteSub, false)
-	a.drawToggle(a.layout.deleteToggle, cfg.DeleteMissing)
-	a.drawHairline(a.layout.deleteRow.Min.X, a.layout.deleteRow.Max.X, a.layout.deleteRow.Max.Y)
+	a.drawToggleRow(rowTitleFont, rowSubFont, a.layout.deleteRow,
+		deleteMissingTitle, deleteMissingSubtitle(cfg.DeleteMissing), cfg.DeleteMissing)
 
 	// ABOUT section
 	a.drawSectionLabel(sectionFont, "ABOUT", a.layout.aboutLabelY)
@@ -114,8 +111,12 @@ func (a *app) settingsPointer(e ink.PointerEvent) bool {
 		}
 		return true
 	case p.In(a.layout.deleteRow):
-		a.saveConfigChange(func(c *Config) { c.DeleteMissing = !c.DeleteMissing })
-		ink.Repaint()
+		// Nothing else on the screen depends on the setting, so the row
+		// redraws itself instead of costing a full-screen refresh.
+		if cfg := a.saveConfigChange(func(c *Config) { c.DeleteMissing = !c.DeleteMissing }); cfg != nil {
+			a.refreshToggleRow(a.layout.deleteRow, deleteMissingTitle,
+				deleteMissingSubtitle(cfg.DeleteMissing), cfg.DeleteMissing)
+		}
 		return true
 	case p.In(a.layout.updateRow):
 		a.openUpdateScreen()
