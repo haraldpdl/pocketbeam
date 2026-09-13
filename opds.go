@@ -157,12 +157,15 @@ func redactURL(u *url.URL) string {
 	return u.String()
 }
 
-func (c *Client) get(href string) ([]byte, error) {
+// get fetches one feed page. The context bounds the request so a caller
+// (sync cancel, picker timeout) can abort a listing that would otherwise
+// sit on the 5-minute response-header timeout.
+func (c *Client) get(ctx context.Context, href string) ([]byte, error) {
 	abs, err := c.Base.Parse(href)
 	if err != nil {
 		return nil, err
 	}
-	req, err := http.NewRequest("GET", abs.String(), nil)
+	req, err := http.NewRequestWithContext(ctx, "GET", abs.String(), nil)
 	if err != nil {
 		return nil, err
 	}
@@ -271,14 +274,14 @@ func levelBookCount(lvl OPDSLevel) (n int, approximate bool) {
 // FetchLevel retrieves the feed at href (walking pagination) and splits
 // its entries into drill-in subsections and acquisition entries. An empty
 // href starts at "/opds".
-func (c *Client) FetchLevel(href string) (OPDSLevel, error) {
+func (c *Client) FetchLevel(ctx context.Context, href string) (OPDSLevel, error) {
 	if href == "" {
 		href = "/opds"
 	}
 	var lvl OPDSLevel
 	first := true
 	for href != "" {
-		body, err := c.get(href)
+		body, err := c.get(ctx, href)
 		if err != nil {
 			return OPDSLevel{}, err
 		}
@@ -304,48 +307,13 @@ func (c *Client) FetchLevel(href string) (OPDSLevel, error) {
 	return lvl, nil
 }
 
-// ListFilterOptions returns the options a user can choose from in the
-// filter picker. On CWA it returns the user's shelves; on any other OPDS
-// server it returns the top-level subsections of the root feed.
-func (c *Client) ListFilterOptions() ([]FilterOption, error) {
-	if c.IsCWA {
-		shelves, err := c.ListShelves()
-		if err != nil {
-			return nil, err
-		}
-		out := make([]FilterOption, 0, len(shelves))
-		for _, s := range shelves {
-			out = append(out, FilterOption{
-				Name: s.Name,
-				Href: fmt.Sprintf("/opds/shelf/%d", s.ID),
-			})
-		}
-		return out, nil
-	}
-	body, err := c.get("/opds")
-	if err != nil {
-		return nil, err
-	}
-	var f feed
-	if err := xml.Unmarshal(body, &f); err != nil {
-		return nil, fmt.Errorf("parse opds root: %w", err)
-	}
-	out := make([]FilterOption, 0, len(f.Entries))
-	for _, e := range f.Entries {
-		if nav, ok := navigationLink(e.Links); ok {
-			out = append(out, filterOptionFromLink(nav, e.Title))
-		}
-	}
-	return out, nil
-}
-
 // DetectType fetches the root /opds feed once and sets c.IsCWA based on
 // subsections it finds. CWA-signatures we accept: a subsection link pointing
 // at /opds/books/letter/ or /opds/shelfindex, or a title containing
 // Calibre-Web. Generic OPDS servers pass through with IsCWA=false and the
 // recursive walker takes over.
-func (c *Client) DetectType() error {
-	body, err := c.get("/opds")
+func (c *Client) DetectType(ctx context.Context) error {
+	body, err := c.get(ctx, "/opds")
 	if err != nil {
 		return err
 	}
@@ -374,11 +342,11 @@ func (c *Client) DetectType() error {
 // takes the fast path (/opds/books/letter/00 is a single paginated feed).
 // On any other OPDS server it falls through to a recursive walker that
 // follows subsection links from the root.
-func (c *Client) WalkAll() ([]Book, error) {
+func (c *Client) WalkAll(ctx context.Context) ([]Book, error) {
 	if c.IsCWA {
-		return c.walk("/opds/books/letter/00")
+		return c.walk(ctx, "/opds/books/letter/00")
 	}
-	return c.walkGeneric("/opds")
+	return c.walkGeneric(ctx, "/opds")
 }
 
 // WalkFiltered returns books under a specific OPDS path (CWA shelf path,
@@ -386,32 +354,32 @@ func (c *Client) WalkAll() ([]Book, error) {
 // "sync all books" and falls through to WalkAll. The CWA shelf fast path
 // (single paginated feed, no recursion) kicks in when filterHref looks like
 // "/opds/shelf/<N>" and the client is in CWA mode.
-func (c *Client) WalkFiltered(filterHref string) ([]Book, error) {
+func (c *Client) WalkFiltered(ctx context.Context, filterHref string) ([]Book, error) {
 	if filterHref == "" {
-		return c.WalkAll()
+		return c.WalkAll(ctx)
 	}
 	if c.IsCWA && strings.HasPrefix(filterHref, "/opds/shelf/") {
-		return c.walk(filterHref)
+		return c.walk(ctx, filterHref)
 	}
-	return c.walkGeneric(filterHref)
+	return c.walkGeneric(ctx, filterHref)
 }
 
 // WalkShelf returns every acquirable book in the given CWA shelf. Only
 // meaningful on CWA; an error is returned if the client is not in CWA mode.
-func (c *Client) WalkShelf(id int) ([]Book, error) {
+func (c *Client) WalkShelf(ctx context.Context, id int) ([]Book, error) {
 	if !c.IsCWA {
 		return nil, fmt.Errorf("shelves are a Calibre-Web feature; server did not advertise them")
 	}
-	return c.walk(fmt.Sprintf("/opds/shelf/%d", id))
+	return c.walk(ctx, fmt.Sprintf("/opds/shelf/%d", id))
 }
 
 // ListShelves returns the user's shelves as they appear in CWA's shelfindex
 // OPDS feed. Returns nil on non-CWA servers (not an error; just no shelves).
-func (c *Client) ListShelves() ([]Shelf, error) {
+func (c *Client) ListShelves(ctx context.Context) ([]Shelf, error) {
 	if !c.IsCWA {
 		return nil, nil
 	}
-	body, err := c.get("/opds/shelfindex")
+	body, err := c.get(ctx, "/opds/shelfindex")
 	if err != nil {
 		return nil, err
 	}
@@ -437,9 +405,9 @@ func (c *Client) ListShelves() ([]Shelf, error) {
 // by-series).
 const maxWalkDepth = 5
 
-func (c *Client) walkGeneric(start string) ([]Book, error) {
+func (c *Client) walkGeneric(ctx context.Context, start string) ([]Book, error) {
 	visited := make(map[string]bool)
-	books, err := c.walkGenericRec(start, visited, 0)
+	books, err := c.walkGenericRec(ctx, start, visited, 0)
 	if err != nil {
 		return nil, err
 	}
@@ -457,7 +425,7 @@ func (c *Client) walkGeneric(start string) ([]Book, error) {
 	return unique, nil
 }
 
-func (c *Client) walkGenericRec(path string, visited map[string]bool, depth int) ([]Book, error) {
+func (c *Client) walkGenericRec(ctx context.Context, path string, visited map[string]bool, depth int) ([]Book, error) {
 	if depth > maxWalkDepth {
 		return nil, nil
 	}
@@ -474,7 +442,7 @@ func (c *Client) walkGenericRec(path string, visited map[string]bool, depth int)
 	var out []Book
 	href := path
 	for href != "" {
-		body, err := c.get(href)
+		body, err := c.get(ctx, href)
 		if err != nil {
 			return nil, err
 		}
@@ -488,9 +456,14 @@ func (c *Client) walkGenericRec(path string, visited map[string]bool, depth int)
 				continue
 			}
 			if sub := navigationHref(e.Links); sub != "" {
-				child, err := c.walkGenericRec(sub, visited, depth+1)
+				child, err := c.walkGenericRec(ctx, sub, visited, depth+1)
 				if err == nil {
 					out = append(out, child...)
+				} else if ctx.Err() != nil {
+					// A sub-feed failure is tolerated, but once the caller
+					// has cancelled there is no point visiting the
+					// remaining siblings only to fail each one in turn.
+					return nil, ctx.Err()
 				}
 			}
 		}
@@ -560,11 +533,11 @@ func filterOptionFromLink(l link, title string) FilterOption {
 	return opt
 }
 
-func (c *Client) walk(start string) ([]Book, error) {
+func (c *Client) walk(ctx context.Context, start string) ([]Book, error) {
 	var out []Book
 	href := start
 	for href != "" {
-		body, err := c.get(href)
+		body, err := c.get(ctx, href)
 		if err != nil {
 			return nil, err
 		}
