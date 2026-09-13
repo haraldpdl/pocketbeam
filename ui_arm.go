@@ -1785,9 +1785,13 @@ func (a *app) openShelfPicker() {
 		}
 		seeded = append(seeded, FilterOption{Name: name, Href: href})
 	}
+	// The root is addressed by the empty href: FetchLevel resolves it
+	// under the server's path prefix, and the picker never stores the
+	// root as a filter (root means "sync everything"), so no literal
+	// path is needed here.
 	a.picker.mu.Lock()
 	a.picker.stack = nil
-	a.picker.href = "/opds"
+	a.picker.href = ""
 	a.picker.title = "All books"
 	a.picker.loading = true
 	a.picker.level = OPDSLevel{}
@@ -1798,7 +1802,7 @@ func (a *app) openShelfPicker() {
 	a.picker.mu.Unlock()
 	a.screen = screenShelfPicker
 	ink.Repaint()
-	go a.fetchFeedLevel("/opds", "All books")
+	go a.fetchFeedLevel("", "All books")
 }
 
 // drillInto pushes the current feed onto the stack and fetches the child

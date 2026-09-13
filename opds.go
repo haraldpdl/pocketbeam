@@ -195,6 +195,16 @@ func (c *Client) prepare(req *http.Request) {
 	req.Header.Set("User-Agent", "pocketbeam/"+version)
 }
 
+// catalogPath joins one of the client's own well-known OPDS paths ("/opds",
+// "/opds/shelfindex", ...) onto the base URL's path prefix. url.URL.Parse
+// treats an absolute-path reference as a replacement, so a base of
+// https://host/calibre would otherwise resolve "/opds" to https://host/opds.
+// Server-supplied hrefs do not go through here: they already carry
+// whatever prefix the server is mounted under.
+func (c *Client) catalogPath(p string) string {
+	return strings.TrimRight(c.Base.Path, "/") + p
+}
+
 // Shelf is a user-curated collection of books, exposed by CWA under
 // /opds/shelfindex. Generic OPDS servers do not share this concept.
 type Shelf struct {
@@ -250,10 +260,10 @@ func levelBookCount(lvl OPDSLevel) (n int, approximate bool) {
 
 // FetchLevel retrieves the feed at href (walking pagination) and splits
 // its entries into drill-in subsections and acquisition entries. An empty
-// href starts at "/opds".
+// href starts at the catalog root ("/opds" under the base URL's prefix).
 func (c *Client) FetchLevel(ctx context.Context, href string) (OPDSLevel, error) {
 	if href == "" {
-		href = "/opds"
+		href = c.catalogPath("/opds")
 	}
 	var lvl OPDSLevel
 	first := true
@@ -290,7 +300,7 @@ func (c *Client) FetchLevel(ctx context.Context, href string) (OPDSLevel, error)
 // Calibre-Web. Generic OPDS servers pass through with IsCWA=false and the
 // recursive walker takes over.
 func (c *Client) DetectType(ctx context.Context) error {
-	body, err := c.get(ctx, "/opds")
+	body, err := c.get(ctx, c.catalogPath("/opds"))
 	if err != nil {
 		return err
 	}
@@ -321,9 +331,9 @@ func (c *Client) DetectType(ctx context.Context) error {
 // follows subsection links from the root.
 func (c *Client) WalkAll(ctx context.Context) ([]Book, error) {
 	if c.IsCWA {
-		return c.walk(ctx, "/opds/books/letter/00")
+		return c.walk(ctx, c.catalogPath("/opds/books/letter/00"))
 	}
-	return c.walkGeneric(ctx, "/opds")
+	return c.walkGeneric(ctx, c.catalogPath("/opds"))
 }
 
 // WalkFiltered returns books under a specific OPDS path (CWA shelf path,
@@ -335,7 +345,7 @@ func (c *Client) WalkFiltered(ctx context.Context, filterHref string) ([]Book, e
 	if filterHref == "" {
 		return c.WalkAll(ctx)
 	}
-	if c.IsCWA && strings.HasPrefix(filterHref, "/opds/shelf/") {
+	if c.IsCWA && strings.HasPrefix(filterHref, c.catalogPath("/opds/shelf/")) {
 		return c.walk(ctx, filterHref)
 	}
 	return c.walkGeneric(ctx, filterHref)
@@ -347,7 +357,7 @@ func (c *Client) WalkShelf(ctx context.Context, id int) ([]Book, error) {
 	if !c.IsCWA {
 		return nil, fmt.Errorf("shelves are a Calibre-Web feature; server did not advertise them")
 	}
-	return c.walk(ctx, fmt.Sprintf("/opds/shelf/%d", id))
+	return c.walk(ctx, c.catalogPath(fmt.Sprintf("/opds/shelf/%d", id)))
 }
 
 // ListShelves returns the user's shelves as they appear in CWA's shelfindex
@@ -356,7 +366,7 @@ func (c *Client) ListShelves(ctx context.Context) ([]Shelf, error) {
 	if !c.IsCWA {
 		return nil, nil
 	}
-	body, err := c.get(ctx, "/opds/shelfindex")
+	body, err := c.get(ctx, c.catalogPath("/opds/shelfindex"))
 	if err != nil {
 		return nil, err
 	}
@@ -364,9 +374,10 @@ func (c *Client) ListShelves(ctx context.Context) ([]Shelf, error) {
 	if err := xml.Unmarshal(body, &f); err != nil {
 		return nil, fmt.Errorf("parse shelfindex: %w", err)
 	}
+	shelfPrefix := c.catalogPath("/opds/shelf/")
 	out := make([]Shelf, 0, len(f.Entries))
 	for _, e := range f.Entries {
-		if id, ok := shelfIDFromEntry(e); ok {
+		if id, ok := shelfIDFromEntry(e, shelfPrefix); ok {
 			out = append(out, Shelf{ID: id, Name: strings.TrimSpace(e.Title)})
 		}
 	}
@@ -449,9 +460,10 @@ func (c *Client) walkGenericRec(ctx context.Context, path string, visited map[st
 	return out, nil
 }
 
-// shelfIDFromEntry parses "/opds/shelf/<N>" from a shelfindex entry's <id>.
-func shelfIDFromEntry(e entry) (int, bool) {
-	const prefix = "/opds/shelf/"
+// shelfIDFromEntry parses <N> from a shelfindex entry's <id>, which CWA
+// emits as its shelf path (prefix + "<N>", prefix being "/opds/shelf/"
+// under the server's mount point).
+func shelfIDFromEntry(e entry, prefix string) (int, bool) {
 	if !strings.HasPrefix(e.ID, prefix) {
 		return 0, false
 	}

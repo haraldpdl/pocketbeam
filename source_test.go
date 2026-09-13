@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"slices"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -319,5 +320,85 @@ func TestOPDSSource_ListHonoursContext(t *testing.T) {
 	}
 	if len(*paths) != 0 {
 		t.Errorf("cancelled List still hit the server: %v", *paths)
+	}
+}
+
+// prefixedCWAFeeds is cwaFeeds mounted under /calibre, the shape a
+// Calibre-Web behind a path-prefix reverse proxy serves: every href the
+// server emits already carries the prefix.
+func prefixedCWAFeeds() opdsFeeds {
+	out := make(opdsFeeds, len(cwaFeeds()))
+	for path, body := range cwaFeeds() {
+		out["/calibre"+path] = strings.ReplaceAll(body, `href="/opds`, `href="/calibre/opds`)
+	}
+	out["/calibre/opds/shelfindex"] = feedXML("Shelves",
+		`<entry><id>/calibre/opds/shelf/3</id><title>Favourites</title>`+
+			`<link rel="subsection" type="application/atom+xml" href="/calibre/opds/shelf/3"/></entry>`)
+	return out
+}
+
+func TestClient_HostWithPathPrefix(t *testing.T) {
+	// A host such as https://host/calibre must keep its prefix on the
+	// client's own well-known paths. url.URL.Parse drops it for an
+	// absolute-path reference, so without explicit joining the probe
+	// (which appends to the raw string) passes and the sync then hits
+	// https://host/opds.
+	cases := []struct {
+		name string
+		call func(c *Client) error
+		want []string
+	}{
+		{"DetectType", func(c *Client) error { return c.DetectType(context.Background()) },
+			[]string{"/calibre/opds"}},
+		{"FetchLevel root", func(c *Client) error { _, err := c.FetchLevel(context.Background(), ""); return err },
+			[]string{"/calibre/opds"}},
+		{"WalkAll generic", func(c *Client) error { _, err := c.WalkAll(context.Background()); return err },
+			[]string{"/calibre/opds", "/calibre/opds/books/letter/00", "/calibre/opds/shelfindex", "/calibre/opds/shelf/3", "/calibre/opds/author"}},
+		{"WalkAll cwa", func(c *Client) error { c.IsCWA = true; _, err := c.WalkAll(context.Background()); return err },
+			[]string{"/calibre/opds/books/letter/00"}},
+		{"WalkFiltered cwa shelf fast path", func(c *Client) error {
+			c.IsCWA = true
+			_, err := c.WalkFiltered(context.Background(), "/calibre/opds/shelf/3")
+			return err
+		}, []string{"/calibre/opds/shelf/3"}},
+		{"WalkShelf", func(c *Client) error { c.IsCWA = true; _, err := c.WalkShelf(context.Background(), 3); return err },
+			[]string{"/calibre/opds/shelf/3"}},
+		{"ListShelves", func(c *Client) error {
+			c.IsCWA = true
+			shelves, err := c.ListShelves(context.Background())
+			if err == nil && (len(shelves) != 1 || shelves[0].ID != 3) {
+				err = fmt.Errorf("shelves = %+v, want ID 3", shelves)
+			}
+			return err
+		}, []string{"/calibre/opds/shelfindex"}},
+	}
+	for _, base := range []string{"/calibre", "/calibre/"} {
+		for _, tc := range cases {
+			t.Run(base+" "+tc.name, func(t *testing.T) {
+				srv, paths := newOPDSMock(t, prefixedCWAFeeds())
+				c := newOPDSClient(t, srv.URL+base)
+				if err := tc.call(c); err != nil {
+					t.Fatalf("%s: %v", tc.name, err)
+				}
+				if !slices.Equal(*paths, tc.want) {
+					t.Errorf("requests = %v, want %v", *paths, tc.want)
+				}
+			})
+		}
+	}
+}
+
+func TestClient_PrefixedAcquisitionURLKeepsServerHref(t *testing.T) {
+	// Server-supplied hrefs already carry the prefix; they must be
+	// resolved as-is, not prefixed a second time.
+	srv, _ := newOPDSMock(t, prefixedCWAFeeds())
+	c := newOPDSClient(t, srv.URL+"/calibre")
+	c.IsCWA = true
+	books, err := c.WalkAll(context.Background())
+	if err != nil {
+		t.Fatalf("WalkAll: %v", err)
+	}
+	if len(books) != 2 || books[0].URL != srv.URL+"/calibre/opds/download/a1" {
+		t.Errorf("books = %+v, want two with URLs under /calibre/opds/download", books)
 	}
 }

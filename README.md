@@ -44,7 +44,7 @@ The app then appears in the device's Applications menu as `@pocketbeam` with a g
 Launch pocketbeam from the Applications menu. You will be walked through:
 
 1. **Server type**: Calibre-Web / OPDS, or WebDAV / Nextcloud
-2. **Server URL**: e.g. `http://library.lan:8083` for OPDS, or `https://nc.example.com/remote.php/dav/files/alice` for WebDAV
+2. **Server URL**: e.g. `http://library.lan:8083` for OPDS (a path prefix such as `https://example.com/calibre` is fine), or `https://nc.example.com/remote.php/dav/files/alice` for WebDAV
 3. **Username** and **password**: your server login
 4. **Testing connection**: the wizard probes the server and validates your credentials before saving
 

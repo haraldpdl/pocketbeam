@@ -125,3 +125,25 @@ func TestProbeCWA_Success(t *testing.T) {
 		t.Errorf("Basic Auth header = %q, want 'Basic ' prefix", gotAuth)
 	}
 }
+
+func TestProbeCWA_HostWithPathPrefix(t *testing.T) {
+	// The probe must hit the same URL the client later syncs from, so a
+	// prefixed host (with or without a trailing slash) probes
+	// <prefix>/opds. See TestClient_HostWithPathPrefix for the client side.
+	for _, base := range []string{"/calibre", "/calibre/"} {
+		t.Run(base, func(t *testing.T) {
+			gotPath := ""
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				gotPath = r.URL.Path
+				_, _ = w.Write([]byte(`<?xml version="1.0"?><feed xmlns="http://www.w3.org/2005/Atom"/>`))
+			}))
+			defer srv.Close()
+			if err := ProbeCWA(context.Background(), srv.URL+base, "", ""); err != nil {
+				t.Fatalf("ProbeCWA = %v, want nil", err)
+			}
+			if gotPath != "/calibre/opds" {
+				t.Errorf("probed %q, want /calibre/opds", gotPath)
+			}
+		})
+	}
+}
