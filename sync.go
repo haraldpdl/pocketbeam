@@ -489,10 +489,17 @@ func download(parent context.Context, src Source, path string, b Book) (int64, e
 // sanitize strips characters that are illegal or awkward in filenames on
 // FAT-style filesystems (the PocketBook internal storage). Slashes, control
 // chars, leading/trailing whitespace and dots are removed; runs of whitespace
-// collapse to a single space.
+// collapse to a single space. Input that reduces to nothing becomes "_".
 func sanitize(s string) string {
+	return sanitizeWith(s, "_")
+}
+
+// sanitizeWith is sanitize with a caller-chosen stand-in for input that
+// reduces to nothing, so callers naming a directory can fall back to a
+// readable name instead of "_".
+func sanitizeWith(s, empty string) string {
 	if s == "" {
-		return "_"
+		return empty
 	}
 	var b strings.Builder
 	b.Grow(len(s))
@@ -511,7 +518,7 @@ func sanitize(s string) string {
 	out = truncateUTF8(out, maxFilenameBytes)
 	out = strings.TrimRight(out, ". ")
 	if out == "" {
-		return "_"
+		return empty
 	}
 	return out
 }

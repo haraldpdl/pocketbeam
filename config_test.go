@@ -200,3 +200,19 @@ func TestConfigMultiFilterRoundTrip(t *testing.T) {
 		t.Errorf("FilterLabel = %q, want %q", got.FilterLabel(), "2 selected")
 	}
 }
+
+func TestLibraryFolderName(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"home", "home"},
+		{"Nextcloud Books", "Nextcloud Books"}, // spaces survive, they are legal on vfat
+		{"sci/fi:shelf", "sci_fi_shelf"},       // path separators and FAT-illegal chars
+		{"  spaced  ", "spaced"},               // outer whitespace trimmed
+		{"", "default"},                        // no name at all
+		{"...", "default"},                     // filters away to nothing
+	}
+	for _, tc := range cases {
+		if got := libraryFolderName(tc.in); got != tc.want {
+			t.Errorf("libraryFolderName(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}

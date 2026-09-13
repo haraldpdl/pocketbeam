@@ -65,7 +65,7 @@ The main screen has four actions:
     - **Profile: &lt;name&gt;**: opens the profile list, paginated with Prev / Next like the pickers. Tap a profile to open its panel, where "Make active" switches to it and "Delete this profile" (tap twice) removes it; "Add new server" creates another (one device can sync from a home CWA, a friend's Nextcloud, and a public OPDS server, each as its own profile).
 - **Quit**: back to the Applications menu.
 
-Books land under `/mnt/ext1/Books/CWA/<Author>/<Title>.<ext>` (OPDS) or `/mnt/ext1/Books/WebDAV/<Author>/<Title>.<ext>` and show up in the device's library after the next library refresh. If a second, different book resolves to the same author and title (another edition, or a same-named file in another WebDAV folder), its filename gets a short `[xxxxxxxx]` tag so the two never share one file.
+Books land under `/mnt/ext1/Books/<profile name>/<Author>/<Title>.<ext>` and show up in the device's library after the next library refresh. If a second, different book resolves to the same author and title (another edition, or a same-named file in another WebDAV folder), its filename gets a short `[xxxxxxxx]` tag so the two never share one file.
 
 ## Configuration file
 
@@ -80,7 +80,7 @@ backend     = opds
 host        = http://cwa.lan:8083
 user        = your-cwa-username
 password    = your-cwa-password
-library     = /mnt/ext1/Books/CWA
+library     = /mnt/ext1/Books/home
 filter_href = /opds/shelf/3
 filter_name = to-pocketbook
 filter_href = /opds/category/tag/12
@@ -92,9 +92,11 @@ backend  = webdav
 host     = https://nc.example.com/remote.php/dav/files/alice
 user     = alice
 password = hunter2
-library  = /mnt/ext1/Books/WebDAV
+library  = /mnt/ext1/Books/nas
 path     = /Books/Fiction
 ```
+
+The wizard derives `library` from the profile name (filtered for characters the device's storage cannot take), so two profiles never share a folder. It does so only when the profile is created: profiles set up by an earlier version keep their existing `Books/CWA` or `Books/WebDAV` folder, and re-entering the server details from Settings leaves the path alone. Edit this key by hand to move a library.
 
 `filter_href` / `filter_name` can repeat to sync more than one feed per profile; books are deduped by UUID across the union. `state_db` is global and shared by every profile (identities don't collide across real catalogs).
 

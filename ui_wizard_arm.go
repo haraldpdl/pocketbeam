@@ -305,13 +305,21 @@ func (a *app) runProbe() {
 		a.failWizard(err)
 		return
 	}
-	libraryDir := "CWA"
-	if backend == BackendWebDAV {
-		libraryDir = "WebDAV"
-	}
 	profile := in.name
+	library := ""
+	if cur := a.Config(); cur != nil && !in.addProfile {
+		// "Change server info" re-enters the wizard at the URL step for
+		// the profile already in session, so it carries no name: keep
+		// that profile's name and library folder instead of deriving a
+		// new one, which would leave the books it already synced behind
+		// in the old folder.
+		profile, library = cur.Profile, cur.Library
+	}
 	if profile == "" {
 		profile = defaultProfileName
+	}
+	if library == "" {
+		library = filepath.Join(ink.FlashDir, "Books", libraryFolderName(profile))
 	}
 	cfg := &Config{
 		Profile:      profile,
@@ -319,7 +327,7 @@ func (a *app) runProbe() {
 		Host:         in.url,
 		User:         in.user,
 		Pass:         in.pass,
-		Library:      filepath.Join(ink.FlashDir, "Books", libraryDir),
+		Library:      library,
 		StateDB:      filepath.Join(ink.ConfigPath, "pocketbeam.db"),
 		CheckUpdates: true,
 	}

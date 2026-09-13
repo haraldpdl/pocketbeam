@@ -22,6 +22,16 @@ const (
 // the wizard creates.
 const defaultProfileName = "default"
 
+// libraryFolderName returns the folder under <flash>/Books that holds a
+// profile's downloaded books. Naming it after the profile keeps two
+// profiles pointing at different servers from sharing one folder. The name
+// goes through the same filename filter as book titles because the
+// device's storage is vfat; a name that filters away to nothing falls back
+// to defaultProfileName rather than the opaque "_" used for filenames.
+func libraryFolderName(profile string) string {
+	return sanitizeWith(profile, defaultProfileName)
+}
+
 // defaultUpdateURL is the release endpoint queried when check_updates is
 // on and the config hasn't overridden it via update_url. It is a var so a
 // build can point it elsewhere with
@@ -38,7 +48,7 @@ type Config struct {
 	Host          string   // base URL, e.g. http://cwa.example.internal:8083
 	User          string   // server user
 	Pass          string   // server password
-	Library       string   // local target dir, e.g. /mnt/ext1/Books/CWA
+	Library       string   // local target dir, e.g. /mnt/ext1/Books/home (named after the profile by the wizard)
 	StateDB       string   // sqlite path, e.g. /mnt/ext1/system/config/pocketbeam.db
 	FilterHrefs   []string // OPDS only: one or more feed paths to sync (empty slice = all books). Each is a CWA shelf, generic subsection, or any other OPDS feed URL. Walking multiple produces a deduped union by UUID.
 	FilterNames   []string // display labels parallel to FilterHrefs (picker sets these); surplus or missing entries are tolerated.
