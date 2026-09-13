@@ -232,22 +232,12 @@ func (a *app) Key(e ink.KeyEvent) bool {
 	if cur == screenLibraryRefresh {
 		return true
 	}
-	// Back key behaviour: return to previous screen from settings/picker,
-	// quit from first-run welcome/error or from main (if idle).
-	if e.Key == ink.KeyBack && a.Wizard().step != stepTesting && !a.syncActive() {
+	wiz := a.Wizard()
+	// Back key behaviour: answer the confirmation prompts, otherwise walk
+	// back up the screen graph, and quit only where there is nowhere left
+	// to go (main screen, genuine first-run wizard).
+	if e.Key == ink.KeyBack && wiz.step != stepTesting && !a.syncActive() {
 		switch cur {
-		case screenSettings:
-			a.SetScreen(screenMain)
-			ink.Repaint()
-			return true
-		case screenShelfPicker, screenDirPicker, screenProfileList, screenUpdate:
-			a.SetScreen(screenSettings)
-			ink.Repaint()
-			return true
-		case screenProfileDetail:
-			a.SetScreen(screenProfileList)
-			ink.Repaint()
-			return true
 		case screenDeleteConfirm:
 			// Back key on the prompt is equivalent to "No": keep books,
 			// release the sync goroutine.
@@ -257,10 +247,21 @@ func (a *app) Key(e ink.KeyEvent) bool {
 			// Back key on the oversize prompt = cancel the sync.
 			a.answerSpace(false)
 			return true
-		default:
+		}
+		to, ok := backTarget(cur, wiz)
+		if !ok {
 			ink.Exit()
 			return true
 		}
+		if cur == screenFirstRun {
+			// Leaving the reused wizard discards the half-entered server
+			// details, so the next visit starts clean and the password
+			// typed for an abandoned attempt does not linger.
+			a.UpdateWizard(func(w *wizardState) { *w = wizardState{} })
+		}
+		a.SetScreen(to)
+		ink.Repaint()
+		return true
 	}
 	switch cur {
 	case screenFirstRun:

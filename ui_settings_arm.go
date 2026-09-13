@@ -133,7 +133,8 @@ func (a *app) settingsPointer(e ink.PointerEvent) bool {
 
 // startChangeInfo re-enters the wizard to replace server URL, username, and
 // password. On success, the existing store and client are closed and swapped
-// for new ones against the updated config.
+// for new ones against the updated config; the recorded returnTo sends the
+// Back key back to Settings instead of out of the app.
 func (a *app) startChangeInfo() {
 	a.UpdateWizard(func(w *wizardState) {
 		w.step = stepURL
@@ -141,6 +142,7 @@ func (a *app) startChangeInfo() {
 		w.url = ""
 		w.user = ""
 		w.pass = ""
+		w.returnTo = screenSettings
 	})
 	a.SetScreen(screenFirstRun)
 	ink.OpenKeyboard("https://library.example.com:8083", 512)

@@ -178,6 +178,7 @@ func TestWizardSnapshotCarriesEveryField(t *testing.T) {
 		name:       "nextcloud",
 		err:        errors.New("previous attempt"),
 		addProfile: true,
+		returnTo:   screenProfileList,
 		opdsBtn:    image.Rect(1, 2, 3, 4),
 		webdavBtn:  image.Rect(5, 6, 7, 8),
 	}
@@ -196,4 +197,48 @@ func openTestStore(t *testing.T, name string) *Store {
 	}
 	t.Cleanup(func() { _ = st.Close() })
 	return st
+}
+
+// TestBackTarget pins the Back-key navigation graph, including the two
+// entries that reuse the first-run wizard: Settings -> Server and
+// profile list -> Add both record where they came from, so Back returns
+// there rather than quitting the app. Only the main screen and a genuine
+// first run (no profile yet, so no origin recorded) have nowhere to go.
+func TestBackTarget(t *testing.T) {
+	cases := []struct {
+		name string
+		cur  screen
+		wiz  wizardState
+		want screen
+		ok   bool
+	}{
+		{"settings to main", screenSettings, wizardState{}, screenMain, true},
+		{"shelf picker to settings", screenShelfPicker, wizardState{}, screenSettings, true},
+		{"dir picker to settings", screenDirPicker, wizardState{}, screenSettings, true},
+		{"profile list to settings", screenProfileList, wizardState{}, screenSettings, true},
+		{"update to settings", screenUpdate, wizardState{}, screenSettings, true},
+		{"profile detail to profile list", screenProfileDetail, wizardState{}, screenProfileList, true},
+		{
+			"change server returns to settings",
+			screenFirstRun,
+			wizardState{step: stepURL, returnTo: screenSettings},
+			screenSettings, true,
+		},
+		{
+			"add profile returns to profile list",
+			screenFirstRun,
+			wizardState{step: stepProfileName, addProfile: true, returnTo: screenProfileList},
+			screenProfileList, true,
+		},
+		{"first run quits", screenFirstRun, wizardState{step: stepWelcome}, screenFirstRun, false},
+		{"main quits", screenMain, wizardState{}, screenMain, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := backTarget(tc.cur, tc.wiz)
+			if got != tc.want || ok != tc.ok {
+				t.Errorf("backTarget(%v, %+v) = %v, %v; want %v, %v", tc.cur, tc.wiz, got, ok, tc.want, tc.ok)
+			}
+		})
+	}
 }

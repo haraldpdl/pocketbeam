@@ -54,9 +54,16 @@ type wizardState struct {
 	err     error
 	// addProfile is true when the wizard is being used to create another
 	// profile from the profile-list screen rather than the initial
-	// first-run setup. It controls where the wizard returns on success
-	// and whether the profile-name step is shown.
+	// first-run setup. It makes a successful probe flip the config's
+	// active marker to the profile just created.
 	addProfile bool
+	// returnTo is the screen the Back key leaves the wizard for. The
+	// wizard is reused to edit the active server (Settings -> Server) and
+	// to add a profile (profile list -> Add), and those entries record
+	// where the user came from. The zero value screenFirstRun means the
+	// wizard owns the app because no profile is set up yet, so there is
+	// nothing to go back to.
+	returnTo screen
 	// Tap targets for the backend-choice step, captured during draw so the
 	// pointer handler knows where the two buttons live.
 	opdsBtn   image.Rectangle
@@ -205,4 +212,27 @@ func (s *appState) UpdateStats(fn func(*mainStats)) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	fn(&s.stats)
+}
+
+// backTarget reports the screen the hardware Back key returns to from
+// cur, and whether there is one at all. Nothing here changes state, so
+// the navigation graph can be tested off-device; the ARM key handler
+// applies the answer and quits the app when ok is false.
+//
+// The confirmation screens (delete, space warning) are not in the graph:
+// Back answers their question instead of navigating.
+func backTarget(cur screen, wiz wizardState) (screen, bool) {
+	switch cur {
+	case screenSettings:
+		return screenMain, true
+	case screenShelfPicker, screenDirPicker, screenProfileList, screenUpdate:
+		return screenSettings, true
+	case screenProfileDetail:
+		return screenProfileList, true
+	case screenFirstRun:
+		if wiz.returnTo != screenFirstRun {
+			return wiz.returnTo, true
+		}
+	}
+	return cur, false
 }

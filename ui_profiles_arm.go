@@ -272,10 +272,12 @@ func (a *app) reloadActiveConfig() {
 
 // startAddProfile enters the wizard in "add-profile" mode: the first
 // step asks for the new profile's name, then the normal URL / user /
-// pass flow runs. Saving creates the new section and marks it active.
+// pass flow runs. Saving creates the new section and marks it active;
+// the recorded returnTo sends the Back key back to the profile list
+// instead of out of the app.
 func (a *app) startAddProfile() {
 	a.UpdateWizard(func(w *wizardState) {
-		*w = wizardState{step: stepProfileName, addProfile: true}
+		*w = wizardState{step: stepProfileName, addProfile: true, returnTo: screenProfileList}
 	})
 	a.SetScreen(screenFirstRun)
 	ink.OpenKeyboard("new-profile-name", 40)
