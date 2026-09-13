@@ -1,5 +1,5 @@
-// App shell: screen enum, the app struct, and the InkView event
-// dispatch (Draw / Key / Pointer) that routes to each screen.
+// App shell: the app struct and the InkView event dispatch
+// (Draw / Key / Pointer) that routes to each screen.
 
 package main
 
@@ -13,22 +13,6 @@ import (
 	"time"
 
 	ink "github.com/dennwc/inkview"
-)
-
-type screen int
-
-const (
-	screenFirstRun screen = iota
-	screenMain
-	screenSettings
-	screenShelfPicker
-	screenDirPicker
-	screenDeleteConfirm
-	screenSpaceWarn
-	screenProfileList
-	screenProfileDetail
-	screenUpdate
-	screenLibraryRefresh
 )
 
 // feedPickerTimeout caps one picker level fetch (probe + every page of the
@@ -75,14 +59,14 @@ func (p *pickerFetch) restart() (context.Context, context.CancelFunc) {
 // letting a genuine down+up pair fire the same action twice.
 const tapDebounce = 250 * time.Millisecond
 
-// app implements ink.App for the pocketbeam device UI.
+// app implements ink.App for the pocketbeam device UI. The state shared
+// with background goroutines lives in the embedded appState; everything
+// declared here is either fixed at startup or touched by the InkView
+// event loop alone.
 type app struct {
+	appState
+
 	cfgPath       string
-	cfg           *Config
-	client        *Client
-	store         *Store
-	screen        screen
-	wizard        wizardState
 	sync          syncState
 	picker        feedPickerState
 	dirPicker     dirPickerState
@@ -92,9 +76,6 @@ type app struct {
 	profileDetail profileDetailState
 	update        updateState
 	libRefresh    libRefreshState
-	lastSync      SyncSummary
-	hasLastSync   bool
-	bookCount     int
 	netStop       func()
 	layout        layout
 	lastTap       time.Time
@@ -185,26 +166,24 @@ func (a *app) Init() error {
 	if cfg, err := LoadConfig(a.cfgPath); err == nil {
 		if client, err := NewClient(cfg.Host, cfg.User, cfg.Pass); err == nil {
 			if store, err := OpenStore(cfg.StateDB); err == nil {
-				a.cfg = cfg
-				a.client = client
-				a.store = store
+				a.SetSession(cfg, client, store)
 				a.refreshMainStats()
 				if cfg.CheckUpdates {
 					go a.backgroundUpdateCheck()
 				}
-				a.screen = screenMain
+				a.SetScreen(screenMain)
 				return nil
 			}
 		}
 	}
-	a.screen = screenFirstRun
-	a.wizard.step = stepWelcome
+	a.SetScreen(screenFirstRun)
+	a.UpdateWizard(func(w *wizardState) { w.step = stepWelcome })
 	return nil
 }
 
 func (a *app) Close() error {
-	if a.store != nil {
-		_ = a.store.Close()
+	if store := a.Store(); store != nil {
+		_ = store.Close()
 	}
 	if a.netStop != nil {
 		a.netStop()
@@ -218,7 +197,7 @@ func (a *app) Draw() {
 	// down when a picker fetch fails or the user leaves mid-load.
 	a.hideHourglass()
 	ink.ClearScreen()
-	switch a.screen {
+	switch a.Screen() {
 	case screenFirstRun:
 		a.drawWizard()
 	case screenMain:
@@ -249,23 +228,24 @@ func (a *app) Key(e ink.KeyEvent) bool {
 	// Library refresh is a modal auto-closing screen. Scanner has
 	// foreground for the duration, so keys can only arrive in the brief
 	// window before scanner takes over; swallow them either way.
-	if a.screen == screenLibraryRefresh {
+	cur := a.Screen()
+	if cur == screenLibraryRefresh {
 		return true
 	}
 	// Back key behaviour: return to previous screen from settings/picker,
 	// quit from first-run welcome/error or from main (if idle).
-	if e.Key == ink.KeyBack && a.wizard.step != stepTesting && !a.syncActive() {
-		switch a.screen {
+	if e.Key == ink.KeyBack && a.Wizard().step != stepTesting && !a.syncActive() {
+		switch cur {
 		case screenSettings:
-			a.screen = screenMain
+			a.SetScreen(screenMain)
 			ink.Repaint()
 			return true
 		case screenShelfPicker, screenDirPicker, screenProfileList, screenUpdate:
-			a.screen = screenSettings
+			a.SetScreen(screenSettings)
 			ink.Repaint()
 			return true
 		case screenProfileDetail:
-			a.screen = screenProfileList
+			a.SetScreen(screenProfileList)
 			ink.Repaint()
 			return true
 		case screenDeleteConfirm:
@@ -282,7 +262,7 @@ func (a *app) Key(e ink.KeyEvent) bool {
 			return true
 		}
 	}
-	switch a.screen {
+	switch cur {
 	case screenFirstRun:
 		return a.wizardKey(e)
 	case screenMain:
@@ -308,7 +288,7 @@ func (a *app) Key(e ink.KeyEvent) bool {
 }
 
 func (a *app) Pointer(e ink.PointerEvent) bool {
-	switch a.screen {
+	switch a.Screen() {
 	case screenFirstRun:
 		return a.wizardPointer(e)
 	case screenMain:
@@ -339,17 +319,38 @@ func (a *app) Touch(e ink.TouchEvent) bool        { return false }
 func (a *app) Orientation(o ink.Orientation) bool { return false }
 
 // refreshMainStats pulls fresh last-sync + book-count from the store. Called
-// on screen entry and after a completed sync.
+// on screen entry and after a completed sync, i.e. from the sync goroutine
+// as well as the event loop. A query that fails leaves its previous value
+// in place rather than blanking the screen.
 func (a *app) refreshMainStats() {
-	if a.store == nil {
+	store := a.Store()
+	if store == nil {
 		return
 	}
-	if sum, ok, err := a.store.LastSync(); err == nil && ok {
-		a.lastSync = sum
-		a.hasLastSync = true
+	sum, haveSum, sumErr := store.LastSync()
+	count, countErr := store.BookCount()
+	a.UpdateStats(func(st *mainStats) {
+		if sumErr == nil && haveSum {
+			st.lastSync = sum
+			st.hasLastSync = true
+		}
+		if countErr == nil {
+			st.bookCount = count
+		}
+	})
+}
+
+// saveConfigChange applies fn to the active config and persists the
+// result. The edit lands on a copy that then replaces the published
+// pointer, so a goroutine holding the old config keeps a consistent view
+// instead of seeing a half-applied change.
+func (a *app) saveConfigChange(fn func(*Config)) {
+	cfg := a.UpdateConfig(fn)
+	if cfg == nil {
+		return
 	}
-	if n, err := a.store.BookCount(); err == nil {
-		a.bookCount = n
+	if err := SaveConfig(a.cfgPath, cfg); err != nil {
+		log.Printf("save config: %v", err)
 	}
 }
 

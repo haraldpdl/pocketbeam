@@ -43,7 +43,7 @@ func (a *app) confirmSpace(plan SyncPlan) bool {
 	a.spaceWarn.ch = make(chan bool, 1)
 	ch := a.spaceWarn.ch
 	a.spaceWarn.mu.Unlock()
-	a.screen = screenSpaceWarn
+	a.SetScreen(screenSpaceWarn)
 	ink.Repaint()
 	return <-ch
 }
@@ -59,7 +59,7 @@ func (a *app) answerSpace(ok bool) {
 		return
 	}
 	ch <- ok
-	a.screen = screenMain
+	a.SetScreen(screenMain)
 	ink.Repaint()
 }
 
@@ -203,7 +203,7 @@ func (a *app) confirmDeletions(deletions []LocalBook) bool {
 	a.delConfirm.ch = make(chan bool, 1)
 	ch := a.delConfirm.ch
 	a.delConfirm.mu.Unlock()
-	a.screen = screenDeleteConfirm
+	a.SetScreen(screenDeleteConfirm)
 	ink.Repaint()
 	return <-ch
 }
@@ -222,7 +222,7 @@ func (a *app) answerDelete(ok bool) {
 	ch <- ok
 	// The sync goroutine will flip back to screenMain once Sync returns;
 	// until then the screen stays on a transient "processing" visual.
-	a.screen = screenMain
+	a.SetScreen(screenMain)
 	ink.Repaint()
 }
 

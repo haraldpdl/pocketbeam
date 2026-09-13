@@ -54,10 +54,11 @@ const metaLastUpdateCheck = "last_update_check"
 // one-line banner when that's set. Failures are swallowed so an
 // offline device never reports a "could not check" banner to the user.
 func (a *app) backgroundUpdateCheck() {
-	if a.store == nil {
+	store := a.Store()
+	if store == nil {
 		return
 	}
-	if last, ok, _ := a.store.GetMeta(metaLastUpdateCheck); ok {
+	if last, ok, _ := store.GetMeta(metaLastUpdateCheck); ok {
 		if t, err := time.Parse(time.RFC3339, last); err == nil {
 			if time.Since(t) < updateCheckMinInterval {
 				return
@@ -74,6 +75,13 @@ func (a *app) backgroundUpdateCheck() {
 // launch (before Wi-Fi has finished associating) does not silently
 // fail with "network unreachable".
 func (a *app) runUpdateCheck() {
+	// Read the endpoint before claiming the check: deleting the last
+	// profile clears the session, and a check that raced that would have
+	// no config to query.
+	cfg := a.Config()
+	if cfg == nil {
+		return
+	}
 	a.update.mu.Lock()
 	if a.update.checking {
 		a.update.mu.Unlock()
@@ -94,7 +102,7 @@ func (a *app) runUpdateCheck() {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	newer, rel, err := CheckLatest(ctx, a.cfg.EffectiveUpdateURL(), version)
+	newer, rel, err := CheckLatest(ctx, cfg.EffectiveUpdateURL(), version)
 
 	a.update.mu.Lock()
 	a.update.checking = false
@@ -102,8 +110,8 @@ func (a *app) runUpdateCheck() {
 	a.update.available = newer
 	a.update.checkErr = err
 	a.update.mu.Unlock()
-	if a.store != nil {
-		_ = a.store.SetMeta(metaLastUpdateCheck, time.Now().Format(time.RFC3339))
+	if store := a.Store(); store != nil {
+		_ = store.SetMeta(metaLastUpdateCheck, time.Now().Format(time.RFC3339))
 	}
 	ink.Repaint()
 }
@@ -112,7 +120,7 @@ func (a *app) runUpdateCheck() {
 // release is loaded yet (user tapped "Check for updates" from an idle
 // state), trigger a fresh check in the background.
 func (a *app) openUpdateScreen() {
-	a.screen = screenUpdate
+	a.SetScreen(screenUpdate)
 	ink.Repaint()
 	a.update.mu.Lock()
 	haveRelease := a.update.release.Version != ""
@@ -141,6 +149,8 @@ func (a *app) drawUpdate() {
 
 	btnFont := ink.OpenFont(ink.DefaultFontBold, a.layout.fpx(44), true)
 	defer btnFont.Close()
+
+	cfg := a.Config()
 
 	a.update.mu.Lock()
 	checking := a.update.checking
@@ -238,7 +248,7 @@ func (a *app) drawUpdate() {
 
 	toggleRect := image.Rect(a.layout.margin, toggleY1, a.layout.margin+contentW, toggleY2)
 	autoSub := "Check once a week"
-	if !a.cfg.CheckUpdates {
+	if !cfg.CheckUpdates {
 		autoSub = "Disabled"
 	}
 	a.drawListRow(rowTitleFont, rowSubFont, toggleRect,
@@ -248,7 +258,7 @@ func (a *app) drawUpdate() {
 	togCY := (toggleRect.Min.Y + toggleRect.Max.Y) / 2
 	togX2 := toggleRect.Max.X - a.layout.sx(20)
 	togRect := image.Rect(togX2-togPillW, togCY-togPillH/2, togX2, togCY+togPillH/2)
-	a.drawToggle(togRect, a.cfg.CheckUpdates)
+	a.drawToggle(togRect, cfg.CheckUpdates)
 	a.drawHairline(toggleRect.Min.X, toggleRect.Max.X, toggleRect.Max.Y)
 
 	// Primary action row (either Install now or Check for updates).
@@ -278,7 +288,7 @@ func (a *app) drawUpdate() {
 
 func (a *app) updateKey(e ink.KeyEvent) bool {
 	if e.Key == ink.KeyBack {
-		a.screen = screenSettings
+		a.SetScreen(screenSettings)
 		ink.Repaint()
 		return true
 	}
@@ -307,7 +317,7 @@ func (a *app) updatePointer(e ink.PointerEvent) bool {
 	backBtn := a.update.backBtn
 	a.update.mu.Unlock()
 	if e.Point.In(backBtn) {
-		a.screen = screenSettings
+		a.SetScreen(screenSettings)
 		ink.Repaint()
 		return true
 	}
@@ -320,8 +330,7 @@ func (a *app) updatePointer(e ink.PointerEvent) bool {
 		return true
 	}
 	if !toggleBtn.Empty() && e.Point.In(toggleBtn) {
-		a.cfg.CheckUpdates = !a.cfg.CheckUpdates
-		_ = SaveConfig(a.cfgPath, a.cfg)
+		a.saveConfigChange(func(c *Config) { c.CheckUpdates = !c.CheckUpdates })
 		ink.Repaint()
 		return true
 	}
@@ -399,8 +408,8 @@ func (a *app) runUpdateInstall() {
 // shows a manual-relaunch hint so the user can exit and tap the app
 // icon themselves.
 func (a *app) relaunch(path string) {
-	if a.store != nil {
-		_ = a.store.Close()
+	if store := a.Store(); store != nil {
+		_ = store.Close()
 	}
 	if a.netStop != nil {
 		a.netStop()

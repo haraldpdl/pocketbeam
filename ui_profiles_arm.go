@@ -62,7 +62,7 @@ func (a *app) openProfileList() {
 	a.profileList.addRect = image.Rectangle{}
 	a.profileList.offset = 0
 	a.profileList.mu.Unlock()
-	a.screen = screenProfileList
+	a.SetScreen(screenProfileList)
 	ink.Repaint()
 }
 
@@ -146,7 +146,7 @@ func (a *app) drawProfileList() {
 
 func (a *app) profileListKey(e ink.KeyEvent) bool {
 	if e.Key == ink.KeyBack {
-		a.screen = screenSettings
+		a.SetScreen(screenSettings)
 		ink.Repaint()
 		return true
 	}
@@ -158,7 +158,7 @@ func (a *app) profileListPointer(e ink.PointerEvent) bool {
 		return false
 	}
 	if e.Point.In(a.layout.backButton) {
-		a.screen = screenSettings
+		a.SetScreen(screenSettings)
 		ink.Repaint()
 		return true
 	}
@@ -214,7 +214,7 @@ func (a *app) switchProfile(name string) {
 		return
 	}
 	a.reloadActiveConfig()
-	a.screen = screenMain
+	a.SetScreen(screenMain)
 	ink.Repaint()
 }
 
@@ -224,7 +224,8 @@ func (a *app) switchProfile(name string) {
 // active; reloadActiveConfig picks that up. Deleting the last profile
 // drops to the first-run wizard.
 func (a *app) deleteProfileByName(name string) {
-	wasActive := a.cfg != nil && a.cfg.Profile == name
+	cfg := a.Config()
+	wasActive := cfg != nil && cfg.Profile == name
 	if err := DeleteProfile(a.cfgPath, name); err != nil {
 		a.profileDetail.mu.Lock()
 		a.profileDetail.loadErr = err
@@ -237,14 +238,9 @@ func (a *app) deleteProfileByName(name string) {
 		// No profiles left; tear down in-memory state and hand control
 		// to the wizard. The store stays on disk until the user sets up
 		// a new profile pointing at a (possibly new) StateDB path.
-		if a.store != nil {
-			_ = a.store.Close()
-			a.store = nil
-		}
-		a.cfg = nil
-		a.client = nil
-		a.wizard = wizardState{step: stepWelcome}
-		a.screen = screenFirstRun
+		a.ClearSession()
+		a.UpdateWizard(func(w *wizardState) { *w = wizardState{step: stepWelcome} })
+		a.SetScreen(screenFirstRun)
 		ink.Repaint()
 		return
 	}
@@ -268,12 +264,9 @@ func (a *app) reloadActiveConfig() {
 		log.Printf("open store: %v", err)
 		return
 	}
-	if a.store != nil {
-		_ = a.store.Close()
-	}
-	a.cfg = cfg
-	a.store = store
-	a.client, _ = NewClient(cfg.Host, cfg.User, cfg.Pass)
+	client, _ := NewClient(cfg.Host, cfg.User, cfg.Pass)
+	// SetSession closes the store handle it replaces.
+	a.SetSession(cfg, client, store)
 	a.refreshMainStats()
 }
 
@@ -281,8 +274,10 @@ func (a *app) reloadActiveConfig() {
 // step asks for the new profile's name, then the normal URL / user /
 // pass flow runs. Saving creates the new section and marks it active.
 func (a *app) startAddProfile() {
-	a.wizard = wizardState{step: stepProfileName, addProfile: true}
-	a.screen = screenFirstRun
+	a.UpdateWizard(func(w *wizardState) {
+		*w = wizardState{step: stepProfileName, addProfile: true}
+	})
+	a.SetScreen(screenFirstRun)
 	ink.OpenKeyboard("new-profile-name", 40)
 }
 
@@ -294,8 +289,8 @@ func (a *app) startAddProfile() {
 func (a *app) openProfileDetail(name string) {
 	p, err := LoadProfileByName(a.cfgPath, name)
 	active := ""
-	if a.cfg != nil {
-		active = a.cfg.Profile
+	if cfg := a.Config(); cfg != nil {
+		active = cfg.Profile
 	}
 	a.profileDetail.mu.Lock()
 	a.profileDetail.name = name
@@ -310,7 +305,7 @@ func (a *app) openProfileDetail(name string) {
 		a.profileDetail.host = ""
 	}
 	a.profileDetail.mu.Unlock()
-	a.screen = screenProfileDetail
+	a.SetScreen(screenProfileDetail)
 	ink.Repaint()
 }
 
@@ -403,7 +398,7 @@ func (a *app) drawProfileDetail() {
 
 func (a *app) profileDetailKey(e ink.KeyEvent) bool {
 	if e.Key == ink.KeyBack {
-		a.screen = screenProfileList
+		a.SetScreen(screenProfileList)
 		ink.Repaint()
 		return true
 	}
@@ -415,7 +410,7 @@ func (a *app) profileDetailPointer(e ink.PointerEvent) bool {
 		return false
 	}
 	if e.Point.In(a.layout.backButton) {
-		a.screen = screenProfileList
+		a.SetScreen(screenProfileList)
 		ink.Repaint()
 		return true
 	}

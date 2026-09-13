@@ -61,11 +61,12 @@ type feedPickerState struct {
 func (a *app) openShelfPicker() {
 	// Seed the selection from the current config so the user sees
 	// previously-picked filters and can add to / remove from them.
-	seeded := make([]FilterOption, 0, len(a.cfg.FilterHrefs))
-	for i, href := range a.cfg.FilterHrefs {
+	cfg := a.Config()
+	seeded := make([]FilterOption, 0, len(cfg.FilterHrefs))
+	for i, href := range cfg.FilterHrefs {
 		name := href
-		if i < len(a.cfg.FilterNames) && a.cfg.FilterNames[i] != "" {
-			name = a.cfg.FilterNames[i]
+		if i < len(cfg.FilterNames) && cfg.FilterNames[i] != "" {
+			name = cfg.FilterNames[i]
 		}
 		seeded = append(seeded, FilterOption{Name: name, Href: href})
 	}
@@ -87,7 +88,7 @@ func (a *app) openShelfPicker() {
 	req := a.picker.reqID
 	ctx, cancel := a.picker.restart()
 	a.picker.mu.Unlock()
-	a.screen = screenShelfPicker
+	a.SetScreen(screenShelfPicker)
 	ink.Repaint()
 	go a.fetchFeedLevel(ctx, cancel, "", req)
 }
@@ -171,7 +172,7 @@ func (a *app) fetchFeedLevel(ctx context.Context, cancel context.CancelFunc, hre
 		ink.Repaint()
 		return
 	}
-	lvl, err := a.client.FetchLevel(ctx, href)
+	lvl, err := a.Client().FetchLevel(ctx, href)
 	if errors.Is(err, context.DeadlineExceeded) {
 		err = errors.New("Server did not respond in time.")
 	}
@@ -405,7 +406,7 @@ func (a *app) shelfPickerPointer(e ink.PointerEvent) bool {
 		return false
 	}
 	if e.Point.In(a.layout.backButton) {
-		a.screen = screenSettings
+		a.SetScreen(screenSettings)
 		ink.Repaint()
 		return true
 	}
@@ -480,7 +481,7 @@ func (a *app) pickerConfirmCurrent() {
 	} else {
 		a.setFilters([]string{href}, []string{title})
 	}
-	a.screen = screenSettings
+	a.SetScreen(screenSettings)
 	ink.Repaint()
 }
 
@@ -519,14 +520,15 @@ func (a *app) pickerFinishMulti() {
 		names = append(names, s.Name)
 	}
 	a.setFilters(hrefs, names)
-	a.screen = screenSettings
+	a.SetScreen(screenSettings)
 	ink.Repaint()
 }
 
 // setFilters replaces the config's filter selection and persists it.
 // Passing nil/empty slices clears the filter (sync everything).
 func (a *app) setFilters(hrefs, names []string) {
-	a.cfg.FilterHrefs = hrefs
-	a.cfg.FilterNames = names
-	_ = SaveConfig(a.cfgPath, a.cfg)
+	a.saveConfigChange(func(c *Config) {
+		c.FilterHrefs = hrefs
+		c.FilterNames = names
+	})
 }

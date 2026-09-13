@@ -1,5 +1,6 @@
 // First-run wizard: profile name, backend choice, URL / user / password
-// entry, and the connection probe that writes the first config.
+// entry, and the connection probe that writes the first config. The
+// wizard's state lives in appState (the probe runs on its own goroutine).
 
 package main
 
@@ -12,40 +13,6 @@ import (
 	ink "github.com/dennwc/inkview"
 )
 
-// wizardStep tracks where the user is in the first-run flow.
-type wizardStep int
-
-const (
-	stepWelcome wizardStep = iota
-	stepProfileName
-	stepBackend
-	stepURL
-	stepUser
-	stepPass
-	stepTesting
-	stepError
-)
-
-// wizardState holds the in-progress first-run input and result.
-type wizardState struct {
-	step    wizardStep
-	backend string // "opds" or "webdav"
-	url     string
-	user    string
-	pass    string
-	name    string // profile name; "default" on the initial first run, user-entered when adding another
-	err     error
-	// addProfile is true when the wizard is being used to create another
-	// profile from the profile-list screen rather than the initial
-	// first-run setup. It controls where the wizard returns on success
-	// and whether the profile-name step is shown.
-	addProfile bool
-	// Tap targets for the backend-choice step, captured during draw so the
-	// pointer handler knows where the two buttons live.
-	opdsBtn   image.Rectangle
-	webdavBtn image.Rectangle
-}
-
 func (a *app) drawWizard() {
 	title := ink.OpenFont(ink.DefaultFontBold, a.layout.fpx(54), true)
 	defer title.Close()
@@ -55,7 +22,12 @@ func (a *app) drawWizard() {
 	defer body.Close()
 	body.SetActive(ink.Black)
 
-	switch a.wizard.step {
+	// One snapshot for the whole pass: the probe goroutine can move the
+	// wizard on mid-draw, and a step drawn with the next step's error
+	// would be worse than a pass that is one repaint behind.
+	wiz := a.Wizard()
+
+	switch wiz.step {
 	case stepWelcome:
 		title.SetActive(ink.Black)
 		ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(200)}, "pocketbeam")
@@ -80,9 +52,9 @@ func (a *app) drawWizard() {
 		a.drawHairline(a.layout.margin, a.layout.screen.X-a.layout.margin, a.layout.sy(300))
 		body.SetActive(ink.Black)
 		ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(370)}, "Tap or press OK to re-open the keyboard.")
-		if a.wizard.name != "" {
+		if wiz.name != "" {
 			body.SetActive(ink.DarkGray)
-			ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(480)}, "Name: "+a.wizard.name)
+			ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(480)}, "Name: "+wiz.name)
 		}
 
 	case stepBackend:
@@ -98,21 +70,24 @@ func (a *app) drawWizard() {
 
 		w := a.layout.screen.X
 		btnW := w - 2*a.layout.margin
-		a.wizard.opdsBtn = image.Rect(a.layout.margin, a.layout.sy(360), a.layout.margin+btnW, a.layout.sy(500))
-		a.wizard.webdavBtn = image.Rect(a.layout.margin, a.layout.sy(500), a.layout.margin+btnW, a.layout.sy(640))
+		opdsBtn := image.Rect(a.layout.margin, a.layout.sy(360), a.layout.margin+btnW, a.layout.sy(500))
+		webdavBtn := image.Rect(a.layout.margin, a.layout.sy(500), a.layout.margin+btnW, a.layout.sy(640))
+		a.UpdateWizard(func(w *wizardState) {
+			w.opdsBtn, w.webdavBtn = opdsBtn, webdavBtn
+		})
 
-		a.drawListRow(rowTitleFont, rowSubFont, a.wizard.opdsBtn,
+		a.drawListRow(rowTitleFont, rowSubFont, opdsBtn,
 			"Calibre-Web / OPDS", "Calibre-Web, COPS, and other OPDS catalogs", true)
-		a.drawListRow(rowTitleFont, rowSubFont, a.wizard.webdavBtn,
+		a.drawListRow(rowTitleFont, rowSubFont, webdavBtn,
 			"WebDAV / Nextcloud", "Nextcloud, Synology, ownCloud, generic WebDAV", true)
-		a.drawHairline(a.wizard.webdavBtn.Min.X, a.wizard.webdavBtn.Max.X, a.wizard.webdavBtn.Max.Y)
+		a.drawHairline(webdavBtn.Min.X, webdavBtn.Max.X, webdavBtn.Max.Y)
 
 	case stepURL, stepUser, stepPass:
 		title.SetActive(ink.Black)
 		ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(200)}, "pocketbeam setup")
 		body.SetActive(ink.DarkGray)
 		var step, what string
-		switch a.wizard.step {
+		switch wiz.step {
 		case stepURL:
 			step, what = "Step 1 of 3", "Server URL"
 		case stepUser:
@@ -126,19 +101,19 @@ func (a *app) drawWizard() {
 		ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(370)}, "Tap or press OK to open the keyboard.")
 		body.SetActive(ink.DarkGray)
 		y := a.layout.sy(490)
-		if a.wizard.url != "" {
-			ink.DrawString(image.Point{X: a.layout.margin, Y: y}, "Server: "+truncate(a.wizard.url, 48))
+		if wiz.url != "" {
+			ink.DrawString(image.Point{X: a.layout.margin, Y: y}, "Server: "+truncate(wiz.url, 48))
 			y += a.layout.sy(50)
 		}
-		if a.wizard.user != "" {
-			ink.DrawString(image.Point{X: a.layout.margin, Y: y}, "User: "+truncate(a.wizard.user, 48))
+		if wiz.user != "" {
+			ink.DrawString(image.Point{X: a.layout.margin, Y: y}, "User: "+truncate(wiz.user, 48))
 		}
 
 	case stepTesting:
 		title.SetActive(ink.Black)
 		ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(300)}, "Testing connection")
 		body.SetActive(ink.DarkGray)
-		ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(370)}, truncate(a.wizard.url, 55))
+		ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(370)}, truncate(wiz.url, 55))
 		a.showHourglassAt(image.Point{X: a.layout.margin, Y: a.layout.sy(480)})
 
 	case stepError:
@@ -148,8 +123,8 @@ func (a *app) drawWizard() {
 		ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(260)}, "Check that the server URL and credentials are correct.")
 		a.drawHairline(a.layout.margin, a.layout.screen.X-a.layout.margin, a.layout.sy(300))
 		msg := "Unknown error"
-		if a.wizard.err != nil {
-			msg = a.wizard.err.Error()
+		if wiz.err != nil {
+			msg = wiz.err.Error()
 		}
 		body.SetActive(ink.Black)
 		ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(370)}, truncate(msg, 60))
@@ -159,10 +134,10 @@ func (a *app) drawWizard() {
 }
 
 func (a *app) wizardKey(e ink.KeyEvent) bool {
-	switch a.wizard.step {
+	switch a.Wizard().step {
 	case stepWelcome:
 		if e.Key == ink.KeyOk || e.Key == ink.KeyNext {
-			a.wizard.step = stepBackend
+			a.setWizardStep(stepBackend)
 			ink.Repaint()
 			return true
 		}
@@ -200,17 +175,18 @@ func (a *app) wizardPointer(e ink.PointerEvent) bool {
 	if e.State != ink.PointerDown {
 		return false
 	}
-	switch a.wizard.step {
+	wiz := a.Wizard()
+	switch wiz.step {
 	case stepWelcome:
-		a.wizard.step = stepBackend
+		a.setWizardStep(stepBackend)
 		ink.Repaint()
 		return true
 	case stepBackend:
-		if e.Point.In(a.wizard.opdsBtn) {
+		if e.Point.In(wiz.opdsBtn) {
 			a.pickBackend(BackendOPDS)
 			return true
 		}
-		if e.Point.In(a.wizard.webdavBtn) {
+		if e.Point.In(wiz.webdavBtn) {
 			a.pickBackend(BackendWebDAV)
 			return true
 		}
@@ -231,8 +207,13 @@ func (a *app) wizardPointer(e ink.PointerEvent) bool {
 // to the URL entry step. OPDS suggests a Calibre-Web URL; WebDAV suggests
 // a Nextcloud-style URL to nudge the user into the right format.
 func (a *app) pickBackend(b string) {
-	a.wizard.backend = b
+	a.UpdateWizard(func(w *wizardState) { w.backend = b })
 	a.startURLEntry()
+}
+
+// setWizardStep advances the wizard without changing anything else.
+func (a *app) setWizardStep(step wizardStep) {
+	a.UpdateWizard(func(w *wizardState) { w.step = step })
 }
 
 // reopenKeyboardForStep pops the right keyboard for the current wizard step.
@@ -240,7 +221,7 @@ func (a *app) pickBackend(b string) {
 // the chained keyboard does not actually appear, so the user taps the screen
 // or presses OK to request it explicitly.
 func (a *app) reopenKeyboardForStep() {
-	switch a.wizard.step {
+	switch a.Wizard().step {
 	case stepURL:
 		ink.OpenKeyboard(a.urlHint(), 512)
 	case stepUser:
@@ -251,13 +232,15 @@ func (a *app) reopenKeyboardForStep() {
 }
 
 func (a *app) startURLEntry() {
-	a.wizard.step = stepURL
-	a.wizard.err = nil
+	a.UpdateWizard(func(w *wizardState) {
+		w.step = stepURL
+		w.err = nil
+	})
 	ink.OpenKeyboard(a.urlHint(), 512)
 }
 
 func (a *app) urlHint() string {
-	if a.wizard.backend == BackendWebDAV {
+	if a.Wizard().backend == BackendWebDAV {
 		return "https://nc.example.com/remote.php/dav/files/alice"
 	}
 	return "https://library.example.com:8083"
@@ -265,27 +248,35 @@ func (a *app) urlHint() string {
 
 // onKeyboardInput routes based on current wizard step.
 func (a *app) onKeyboardInput(text string) {
-	switch a.wizard.step {
+	switch a.Wizard().step {
 	case stepProfileName:
 		name := sanitizeProfileName(text)
 		if name == "" {
 			ink.OpenKeyboard("new-profile-name", 40)
 			return
 		}
-		a.wizard.name = name
-		a.wizard.step = stepBackend
+		a.UpdateWizard(func(w *wizardState) {
+			w.name = name
+			w.step = stepBackend
+		})
 		ink.Repaint()
 	case stepURL:
-		a.wizard.url = text
-		a.wizard.step = stepUser
+		a.UpdateWizard(func(w *wizardState) {
+			w.url = text
+			w.step = stepUser
+		})
 		ink.OpenKeyboard("Username", 128)
 	case stepUser:
-		a.wizard.user = text
-		a.wizard.step = stepPass
+		a.UpdateWizard(func(w *wizardState) {
+			w.user = text
+			w.step = stepPass
+		})
 		ink.OpenKeyboard("Password", 128)
 	case stepPass:
-		a.wizard.pass = text
-		a.wizard.step = stepTesting
+		a.UpdateWizard(func(w *wizardState) {
+			w.pass = text
+			w.step = stepTesting
+		})
 		ink.Repaint()
 		go a.runProbe()
 	}
@@ -302,38 +293,39 @@ func sanitizeProfileName(s string) string {
 }
 
 // runProbe probes the server and transitions the UI on success or failure.
+// Runs on its own goroutine, so it reads the entered details as one
+// snapshot and publishes every result through the appState accessors.
 func (a *app) runProbe() {
-	backend := a.wizard.backend
+	in := a.Wizard()
+	backend := in.backend
 	if backend == "" {
 		backend = BackendOPDS
 	}
 	var err error
 	switch backend {
 	case BackendWebDAV:
-		err = ProbeWebDAV(context.Background(), a.wizard.url, a.wizard.user, a.wizard.pass, "/")
+		err = ProbeWebDAV(context.Background(), in.url, in.user, in.pass, "/")
 	default:
-		err = ProbeCWA(context.Background(), a.wizard.url, a.wizard.user, a.wizard.pass)
+		err = ProbeCWA(context.Background(), in.url, in.user, in.pass)
 	}
 	if err != nil {
-		a.wizard.err = err
-		a.wizard.step = stepError
-		ink.Repaint()
+		a.failWizard(err)
 		return
 	}
 	libraryDir := "CWA"
 	if backend == BackendWebDAV {
 		libraryDir = "WebDAV"
 	}
-	profile := a.wizard.name
+	profile := in.name
 	if profile == "" {
 		profile = defaultProfileName
 	}
 	cfg := &Config{
 		Profile:      profile,
 		Backend:      backend,
-		Host:         a.wizard.url,
-		User:         a.wizard.user,
-		Pass:         a.wizard.pass,
+		Host:         in.url,
+		User:         in.user,
+		Pass:         in.pass,
 		Library:      filepath.Join(ink.FlashDir, "Books", libraryDir),
 		StateDB:      filepath.Join(ink.ConfigPath, "pocketbeam.db"),
 		CheckUpdates: true,
@@ -342,45 +334,45 @@ func (a *app) runProbe() {
 		cfg.Path = "/"
 	}
 	if err := SaveConfig(a.cfgPath, cfg); err != nil {
-		a.wizard.err = err
-		a.wizard.step = stepError
-		ink.Repaint()
+		a.failWizard(err)
 		return
 	}
 	// When the wizard is being used to add a profile, the new section is
 	// written but the file's `active` marker still points at the existing
 	// one. Flip it so the newly-created profile becomes the working one.
-	if a.wizard.addProfile {
+	if in.addProfile {
 		if err := SetActiveProfile(a.cfgPath, profile); err != nil {
-			a.wizard.err = err
-			a.wizard.step = stepError
-			ink.Repaint()
+			a.failWizard(err)
 			return
 		}
 	}
 	client, err := NewClient(cfg.Host, cfg.User, cfg.Pass)
 	if err != nil {
-		a.wizard.err = err
-		a.wizard.step = stepError
-		ink.Repaint()
+		a.failWizard(err)
 		return
 	}
 	store, err := OpenStore(cfg.StateDB)
 	if err != nil {
-		a.wizard.err = err
-		a.wizard.step = stepError
-		ink.Repaint()
+		a.failWizard(err)
 		return
 	}
-	// Close any existing store handle before swapping (happens on settings → edit).
-	if a.store != nil {
-		_ = a.store.Close()
-	}
-	a.cfg = cfg
-	a.client = client
-	a.store = store
+	// SetSession closes the store handle it replaces (settings -> edit).
+	a.SetSession(cfg, client, store)
 	a.refreshMainStats()
-	a.screen = screenMain
-	a.wizard = wizardState{}
+	a.SetScreen(screenMain)
+	// Clear the entered credentials only once the main screen is the
+	// target, so a repaint landing in between never draws a blank wizard.
+	a.UpdateWizard(func(w *wizardState) { *w = wizardState{} })
+	ink.Repaint()
+}
+
+// failWizard parks err on the wizard and shows the error step. Both
+// fields move together so the error screen can never draw the previous
+// attempt's message.
+func (a *app) failWizard(err error) {
+	a.UpdateWizard(func(w *wizardState) {
+		w.err = err
+		w.step = stepError
+	})
 	ink.Repaint()
 }

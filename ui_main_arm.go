@@ -80,20 +80,23 @@ func (a *app) drawMain() {
 	btnFont := ink.OpenFont(ink.DefaultFontBold, a.layout.fpx(44), true)
 	defer btnFont.Close()
 
+	cfg := a.Config()
+	stats := a.Stats()
+
 	// Title + host subtitle (host in muted gray so the filter/host context
 	// is present but secondary to the action area).
 	title.SetActive(ink.Black)
 	ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(140)}, "pocketbeam")
 	small.SetActive(ink.DarkGray)
-	subtitle := a.cfg.Host
-	if a.cfg.Backend == BackendWebDAV {
-		p := a.cfg.Path
+	subtitle := cfg.Host
+	if cfg.Backend == BackendWebDAV {
+		p := cfg.Path
 		if p == "" {
 			p = "/"
 		}
 		subtitle += "  ·  " + p
 	} else {
-		subtitle += "  ·  " + a.cfg.FilterLabel()
+		subtitle += "  ·  " + cfg.FilterLabel()
 	}
 	ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(190)}, truncate(subtitle, 60))
 
@@ -104,14 +107,14 @@ func (a *app) drawMain() {
 	statusY := a.layout.sy(300)
 	hero.SetActive(ink.Black)
 	body.SetActive(ink.DarkGray)
-	if a.hasLastSync {
+	if stats.hasLastSync {
 		ink.DrawString(image.Point{X: a.layout.margin, Y: statusY},
-			"Last synced "+humanAgo(a.lastSync.At))
+			"Last synced "+humanAgo(stats.lastSync.At))
 		ink.DrawString(image.Point{X: a.layout.margin, Y: statusY + a.layout.sy(60)},
-			fmt.Sprintf("%d books in library", a.bookCount))
-		if a.lastSync.Failed > 0 {
+			fmt.Sprintf("%d books in library", stats.bookCount))
+		if stats.lastSync.Failed > 0 {
 			ink.DrawString(image.Point{X: a.layout.margin, Y: statusY + a.layout.sy(110)},
-				fmt.Sprintf("%d failed — will retry next sync", a.lastSync.Failed))
+				fmt.Sprintf("%d failed — will retry next sync", stats.lastSync.Failed))
 		}
 	} else {
 		ink.DrawString(image.Point{X: a.layout.margin, Y: statusY}, "Not yet synced")
@@ -237,7 +240,7 @@ func (a *app) mainKey(e ink.KeyEvent) bool {
 		a.startSync()
 		return true
 	case ink.KeyMenu:
-		a.screen = screenSettings
+		a.SetScreen(screenSettings)
 		ink.Repaint()
 		return true
 	}
@@ -266,7 +269,7 @@ func (a *app) mainPointer(e ink.PointerEvent) bool {
 		ink.OpenNetworkInfo()
 		return true
 	case p.In(a.layout.settingsButton):
-		a.screen = screenSettings
+		a.SetScreen(screenSettings)
 		ink.Repaint()
 		return true
 	case p.In(a.layout.quitButton):
@@ -332,6 +335,11 @@ func (a *app) runSync() {
 	a.sync.cancelled = false
 	a.sync.mu.Unlock()
 
+	// One snapshot of the active profile for the whole run, so a profile
+	// switch landing mid-sync cannot pair one profile's catalog with
+	// another's store.
+	cfg, _, store := a.Session()
+
 	if err := a.ensureConnected(ctx); err != nil {
 		a.finishSyncWithError(err)
 		ink.Repaint()
@@ -354,7 +362,7 @@ func (a *app) runSync() {
 		a.sync.mu.Unlock()
 		a.refreshProgress()
 	}
-	src, err := newSource(a.cfg)
+	src, err := newSource(cfg)
 	if err != nil {
 		a.finishSyncWithError(err)
 		a.refreshMainStats()
@@ -362,10 +370,10 @@ func (a *app) runSync() {
 		return
 	}
 	opts := SyncOptions{
-		DeleteMissing: a.cfg.DeleteMissing,
-		Scope:         ScopeFor(a.cfg),
+		DeleteMissing: cfg.DeleteMissing,
+		Scope:         ScopeFor(cfg),
 	}
-	if a.cfg.DeleteMissing {
+	if cfg.DeleteMissing {
 		opts.Confirm = a.confirmDeletions
 	}
 	a.sync.mu.Lock()
@@ -373,7 +381,7 @@ func (a *app) runSync() {
 	a.sync.mu.Unlock()
 	a.refreshProgress()
 
-	plan, books, err := Plan(ctx, src, a.store, a.cfg.Library, opts)
+	plan, books, err := Plan(ctx, src, store, cfg.Library, opts)
 	a.sync.mu.Lock()
 	a.sync.planning = false
 	a.sync.mu.Unlock()
@@ -397,7 +405,7 @@ func (a *app) runSync() {
 			}
 			a.sync.mu.Unlock()
 			a.refreshMainStats()
-			a.screen = screenMain
+			a.SetScreen(screenMain)
 			ink.Repaint()
 			return
 		}
@@ -407,7 +415,7 @@ func (a *app) runSync() {
 	a.sync.mu.Unlock()
 
 	opts.PrefetchedBooks = books
-	res := Sync(ctx, src, a.store, a.cfg.Library, progress, opts)
+	res := Sync(ctx, src, store, cfg.Library, progress, opts)
 
 	a.sync.mu.Lock()
 	a.sync.active = false
@@ -424,7 +432,7 @@ func (a *app) runSync() {
 	// Persist summary + refresh screen stats. Deleted is not currently
 	// shown on the main screen; the count is visible through the log
 	// channel once the PR wires that up.
-	_ = a.store.SetLastSync(SyncSummary{
+	_ = store.SetLastSync(SyncSummary{
 		At:         time.Now(),
 		Downloaded: res.Downloaded,
 		Skipped:    res.Skipped,
@@ -439,7 +447,7 @@ func (a *app) runSync() {
 	// freeze. If nothing changed (or the sync failed), skip straight to
 	// main as before.
 	if !wasCancelled && (res.Downloaded > 0 || res.Deleted > 0) {
-		a.screen = screenLibraryRefresh
+		a.SetScreen(screenLibraryRefresh)
 		a.startLibRefreshSpinner()
 		ink.Repaint()
 		go a.runLibraryScanner()
@@ -447,7 +455,7 @@ func (a *app) runSync() {
 	}
 	// In case the confirm screen is still up (e.g. user closed the device
 	// with the prompt showing), flip back to main.
-	a.screen = screenMain
+	a.SetScreen(screenMain)
 	ink.Repaint()
 }
 
@@ -461,7 +469,7 @@ func (a *app) runSync() {
 func (a *app) runLibraryScanner() {
 	defer func() {
 		a.stopLibRefreshSpinner()
-		a.screen = screenMain
+		a.SetScreen(screenMain)
 		ink.Repaint()
 	}()
 
@@ -510,18 +518,19 @@ func (a *app) ensureConnected(ctx context.Context) error {
 	if err := ink.ConnectDefault(); err != nil {
 		return fmt.Errorf("No Wi-Fi connection. Open Network to configure.")
 	}
+	cfg, client, _ := a.Session()
 	var err error
-	switch a.cfg.Backend {
+	switch cfg.Backend {
 	case BackendWebDAV:
-		err = ProbeWebDAV(ctx, a.cfg.Host, a.cfg.User, a.cfg.Pass, a.cfg.Path)
+		err = ProbeWebDAV(ctx, cfg.Host, cfg.User, cfg.Pass, cfg.Path)
 	default:
-		err = ProbeCWA(ctx, a.cfg.Host, a.cfg.User, a.cfg.Pass)
+		err = ProbeCWA(ctx, cfg.Host, cfg.User, cfg.Pass)
 	}
 	if err != nil {
 		return err
 	}
-	if a.cfg.Backend != BackendWebDAV && a.client != nil {
-		_ = a.client.DetectType(ctx) // non-fatal: falls back to generic walk
+	if cfg.Backend != BackendWebDAV && client != nil {
+		_ = client.DetectType(ctx) // non-fatal: falls back to generic walk
 	}
 	return nil
 }

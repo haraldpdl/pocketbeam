@@ -57,7 +57,7 @@ func (a *app) openDirPicker(startPath string) {
 	req := a.dirPicker.reqID
 	ctx, cancel := a.dirPicker.restart()
 	a.dirPicker.mu.Unlock()
-	a.screen = screenDirPicker
+	a.SetScreen(screenDirPicker)
 	ink.Repaint()
 	go a.fetchDirEntries(ctx, cancel, p, req)
 }
@@ -81,7 +81,8 @@ func (a *app) fetchDirEntries(ctx context.Context, cancel context.CancelFunc, p 
 		ink.Repaint()
 		return
 	}
-	src := NewWebDAVSource(a.cfg.Host, a.cfg.User, a.cfg.Pass, p)
+	cfg := a.Config()
+	src := NewWebDAVSource(cfg.Host, cfg.User, cfg.Pass, p)
 	entries, err := src.ReadDir(ctx, src.Root)
 	var dirs []string
 	if err != nil {
@@ -232,7 +233,7 @@ func (a *app) dirPickerKey(e ink.KeyEvent) bool {
 		path := a.dirPicker.path
 		a.dirPicker.mu.Unlock()
 		a.setPath(path)
-		a.screen = screenSettings
+		a.SetScreen(screenSettings)
 		ink.Repaint()
 		return true
 	}
@@ -244,7 +245,7 @@ func (a *app) dirPickerPointer(e ink.PointerEvent) bool {
 		return false
 	}
 	if e.Point.In(a.layout.backButton) {
-		a.screen = screenSettings
+		a.SetScreen(screenSettings)
 		ink.Repaint()
 		return true
 	}
@@ -265,7 +266,7 @@ func (a *app) dirPickerPointer(e ink.PointerEvent) bool {
 	}
 	if !selectRect.Empty() && e.Point.In(selectRect) {
 		a.setPath(path)
-		a.screen = screenSettings
+		a.SetScreen(screenSettings)
 		ink.Repaint()
 		return true
 	}
@@ -318,6 +319,5 @@ func parentDir(p string) string {
 
 // setPath updates the in-memory config's WebDAV sync path and persists it.
 func (a *app) setPath(p string) {
-	a.cfg.Path = normaliseRoot(p)
-	_ = SaveConfig(a.cfgPath, a.cfg)
+	a.saveConfigChange(func(c *Config) { c.Path = normaliseRoot(p) })
 }

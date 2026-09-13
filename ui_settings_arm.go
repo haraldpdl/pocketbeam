@@ -24,6 +24,8 @@ func (a *app) drawSettings() {
 	btnFont := ink.OpenFont(ink.DefaultFontBold, a.layout.fpx(44), true)
 	defer btnFont.Close()
 
+	cfg := a.Config()
+
 	// Header
 	title.SetActive(ink.Black)
 	ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(140)}, "Settings")
@@ -31,34 +33,34 @@ func (a *app) drawSettings() {
 	// SERVER section
 	a.drawSectionLabel(sectionFont, "SERVER", a.layout.serverLabelY)
 	a.drawListRow(rowTitleFont, rowSubFont, a.layout.serverRow,
-		"Server", truncate(a.cfg.Host, 40), true)
+		"Server", truncate(cfg.Host, 40), true)
 	a.drawListRow(rowTitleFont, rowSubFont, a.layout.profileRow,
-		"Profile", a.cfg.Profile, true)
+		"Profile", cfg.Profile, true)
 	a.drawHairline(a.layout.profileRow.Min.X, a.layout.profileRow.Max.X, a.layout.profileRow.Max.Y)
 
 	// LIBRARY section
 	a.drawSectionLabel(sectionFont, "LIBRARY", a.layout.libraryLabelY)
 	filterTitle := "Sync filter"
 	var filterValue string
-	if a.cfg.Backend == BackendWebDAV {
+	if cfg.Backend == BackendWebDAV {
 		filterTitle = "Sync folder"
-		filterValue = a.cfg.Path
+		filterValue = cfg.Path
 		if filterValue == "" {
 			filterValue = "/"
 		}
 	} else {
-		filterValue = a.cfg.FilterLabel()
+		filterValue = cfg.FilterLabel()
 	}
 	a.drawListRow(rowTitleFont, rowSubFont, a.layout.filterRow,
 		filterTitle, filterValue, true)
 
 	deleteSub := "Keep books removed on server"
-	if a.cfg.DeleteMissing {
+	if cfg.DeleteMissing {
 		deleteSub = "Remove books deleted on server"
 	}
 	a.drawListRow(rowTitleFont, rowSubFont, a.layout.deleteRow,
 		"Delete missing", deleteSub, false)
-	a.drawToggle(a.layout.deleteToggle, a.cfg.DeleteMissing)
+	a.drawToggle(a.layout.deleteToggle, cfg.DeleteMissing)
 	a.drawHairline(a.layout.deleteRow.Min.X, a.layout.deleteRow.Max.X, a.layout.deleteRow.Max.Y)
 
 	// ABOUT section
@@ -85,8 +87,8 @@ func (a *app) settingsKey(e ink.KeyEvent) bool {
 		return true
 	}
 	if e.Key == ink.KeyNext {
-		if a.cfg.Backend == BackendWebDAV {
-			a.openDirPicker(a.cfg.Path)
+		if cfg := a.Config(); cfg.Backend == BackendWebDAV {
+			a.openDirPicker(cfg.Path)
 		} else {
 			a.openShelfPicker()
 		}
@@ -108,22 +110,21 @@ func (a *app) settingsPointer(e ink.PointerEvent) bool {
 		a.openProfileList()
 		return true
 	case p.In(a.layout.filterRow):
-		if a.cfg.Backend == BackendWebDAV {
-			a.openDirPicker(a.cfg.Path)
+		if cfg := a.Config(); cfg.Backend == BackendWebDAV {
+			a.openDirPicker(cfg.Path)
 		} else {
 			a.openShelfPicker()
 		}
 		return true
 	case p.In(a.layout.deleteRow):
-		a.cfg.DeleteMissing = !a.cfg.DeleteMissing
-		_ = SaveConfig(a.cfgPath, a.cfg)
+		a.saveConfigChange(func(c *Config) { c.DeleteMissing = !c.DeleteMissing })
 		ink.Repaint()
 		return true
 	case p.In(a.layout.updateRow):
 		a.openUpdateScreen()
 		return true
 	case p.In(a.layout.backButton):
-		a.screen = screenMain
+		a.SetScreen(screenMain)
 		ink.Repaint()
 		return true
 	}
@@ -134,11 +135,13 @@ func (a *app) settingsPointer(e ink.PointerEvent) bool {
 // password. On success, the existing store and client are closed and swapped
 // for new ones against the updated config.
 func (a *app) startChangeInfo() {
-	a.wizard.step = stepURL
-	a.wizard.err = nil
-	a.wizard.url = ""
-	a.wizard.user = ""
-	a.wizard.pass = ""
-	a.screen = screenFirstRun
+	a.UpdateWizard(func(w *wizardState) {
+		w.step = stepURL
+		w.err = nil
+		w.url = ""
+		w.user = ""
+		w.pass = ""
+	})
+	a.SetScreen(screenFirstRun)
 	ink.OpenKeyboard("https://library.example.com:8083", 512)
 }
