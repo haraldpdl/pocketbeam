@@ -9,7 +9,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     container:
-      image: docker.io/sunsung/pocketbook-go-sdk:latest
+      image: docker.io/sunsung/pocketbook-go-sdk@sha256:41e9e59022705038d580e7d53a1975e9d92d93f17919abe6e4eaf4054543a507 # tag latest as of 2025-09-03; Dependabot does not track container digests, bump by hand
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - run: make arm VERSION=${{ github.ref_name }}

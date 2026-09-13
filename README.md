@@ -1,6 +1,6 @@
 # pocketbeam
 
-Wireless ebook sync from any OPDS server or WebDAV share to a [PocketBook Era Color](https://pocketbook.ch/en-ch/products/pocketbook-era-color) and likely other PocketBook devices on firmware 6.x. Tested against [Calibre-Web Automated](https://github.com/crocodilestick/Calibre-Web-Automated) (with shelf-filter and single-request "all books" fast paths) and against Nextcloud / Synology / ownCloud via WebDAV.
+Wireless ebook sync from any OPDS server or WebDAV share to a PocketBook Era Color and likely other PocketBook devices on firmware 6.x. Tested against [Calibre-Web Automated](https://github.com/crocodilestick/Calibre-Web-Automated) (with shelf-filter and single-request "all books" fast paths) and against Nextcloud / Synology / ownCloud via WebDAV.
 
 Native on-device app, no PC, no USB cable. Pulls new and updated ebooks over Wi-Fi, keeps local state so every sync is an incremental diff, and drops the files straight into the device's library.
 
