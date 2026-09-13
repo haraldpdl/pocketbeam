@@ -241,14 +241,26 @@ func reconcileDeletions(store *Store, remote []Book, opts SyncOptions, res *Sync
 	deleted := 0
 	for _, m := range missing {
 		if m.LocalPath != "" {
-			if err := os.Remove(m.LocalPath); err != nil && !os.IsNotExist(err) {
+			// Stores written before filenames were disambiguated can map
+			// another book to this path; then the file is that book's only
+			// copy and only the row goes.
+			other, err := store.OtherOwner(m.LocalPath, m.UUID)
+			if err != nil {
 				if res.FirstErr == nil {
 					res.FirstErr = fmt.Errorf("delete %q: %w", m.Title, err)
 				}
 				continue
 			}
-			// Prune the author directory if it's now empty; ignore errors.
-			_ = os.Remove(filepath.Dir(m.LocalPath))
+			if other == "" {
+				if err := os.Remove(m.LocalPath); err != nil && !os.IsNotExist(err) {
+					if res.FirstErr == nil {
+						res.FirstErr = fmt.Errorf("delete %q: %w", m.Title, err)
+					}
+					continue
+				}
+				// Prune the author directory if it's now empty; ignore errors.
+				_ = os.Remove(filepath.Dir(m.LocalPath))
+			}
 		}
 		if err := store.Delete(m.UUID); err != nil {
 			if res.FirstErr == nil {
@@ -370,7 +382,13 @@ func Plan(ctx context.Context, src Source, store *Store, library string, opts Sy
 		}
 		plan.Missing = missing
 		for _, m := range missing {
-			plan.ReclaimableBytes += m.Size
+			// A file shared with another tracked book stays on disk, so
+			// its bytes are not reclaimable (see reconcileDeletions).
+			if other, err := store.OtherOwner(m.LocalPath, m.UUID); err != nil {
+				return plan, books, err
+			} else if other == "" {
+				plan.ReclaimableBytes += m.Size
+			}
 		}
 	}
 	plan.FreeBytes = availableBytes(library)

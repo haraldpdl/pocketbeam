@@ -437,3 +437,53 @@ func TestSync_LegacySharedPath_UpdateKeepsOtherBooksFile(t *testing.T) {
 		t.Errorf("updated book's file missing: %v", err)
 	}
 }
+
+// The same legacy layout under delete-missing: dropping one of the two
+// books from the remote must forget its row but leave the shared file in
+// place, since it is the surviving book's only copy.
+func TestSync_LegacySharedPath_DeleteKeepsOtherBooksFile(t *testing.T) {
+	store, dir := openTempStore(t)
+	defer store.Close()
+	library := filepath.Join(dir, "lib")
+	shared := filepath.Join(library, "Author", "Same Title.epub")
+
+	books := []Book{
+		makeBook("uuid-a", "Author", "Same Title", "http://x/a"),
+		makeBook("uuid-b", "Author", "Same Title", "http://x/b"),
+	}
+	if err := os.MkdirAll(filepath.Dir(shared), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(shared, []byte("legacy"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for i, b := range books {
+		books[i].Updated = b.Updated.Truncate(time.Second)
+		if err := store.Upsert(books[i], shared, 6); err != nil {
+			t.Fatal(err)
+		}
+	}
+	const scope = "s"
+	if err := store.SetMeta(metaLastScope, scope); err != nil {
+		t.Fatal(err)
+	}
+
+	src := &fakeSource{books: books[1:]}
+	res := Sync(context.Background(), src, store, library, nil, SyncOptions{
+		DeleteMissing: true,
+		Scope:         scope,
+		Confirm:       func([]LocalBook) bool { return true },
+	})
+	if res.Deleted != 1 || res.Skipped != 1 || res.FirstErr != nil {
+		t.Fatalf("sync: %+v", res)
+	}
+	if _, err := os.Stat(shared); err != nil {
+		t.Errorf("surviving book uuid-b lost its only file: %v", err)
+	}
+	if _, _, _, exists, _ := store.LocalEntry("uuid-a"); exists {
+		t.Errorf("uuid-a still present in store after delete")
+	}
+	if _, p, _, exists, _ := store.LocalEntry("uuid-b"); !exists || p != shared {
+		t.Errorf("uuid-b entry = (%q, exists=%v), want (%q, true)", p, exists, shared)
+	}
+}

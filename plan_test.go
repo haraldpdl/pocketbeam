@@ -202,3 +202,38 @@ func TestPlan_CachedSizeOverwrittenByDownload(t *testing.T) {
 		t.Errorf("cached size=%d, want 13 (actual-bytes-on-disk, not the server lie)", cached)
 	}
 }
+
+// A missing book whose file is still claimed by another tracked book (legacy
+// shared path) is listed for deletion but frees no space, so the estimate
+// must not count its bytes.
+func TestPlan_SharedPathNotReclaimable(t *testing.T) {
+	store, dir := openTempStore(t)
+	defer store.Close()
+	library := filepath.Join(dir, "lib")
+	shared := filepath.Join(library, "Author", "Same Title.epub")
+
+	t0 := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	a := makeBookSized("a", "Same Title", 100, t0)
+	b := makeBookSized("b", "Same Title", 100, t0)
+	for _, bk := range []Book{a, b} {
+		if err := store.Upsert(bk, shared, 100); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := store.SetMeta(metaLastScope, "s1"); err != nil {
+		t.Fatal(err)
+	}
+
+	plan, _, err := Plan(context.Background(), &fakeSource{books: []Book{b}}, store, library, SyncOptions{
+		DeleteMissing: true, Scope: "s1",
+	})
+	if err != nil {
+		t.Fatalf("Plan: %v", err)
+	}
+	if len(plan.Missing) != 1 || plan.Missing[0].UUID != "a" {
+		t.Errorf("Missing=%+v, want single entry for a", plan.Missing)
+	}
+	if plan.ReclaimableBytes != 0 {
+		t.Errorf("ReclaimableBytes=%d, want 0 (file shared with b)", plan.ReclaimableBytes)
+	}
+}
