@@ -194,3 +194,26 @@ func TestOpenStore_UnwritablePath(t *testing.T) {
 		t.Error("OpenStore into a missing directory should fail")
 	}
 }
+
+func TestStore_OwnerOf(t *testing.T) {
+	s, _ := openTempStore(t)
+	defer s.Close()
+
+	if err := s.Upsert(makeBook("u1", "Au", "T", ""), "/lib/Au/T.epub", 1); err != nil {
+		t.Fatal(err)
+	}
+	cases := []struct{ path, want string }{
+		{"/lib/Au/T.epub", "u1"},
+		{"/lib/Au/t.EPUB", "u1"}, // FAT is case-insensitive
+		{"/lib/Au/Other.epub", ""},
+	}
+	for _, tc := range cases {
+		got, err := s.OwnerOf(tc.path)
+		if err != nil {
+			t.Fatalf("OwnerOf(%q): %v", tc.path, err)
+		}
+		if got != tc.want {
+			t.Errorf("OwnerOf(%q) = %q, want %q", tc.path, got, tc.want)
+		}
+	}
+}

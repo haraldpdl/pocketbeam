@@ -140,6 +140,22 @@ func (s *Store) Upsert(b Book, localPath string, actualSize int64) error {
 	return err
 }
 
+// OwnerOf returns the UUID whose local_path is path, or "" when no tracked
+// book lives there. The match ignores ASCII case because the device
+// library sits on a FAT volume, where "Title.epub" and "title.epub" are the
+// same file.
+func (s *Store) OwnerOf(path string) (string, error) {
+	var uuid string
+	err := s.db.QueryRow(`SELECT uuid FROM books WHERE local_path = ? COLLATE NOCASE`, path).Scan(&uuid)
+	if err == sql.ErrNoRows {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	return uuid, nil
+}
+
 // LocalBook is the local view of a previously-synced book: identity,
 // human display fields, the path on disk, and the cached byte size
 // (0 if unknown). Used by the delete-missing path, the confirmation

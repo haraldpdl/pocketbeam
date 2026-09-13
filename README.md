@@ -65,7 +65,7 @@ The main screen has four actions:
     - **Profile: &lt;name&gt;**: opens the profile list. Tap any profile to switch, "Add new server" to create another (one device can sync from a home CWA, a friend's Nextcloud, and a public OPDS server, each as its own profile), or "Delete active profile" to remove one.
 - **Quit**: back to the Applications menu.
 
-Books land under `/mnt/ext1/Books/CWA/<Author>/<Title>.<ext>` (OPDS) or `/mnt/ext1/Books/WebDAV/<Author>/<Title>.<ext>` and show up in the device's library after the next library refresh.
+Books land under `/mnt/ext1/Books/CWA/<Author>/<Title>.<ext>` (OPDS) or `/mnt/ext1/Books/WebDAV/<Author>/<Title>.<ext>` and show up in the device's library after the next library refresh. If a second, different book resolves to the same author and title (another edition, or a same-named file in another WebDAV folder), its filename gets a short `[xxxxxxxx]` tag so the two never share one file.
 
 ## Configuration file
 

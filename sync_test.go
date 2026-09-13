@@ -121,3 +121,13 @@ func TestNextLink(t *testing.T) {
 		t.Errorf("nextLink(nil) = %q, want empty", got)
 	}
 }
+
+func TestShortID(t *testing.T) {
+	a, b := shortID("webdav:x/Book.epub"), shortID("webdav:y/Book.epub")
+	if len(a) != 8 || a == b {
+		t.Errorf("shortID not 8 distinct hex chars: %q vs %q", a, b)
+	}
+	if a != shortID("webdav:x/Book.epub") {
+		t.Errorf("shortID not deterministic")
+	}
+}

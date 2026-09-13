@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"os"
@@ -124,7 +126,15 @@ func Sync(ctx context.Context, src Source, store *Store, library string, progres
 			res.Skipped++
 			continue
 		}
-		path, actualSize, err := download(ctx, src, library, b)
+		path, err := targetPath(store, library, b)
+		if err != nil {
+			res.Failed++
+			if res.FirstErr == nil {
+				res.FirstErr = fmt.Errorf("place %q: %w", b.Title, err)
+			}
+			continue
+		}
+		actualSize, err := download(ctx, src, path, b)
 		if err != nil {
 			if ctx.Err() != nil {
 				res.FirstErr = ctx.Err()
@@ -380,44 +390,76 @@ func availableBytes(path string) int64 {
 	return int64(st.Bavail) * int64(st.Bsize)
 }
 
-func download(parent context.Context, src Source, library string, b Book) (string, int64, error) {
+// targetPath decides where b lands in the library:
+// <library>/<author>/<title><ext>. Two different books can sanitize to the
+// same author and title (editions, reissues, WebDAV files of the same name
+// in different sub-directories), and sharing one file means deleting either
+// book removes the other's copy. When the store already maps the plain path
+// to another UUID, the filename gets a short suffix derived from this book's
+// UUID so each book keeps its own file. A book re-downloading over its own
+// path is not a collision and keeps the plain name.
+func targetPath(store *Store, library string, b Book) (string, error) {
 	ext := formatExt[b.Format]
 	if ext == "" {
-		return "", 0, fmt.Errorf("no extension known for %s", b.Format)
+		return "", fmt.Errorf("no extension known for %s", b.Format)
 	}
 	dir := filepath.Join(library, sanitize(b.Author))
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return "", 0, err
+	title := sanitize(b.Title)
+	path := filepath.Join(dir, title+ext)
+	owner, err := store.OwnerOf(path)
+	if err != nil {
+		return "", err
 	}
-	path := filepath.Join(dir, sanitize(b.Title)+ext)
+	if owner != "" && owner != b.UUID {
+		path = filepath.Join(dir, title+" ["+shortID(b.UUID)+"]"+ext)
+	}
+	return path, nil
+}
+
+// shortID returns an 8-hex-char tag for a book UUID, used to disambiguate
+// filenames. The UUID is hashed rather than truncated because WebDAV IDs
+// are synthetic ("webdav:<relative path>"): they share long prefixes and
+// contain path separators, so a raw prefix would neither be unique nor
+// filename-safe.
+func shortID(uuid string) string {
+	sum := sha256.Sum256([]byte(uuid))
+	return hex.EncodeToString(sum[:4])
+}
+
+// download fetches b into path via an atomic .part rename and returns the
+// number of bytes written.
+func download(parent context.Context, src Source, path string, b Book) (int64, error) {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return 0, err
+	}
 
 	ctx, cancel := context.WithTimeout(parent, downloadBodyTimeout)
 	defer cancel()
 	body, err := src.Fetch(ctx, b)
 	if err != nil {
-		return "", 0, err
+		return 0, err
 	}
 	defer body.Close()
 
 	tmp := path + ".part"
 	f, err := os.Create(tmp)
 	if err != nil {
-		return "", 0, err
+		return 0, err
 	}
 	n, err := io.Copy(f, body)
 	if err != nil {
 		f.Close()
 		os.Remove(tmp)
-		return "", 0, err
+		return 0, err
 	}
 	if err := f.Close(); err != nil {
 		os.Remove(tmp)
-		return "", 0, err
+		return 0, err
 	}
 	if err := os.Rename(tmp, path); err != nil {
-		return "", 0, err
+		return 0, err
 	}
-	return path, n, nil
+	return n, nil
 }
 
 // sanitize strips characters that are illegal or awkward in filenames on

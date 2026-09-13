@@ -297,3 +297,93 @@ func TestSync_DeleteMissing_RemovesFileOnDisk(t *testing.T) {
 		t.Errorf("keeper missing: %v", err)
 	}
 }
+
+// Two different books that sanitize to the same author and title must not
+// share one file: the second gets a suffixed filename, and deleting either
+// leaves the other's file untouched.
+func TestSync_SameTitleDifferentBooks_KeepSeparateFiles(t *testing.T) {
+	store, dir := openTempStore(t)
+	defer store.Close()
+	library := filepath.Join(dir, "lib")
+
+	src := &fakeSource{
+		books: []Book{
+			makeBook("uuid-a", "Author", "Same Title", "http://x/a"),
+			makeBook("uuid-b", "Author", "Same Title", "http://x/b"),
+		},
+	}
+	res := Sync(context.Background(), src, store, library, nil, SyncOptions{Scope: "s"})
+	if res.Downloaded != 2 || res.FirstErr != nil {
+		t.Fatalf("first sync: %+v", res)
+	}
+	_, pathA, _, _, _ := store.LocalEntry("uuid-a")
+	_, pathB, _, _, _ := store.LocalEntry("uuid-b")
+	if pathA != filepath.Join(library, "Author", "Same Title.epub") {
+		t.Errorf("first book path = %q, want plain name", pathA)
+	}
+	wantB := filepath.Join(library, "Author", "Same Title ["+shortID("uuid-b")+"].epub")
+	if pathB != wantB {
+		t.Errorf("second book path = %q, want %q", pathB, wantB)
+	}
+	for _, p := range []string{pathA, pathB} {
+		if _, err := os.Stat(p); err != nil {
+			t.Errorf("missing file %s: %v", p, err)
+		}
+	}
+
+	// Re-downloading a book over its own path is not a collision: the
+	// plain name stays plain and the suffixed name stays stable.
+	for i := range src.books {
+		src.books[i].Updated = src.books[i].Updated.Add(time.Hour)
+	}
+	res = Sync(context.Background(), src, store, library, nil, SyncOptions{Scope: "s"})
+	if res.Downloaded != 2 || res.FirstErr != nil {
+		t.Fatalf("second sync: %+v", res)
+	}
+	if _, p, _, _, _ := store.LocalEntry("uuid-a"); p != pathA {
+		t.Errorf("uuid-a moved to %q on re-download", p)
+	}
+	if _, p, _, _, _ := store.LocalEntry("uuid-b"); p != pathB {
+		t.Errorf("uuid-b moved to %q on re-download", p)
+	}
+
+	// Removing the first book from the remote deletes only its file.
+	src.books = src.books[1:]
+	res = Sync(context.Background(), src, store, library, nil, SyncOptions{
+		DeleteMissing: true,
+		Scope:         "s",
+		Confirm:       func(d []LocalBook) bool { return true },
+	})
+	if res.Deleted != 1 {
+		t.Errorf("Deleted = %d, want 1", res.Deleted)
+	}
+	if _, err := os.Stat(pathA); !os.IsNotExist(err) {
+		t.Errorf("deleted book's file still present: err=%v", err)
+	}
+	if _, err := os.Stat(pathB); err != nil {
+		t.Errorf("surviving book's file was removed: %v", err)
+	}
+}
+
+// The library lives on a FAT volume, so titles differing only in case
+// would still land on one file; the store's ownership check must catch that.
+func TestSync_CaseOnlyTitleDifference_IsACollision(t *testing.T) {
+	store, dir := openTempStore(t)
+	defer store.Close()
+	library := filepath.Join(dir, "lib")
+
+	src := &fakeSource{
+		books: []Book{
+			makeBook("uuid-a", "Author", "Title", "http://x/a"),
+			makeBook("uuid-b", "Author", "TITLE", "http://x/b"),
+		},
+	}
+	res := Sync(context.Background(), src, store, library, nil, SyncOptions{})
+	if res.Downloaded != 2 || res.FirstErr != nil {
+		t.Fatalf("sync: %+v", res)
+	}
+	_, pathB, _, _, _ := store.LocalEntry("uuid-b")
+	if want := filepath.Join(library, "Author", "TITLE ["+shortID("uuid-b")+"].epub"); pathB != want {
+		t.Errorf("uuid-b path = %q, want %q", pathB, want)
+	}
+}
