@@ -2,8 +2,10 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"path"
 	"strings"
@@ -16,9 +18,17 @@ import (
 // directory configured up front; listing is recursive from there. Item
 // identity is the path relative to that root, prefixed with "webdav:" so
 // it cannot collide with OPDS UUIDs in the same state database.
+//
+// gowebdav has no context-aware API, so every operation builds a
+// short-lived client whose transport injects the caller's context (see
+// client). The negotiated auth method lives in the shared Authorizer and
+// the connection pool in the shared transport, so per-call clients cost
+// nothing extra on the wire.
 type WebDAVSource struct {
-	Client *gowebdav.Client
-	Root   string // absolute path on the server, e.g. "/Books/Fiction"
+	host      string
+	auth      gowebdav.Authorizer
+	transport http.RoundTripper
+	Root      string // absolute path on the server, e.g. "/Books/Fiction"
 }
 
 // extToFormat maps supported ebook/comic extensions to the OPDS-style mime
@@ -33,78 +43,109 @@ var extToFormat = map[string]string{
 // ProbeWebDAV verifies that host is a reachable WebDAV endpoint that
 // accepts the credentials and exposes rootPath. Returns nil on success; on
 // failure the error message is short and suitable for display on the
-// device.
+// device. The probe is bounded by probeTimeout on top of ctx.
 func ProbeWebDAV(ctx context.Context, host, user, pass, rootPath string) error {
-	c := gowebdav.NewClient(host, user, pass)
-	c.SetHeader("User-Agent", "pocketbeam/"+version)
-	if err := c.Connect(); err != nil {
+	ctx, cancel := context.WithTimeout(ctx, probeTimeout)
+	defer cancel()
+	s := NewWebDAVSource(host, user, pass, rootPath)
+	if err := s.client(ctx).Connect(); err != nil {
 		return classifyWebDAVError(err)
 	}
-	root := normaliseRoot(rootPath)
-	if _, err := c.ReadDir(root); err != nil {
-		return fmt.Errorf("Could not list %s on the server.", root)
+	if _, err := s.ReadDir(ctx, s.Root); err != nil {
+		if gowebdav.IsErrNotFound(err) {
+			return fmt.Errorf("Could not list %s on the server.", s.Root)
+		}
+		return classifyWebDAVError(err)
 	}
 	return nil
 }
 
 // classifyWebDAVError maps a gowebdav error to a concise, user-readable
-// message. gowebdav wraps everything in errors.New() with context, so we
-// pattern-match on substrings rather than typed errors.
+// message. Status failures arrive as a gowebdav.StatusError inside an
+// os.PathError; anything else is a transport error and shares the OPDS
+// wording.
 func classifyWebDAVError(err error) error {
-	msg := err.Error()
-	switch {
-	case strings.Contains(msg, "401"):
-		return fmt.Errorf("Username or password rejected by the server.")
-	case strings.Contains(msg, "403"):
-		return fmt.Errorf("Credentials accepted but this user has no access.")
-	case strings.Contains(msg, "404"):
-		return fmt.Errorf("Server reachable but the WebDAV path was not found.")
-	case strings.Contains(msg, "x509"), strings.Contains(msg, "tls"):
-		return fmt.Errorf("TLS handshake failed. Is the server's certificate valid?")
-	case strings.Contains(msg, "no such host"):
-		return fmt.Errorf("Server name could not be resolved. Check the URL.")
-	case strings.Contains(msg, "connection refused"):
-		return fmt.Errorf("Server refused the connection. Is the service running?")
+	var se gowebdav.StatusError
+	if !errors.As(err, &se) {
+		return classifyTransportError(err)
 	}
-	return fmt.Errorf("Could not reach the WebDAV server.")
+	switch se.Status {
+	case http.StatusUnauthorized:
+		return errors.New("Username or password rejected by the server.")
+	case http.StatusForbidden:
+		return errors.New("Credentials accepted but this user has no access.")
+	case http.StatusNotFound:
+		return errors.New("Server reachable but the WebDAV path was not found.")
+	}
+	if se.Status >= 500 {
+		return fmt.Errorf("Server error (HTTP %d). Try again later.", se.Status)
+	}
+	return fmt.Errorf("Unexpected response from server (HTTP %d).", se.Status)
 }
 
 // NewWebDAVSource builds a source rooted at rootPath on the given WebDAV
-// server. The client is not connected until the first List / Fetch call;
+// server. Nothing is sent until the first List / Fetch / ReadDir call;
 // use ProbeWebDAV up front to validate credentials.
 func NewWebDAVSource(host, user, pass, rootPath string) *WebDAVSource {
-	c := gowebdav.NewClient(host, user, pass)
-	c.SetHeader("User-Agent", "pocketbeam/"+version)
 	return &WebDAVSource{
-		Client: c,
-		Root:   normaliseRoot(rootPath),
+		host:      host,
+		auth:      gowebdav.NewAutoAuth(user, pass),
+		transport: newTransport(),
+		Root:      normaliseRoot(rootPath),
 	}
+}
+
+// client returns a gowebdav client whose requests carry ctx. gowebdav
+// builds its requests with http.NewRequest, so the context is attached
+// at the transport layer instead; a cancelled or expired ctx aborts the
+// in-flight request and any body still being read from it.
+func (s *WebDAVSource) client(ctx context.Context) *gowebdav.Client {
+	c := gowebdav.NewAuthClient(s.host, s.auth)
+	c.SetHeader("User-Agent", "pocketbeam/"+version)
+	c.SetTransport(ctxTransport{ctx: ctx, base: s.transport})
+	return c
+}
+
+// ctxTransport rebinds every request to ctx before handing it to base.
+type ctxTransport struct {
+	ctx  context.Context
+	base http.RoundTripper
+}
+
+func (t ctxTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	return t.base.RoundTrip(req.WithContext(t.ctx))
 }
 
 func (s *WebDAVSource) List(ctx context.Context) ([]Book, error) {
 	var out []Book
-	if err := s.walk(s.Root, &out); err != nil {
+	if err := s.walk(ctx, s.Root, &out); err != nil {
 		return nil, err
 	}
 	return out, nil
 }
 
 func (s *WebDAVSource) Fetch(ctx context.Context, b Book) (io.ReadCloser, error) {
-	return s.Client.ReadStream(b.URL)
+	return s.client(ctx).ReadStream(b.URL)
+}
+
+// ReadDir lists one directory on the server. The directory picker uses
+// it directly; walk uses it recursively.
+func (s *WebDAVSource) ReadDir(ctx context.Context, dir string) ([]os.FileInfo, error) {
+	return s.client(ctx).ReadDir(dir)
 }
 
 // walk recursively lists dir and appends every ebook/comic file to out.
 // WebDAV doesn't have a standard recursive PROPFIND (Depth: infinity is
 // often disabled server-side), so we iterate per-directory.
-func (s *WebDAVSource) walk(dir string, out *[]Book) error {
-	entries, err := s.Client.ReadDir(dir)
+func (s *WebDAVSource) walk(ctx context.Context, dir string, out *[]Book) error {
+	entries, err := s.ReadDir(ctx, dir)
 	if err != nil {
 		return fmt.Errorf("list %s: %w", dir, err)
 	}
 	for _, e := range entries {
 		child := path.Join(dir, e.Name())
 		if e.IsDir() {
-			if err := s.walk(child, out); err != nil {
+			if err := s.walk(ctx, child, out); err != nil {
 				return err
 			}
 			continue

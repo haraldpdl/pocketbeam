@@ -4,11 +4,17 @@ import (
 	"context"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
+
+	"github.com/studio-b12/gowebdav"
 )
 
 // webdavPropfindResponses maps a request path to the XML body the mock
@@ -21,7 +27,11 @@ const webdavFileContent = "pretend epub bytes"
 
 func newWebDAVMock(t *testing.T, responses webdavPropfindResponses) *httptest.Server {
 	t.Helper()
-	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	return httptest.NewServer(webdavMockHandler(responses))
+}
+
+func webdavMockHandler(responses webdavPropfindResponses) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case "OPTIONS":
 			w.Header().Set("DAV", "1, 2")
@@ -42,7 +52,30 @@ func newWebDAVMock(t *testing.T, responses webdavPropfindResponses) *httptest.Se
 		default:
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		}
+	})
+}
+
+// newStallingServer answers every request by holding the connection open
+// until the test ends. With headersFirst the handler sends a 200 before
+// stalling, which models a download whose body never arrives. Handlers
+// are released from Cleanup rather than on the request context: the
+// server only notices a client hang-up once it reads the body, which the
+// stalled PROPFIND never does.
+func newStallingServer(t *testing.T, headersFirst bool) *httptest.Server {
+	t.Helper()
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if headersFirst {
+			w.WriteHeader(http.StatusOK)
+			w.(http.Flusher).Flush()
+		}
+		<-release
 	}))
+	t.Cleanup(func() {
+		close(release)
+		srv.Close()
+	})
+	return srv
 }
 
 // propfindResponse renders a PROPFIND response body from a flat description
@@ -178,6 +211,77 @@ func TestWebDAVSource_FetchStreamsBody(t *testing.T) {
 	}
 }
 
+func TestWebDAVSource_FetchStopsOnCancel(t *testing.T) {
+	srv := newStallingServer(t, true)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	src := NewWebDAVSource(srv.URL, "", "", "/")
+	body, err := src.Fetch(ctx, Book{URL: "/stalled.epub"})
+	if err != nil {
+		t.Fatalf("Fetch: %v", err)
+	}
+	defer body.Close()
+
+	time.AfterFunc(50*time.Millisecond, cancel)
+	_, err = io.ReadAll(body)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("ReadAll after cancel = %v, want context.Canceled", err)
+	}
+}
+
+func TestWebDAVSource_ListStopsOnDeadline(t *testing.T) {
+	srv := newStallingServer(t, false)
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+
+	_, err := NewWebDAVSource(srv.URL, "", "", "/Books").List(ctx)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("List = %v, want context.DeadlineExceeded", err)
+	}
+}
+
+// TestWebDAVSource_SharesNegotiatedAuth pins the property the per-call
+// clients rely on: the auth method negotiated by the first request is
+// reused by later requests instead of being re-challenged each time.
+func TestWebDAVSource_SharesNegotiatedAuth(t *testing.T) {
+	const stamp = "Mon, 02 Jan 2006 15:04:05 GMT"
+	inner := webdavMockHandler(webdavPropfindResponses{
+		"/Books/": propfindResponse([]webdavEntry{
+			{href: "/Books/", isDir: true, mtime: stamp},
+			{href: "/Books/only.epub", mtime: stamp},
+		}),
+	})
+	var challenges atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if u, p, ok := r.BasicAuth(); !ok || u != "alice" || p != "hunter2" {
+			challenges.Add(1)
+			w.Header().Set("WWW-Authenticate", `Basic realm="dav"`)
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		inner.ServeHTTP(w, r)
+	}))
+	defer srv.Close()
+
+	src := NewWebDAVSource(srv.URL, "alice", "hunter2", "/Books")
+	books, err := src.List(context.Background())
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(books) != 1 {
+		t.Fatalf("got %d books, want 1", len(books))
+	}
+	body, err := src.Fetch(context.Background(), books[0])
+	if err != nil {
+		t.Fatalf("Fetch: %v", err)
+	}
+	body.Close()
+	if got := challenges.Load(); got != 1 {
+		t.Errorf("server challenged %d times, want 1 (auth negotiated once, then reused)", got)
+	}
+}
+
 func TestNormaliseRoot(t *testing.T) {
 	cases := map[string]string{
 		"":            "/",
@@ -221,7 +325,8 @@ func TestProbeWebDAV(t *testing.T) {
 		{401, "rejected"},
 		{403, "no access"},
 		{404, "not found"},
-		{500, "Could not reach"},
+		{405, "Unexpected response"},
+		{500, "Server error (HTTP 500)"},
 	}
 	for _, tc := range statusCases {
 		t.Run(http.StatusText(tc.status), func(t *testing.T) {
@@ -244,26 +349,48 @@ func TestProbeWebDAV(t *testing.T) {
 			t.Errorf("got %v, want 'refused'", err)
 		}
 	})
+	t.Run("stalled server honours the caller's deadline", func(t *testing.T) {
+		srv := newStallingServer(t, false)
+		ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+		defer cancel()
+		start := time.Now()
+		err := ProbeWebDAV(ctx, srv.URL, "u", "p", "/")
+		if err == nil || !strings.Contains(err.Error(), "did not respond in time") {
+			t.Errorf("got %v, want 'did not respond in time'", err)
+		}
+		if elapsed := time.Since(start); elapsed > probeTimeout/2 {
+			t.Errorf("probe took %v, want it to stop at the caller's deadline", elapsed)
+		}
+	})
 }
 
 func TestClassifyWebDAVError(t *testing.T) {
 	cases := []struct {
-		in   string
+		name string
+		in   error
 		want string
 	}{
-		{"Connect /: 401", "rejected"},
-		{"Connect /: 403", "no access"},
-		{"Connect /: 404", "not found"},
-		{"x509: certificate signed by unknown authority", "TLS handshake"},
-		{"remote error: tls: handshake failure", "TLS handshake"},
-		{"dial tcp: lookup nas.lan: no such host", "resolved"},
-		{"dial tcp 10.0.0.2:80: connect: connection refused", "refused"},
-		{"something else entirely", "Could not reach"},
+		{"401", gowebdav.NewPathError("Connect", "/", 401), "rejected"},
+		{"403", gowebdav.NewPathError("Connect", "/", 403), "no access"},
+		{"404", gowebdav.NewPathError("Connect", "/", 404), "not found"},
+		{"405", gowebdav.NewPathError("PROPFIND", "/", 405), "Unexpected response from server (HTTP 405)"},
+		{"502", gowebdav.NewPathError("PROPFIND", "/", 502), "Server error (HTTP 502)"},
+		{"deadline", &url.Error{Op: "Get", URL: "http://nas.lan/", Err: context.DeadlineExceeded}, "did not respond in time"},
+		{"dns", &url.Error{Op: "Get", URL: "http://nas.lan/", Err: &net.DNSError{Err: "no such host", Name: "nas.lan", IsNotFound: true}}, "resolved"},
+		{"x509", errors.New("x509: certificate signed by unknown authority"), "TLS handshake"},
+		{"tls", errors.New("remote error: tls: handshake failure"), "TLS handshake"},
+		{"refused", errors.New("dial tcp 10.0.0.2:80: connect: connection refused"), "refused"},
+		// A port that happens to contain "401" must not read as an auth
+		// failure; the classifier keys on the typed status, not the text.
+		{"refused on port 4010", errors.New(`Get "http://nas.lan:4010/": dial tcp: connection refused`), "refused"},
+		{"other", errors.New("something else entirely"), "Could not reach"},
 	}
 	for _, tc := range cases {
-		got := classifyWebDAVError(errors.New(tc.in)).Error()
-		if !strings.Contains(got, tc.want) {
-			t.Errorf("classifyWebDAVError(%q) = %q, want %q", tc.in, got, tc.want)
-		}
+		t.Run(tc.name, func(t *testing.T) {
+			got := classifyWebDAVError(tc.in).Error()
+			if !strings.Contains(got, tc.want) {
+				t.Errorf("classifyWebDAVError(%v) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
 	}
 }

@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -91,34 +90,12 @@ func NewClient(base, user, pass string) (*Client, error) {
 	if err != nil {
 		return nil, fmt.Errorf("parse base url: %w", err)
 	}
-	// Split the timeout into per-stage budgets so big book bodies can take as
-	// long as they need while hung connections still fail fast. A single
-	// Client.Timeout is too blunt: a 500 MB CBR over slow Wi-Fi needs more
-	// than 30 s just to stream the body.
-	//
-	// ResponseHeaderTimeout is generous (5 min) because CWA runs calibredb
-	// export with metadata embedding before it sends the first byte, which
-	// can take a minute or more for large files. Once the headers arrive,
-	// the body read has no deadline so transfer size is unlimited.
-	transport := &http.Transport{
-		Proxy: http.ProxyFromEnvironment,
-		DialContext: (&net.Dialer{
-			Timeout:   15 * time.Second,
-			KeepAlive: 30 * time.Second,
-		}).DialContext,
-		ForceAttemptHTTP2:     true,
-		MaxIdleConns:          10,
-		IdleConnTimeout:       90 * time.Second,
-		TLSHandshakeTimeout:   15 * time.Second,
-		ExpectContinueTimeout: 1 * time.Second,
-		ResponseHeaderTimeout: 5 * time.Minute,
-	}
 	return &Client{
 		Base: u,
 		User: user,
 		Pass: pass,
 		HTTP: &http.Client{
-			Transport:     transport,
+			Transport:     newTransport(),
 			CheckRedirect: rejectSchemeDowngrade,
 		},
 	}, nil

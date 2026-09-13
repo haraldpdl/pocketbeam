@@ -40,10 +40,11 @@ const (
 const libraryScannerTimeout = 60 * time.Second
 
 // feedPickerTimeout caps one picker level fetch (probe + every page of the
-// feed). Without it a server that accepts the connection but never answers
-// leaves the picker on "Loading..." for the client's 5-minute
-// response-header timeout. Two minutes is enough to page through a large
-// CWA "All books" feed over slow Wi-Fi while still bounding a hung server.
+// feed, or probe + directory listing for WebDAV). Without it a server that
+// accepts the connection but never answers leaves the picker on
+// "Loading..." for the client's 5-minute response-header timeout. Two
+// minutes is enough to page through a large CWA "All books" feed over slow
+// Wi-Fi while still bounding a hung server.
 const feedPickerTimeout = 2 * time.Minute
 
 // userScannerPath is where firmware 6.x installs the PocketBook library
@@ -2305,7 +2306,9 @@ func (a *app) openDirPicker(startPath string) {
 // fetchDirEntries lists subdirectories of path on the configured WebDAV
 // server and stores the result for the picker to render.
 func (a *app) fetchDirEntries(p string) {
-	if err := a.ensureConnected(context.Background()); err != nil {
+	ctx, cancel := context.WithTimeout(context.Background(), feedPickerTimeout)
+	defer cancel()
+	if err := a.ensureConnected(ctx); err != nil {
 		a.dirPicker.mu.Lock()
 		a.dirPicker.loading = false
 		a.dirPicker.err = err
@@ -2314,9 +2317,11 @@ func (a *app) fetchDirEntries(p string) {
 		return
 	}
 	src := NewWebDAVSource(a.cfg.Host, a.cfg.User, a.cfg.Pass, p)
-	entries, err := src.Client.ReadDir(normaliseRoot(p))
+	entries, err := src.ReadDir(ctx, src.Root)
 	var dirs []string
-	if err == nil {
+	if err != nil {
+		err = classifyWebDAVError(err)
+	} else {
 		for _, e := range entries {
 			if e.IsDir() {
 				dirs = append(dirs, e.Name())

@@ -15,6 +15,33 @@ import (
 
 const probeTimeout = 10 * time.Second
 
+// newTransport returns the HTTP transport shared by both backends. The
+// timeout is split into per-stage budgets so big book bodies can take as
+// long as they need while hung connections still fail fast. A single
+// Client.Timeout is too blunt: a 500 MB CBR over slow Wi-Fi needs more
+// than 30 s just to stream the body.
+//
+// ResponseHeaderTimeout is generous (5 min) because CWA runs calibredb
+// export with metadata embedding before it sends the first byte, which
+// can take a minute or more for large files. Once the headers arrive,
+// the body read has no deadline of its own; the request context bounds
+// it (see downloadBodyTimeout in sync.go).
+func newTransport() *http.Transport {
+	return &http.Transport{
+		Proxy: http.ProxyFromEnvironment,
+		DialContext: (&net.Dialer{
+			Timeout:   15 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}).DialContext,
+		ForceAttemptHTTP2:     true,
+		MaxIdleConns:          10,
+		IdleConnTimeout:       90 * time.Second,
+		TLSHandshakeTimeout:   15 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
+		ResponseHeaderTimeout: 5 * time.Minute,
+	}
+}
+
 // ProbeCWA verifies that host points to a CWA (or compatible) OPDS server
 // that accepts the given credentials. Returns nil on success; on failure the
 // error message is short and suitable for display on the device.
