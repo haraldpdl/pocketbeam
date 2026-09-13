@@ -448,7 +448,9 @@ func shortID(uuid string) string {
 }
 
 // download fetches b into path via an atomic .part rename and returns the
-// number of bytes written.
+// number of bytes written. The staged file is flushed to the medium before
+// the rename (see syncClose) so an interrupted power supply cannot leave a
+// correctly named but empty or truncated book behind.
 func download(parent context.Context, src Source, path string, b Book) (int64, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return 0, err
@@ -473,13 +475,14 @@ func download(parent context.Context, src Source, path string, b Book) (int64, e
 		os.Remove(tmp)
 		return 0, err
 	}
-	if err := f.Close(); err != nil {
+	if err := syncClose(f); err != nil {
 		os.Remove(tmp)
 		return 0, err
 	}
 	if err := os.Rename(tmp, path); err != nil {
 		return 0, err
 	}
+	syncDir(filepath.Dir(path))
 	return n, nil
 }
 

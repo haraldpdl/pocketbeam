@@ -133,7 +133,10 @@ func CheckLatest(ctx context.Context, endpoint, currentVersion string) (newer bo
 // progress (if non-nil) reports cumulative bytes downloaded over the
 // wire and the Content-Length total (-1 when unknown), so the UI's
 // percentage matches what's actually being fetched rather than the
-// final on-disk size. On failure the incomplete file is removed.
+// final on-disk size. The verified file is flushed to the medium before
+// Download returns, so the Install rename that follows cannot publish a
+// binary whose bytes never reached storage. On failure the incomplete
+// file is removed.
 //
 // A release whose body carries no sha256 line is refused before any
 // bytes are fetched: without a published digest there is nothing to
@@ -190,7 +193,7 @@ func Download(ctx context.Context, rel Release, destPath string, progress func(w
 		os.Remove(destPath)
 		return err
 	}
-	if err := f.Close(); err != nil {
+	if err := syncClose(f); err != nil {
 		os.Remove(destPath)
 		return err
 	}
@@ -206,6 +209,9 @@ func Download(ctx context.Context, rel Release, destPath string, progress func(w
 // file at stagedPath. On Linux the running binary's inode stays alive
 // for the current process, so this is safe to call from the app
 // updating itself; the user must relaunch for the new version to run.
+// Download already flushed the staged file to the medium, so the rename
+// can only publish a complete binary; flushing the directory afterwards
+// keeps the rename itself from being what a power cut loses.
 //
 // Chmod is best-effort: PocketBook's /mnt/ext1 is a vfat filesystem on
 // many models, and vfat takes per-file mode bits from the mount options
@@ -221,6 +227,7 @@ func Install(stagedPath, targetPath string) error {
 		_ = os.Remove(stagedPath)
 		return err
 	}
+	syncDir(filepath.Dir(targetPath))
 	return nil
 }
 
