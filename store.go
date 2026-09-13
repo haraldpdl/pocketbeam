@@ -140,13 +140,15 @@ func (s *Store) Upsert(b Book, localPath string, actualSize int64) error {
 	return err
 }
 
-// OwnerOf returns the UUID whose local_path is path, or "" when no tracked
-// book lives there. The match ignores ASCII case because the device
-// library sits on a FAT volume, where "Title.epub" and "title.epub" are the
-// same file.
-func (s *Store) OwnerOf(path string) (string, error) {
+// OtherOwner returns a UUID other than except whose local_path is path, or
+// "" when no other tracked book lives there. Stores written before filenames
+// were disambiguated can hold several UUIDs at one path, so the caller names
+// itself to be excluded rather than comparing a single returned owner. The
+// match ignores ASCII case because the device library sits on a FAT volume,
+// where "Title.epub" and "title.epub" are the same file.
+func (s *Store) OtherOwner(path, except string) (string, error) {
 	var uuid string
-	err := s.db.QueryRow(`SELECT uuid FROM books WHERE local_path = ? COLLATE NOCASE`, path).Scan(&uuid)
+	err := s.db.QueryRow(`SELECT uuid FROM books WHERE local_path = ? COLLATE NOCASE AND uuid <> ? LIMIT 1`, path, except).Scan(&uuid)
 	if err == sql.ErrNoRows {
 		return "", nil
 	}

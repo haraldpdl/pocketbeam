@@ -148,11 +148,15 @@ func Sync(ctx context.Context, src Source, store *Store, library string, progres
 		}
 		// If the book was renamed (title or author changed), the new download
 		// lands at a new path; tidy up the old file so we don't accumulate
-		// duplicates on the device.
+		// duplicates on the device. Stores written before filenames were
+		// disambiguated can map another book to the old path, in which case
+		// the file is that book's only copy and must stay.
 		if exists && oldPath != "" && oldPath != path {
-			if err := os.Remove(oldPath); err == nil {
-				// Best-effort: also remove the old author directory if it's now empty.
-				_ = os.Remove(filepath.Dir(oldPath))
+			if other, _ := store.OtherOwner(oldPath, b.UUID); other == "" {
+				if err := os.Remove(oldPath); err == nil {
+					// Best-effort: also remove the old author directory if it's now empty.
+					_ = os.Remove(filepath.Dir(oldPath))
+				}
 			}
 		}
 		if err := store.Upsert(b, path, actualSize); err != nil {
@@ -406,11 +410,11 @@ func targetPath(store *Store, library string, b Book) (string, error) {
 	dir := filepath.Join(library, sanitize(b.Author))
 	title := sanitize(b.Title)
 	path := filepath.Join(dir, title+ext)
-	owner, err := store.OwnerOf(path)
+	owner, err := store.OtherOwner(path, b.UUID)
 	if err != nil {
 		return "", err
 	}
-	if owner != "" && owner != b.UUID {
+	if owner != "" {
 		path = filepath.Join(dir, title+" ["+shortID(b.UUID)+"]"+ext)
 	}
 	return path, nil

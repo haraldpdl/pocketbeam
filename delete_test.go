@@ -387,3 +387,53 @@ func TestSync_CaseOnlyTitleDifference_IsACollision(t *testing.T) {
 		t.Errorf("uuid-b path = %q, want %q", pathB, want)
 	}
 }
+
+// Stores written before filename disambiguation already hold two UUIDs at
+// one path. When only one of those books updates, it must move to a tagged
+// path while the other book's file (the shared one) stays in place.
+func TestSync_LegacySharedPath_UpdateKeepsOtherBooksFile(t *testing.T) {
+	store, dir := openTempStore(t)
+	defer store.Close()
+	library := filepath.Join(dir, "lib")
+	shared := filepath.Join(library, "Author", "Same Title.epub")
+
+	src := &fakeSource{
+		books: []Book{
+			makeBook("uuid-a", "Author", "Same Title", "http://x/a"),
+			makeBook("uuid-b", "Author", "Same Title", "http://x/b"),
+		},
+	}
+	if err := os.MkdirAll(filepath.Dir(shared), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(shared, []byte("legacy"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// The store keeps whole seconds; seed with the same precision so only
+	// the deliberate bump below reads as an update.
+	for i, b := range src.books {
+		src.books[i].Updated = b.Updated.Truncate(time.Second)
+		if err := store.Upsert(src.books[i], shared, 6); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	src.books[1].Updated = src.books[1].Updated.Add(time.Hour)
+	res := Sync(context.Background(), src, store, library, nil, SyncOptions{Scope: "s"})
+	if res.Downloaded != 1 || res.Skipped != 1 || res.FirstErr != nil {
+		t.Fatalf("sync: %+v", res)
+	}
+	if _, err := os.Stat(shared); err != nil {
+		t.Errorf("unchanged book's file was removed: %v", err)
+	}
+	if _, p, _, _, _ := store.LocalEntry("uuid-a"); p != shared {
+		t.Errorf("uuid-a path = %q, want %q", p, shared)
+	}
+	wantB := filepath.Join(library, "Author", "Same Title ["+shortID("uuid-b")+"].epub")
+	if _, p, _, _, _ := store.LocalEntry("uuid-b"); p != wantB {
+		t.Errorf("uuid-b path = %q, want %q", p, wantB)
+	}
+	if _, err := os.Stat(wantB); err != nil {
+		t.Errorf("updated book's file missing: %v", err)
+	}
+}

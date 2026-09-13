@@ -195,25 +195,38 @@ func TestOpenStore_UnwritablePath(t *testing.T) {
 	}
 }
 
-func TestStore_OwnerOf(t *testing.T) {
+func TestStore_OtherOwner(t *testing.T) {
 	s, _ := openTempStore(t)
 	defer s.Close()
 
 	if err := s.Upsert(makeBook("u1", "Au", "T", ""), "/lib/Au/T.epub", 1); err != nil {
 		t.Fatal(err)
 	}
-	cases := []struct{ path, want string }{
-		{"/lib/Au/T.epub", "u1"},
-		{"/lib/Au/t.EPUB", "u1"}, // FAT is case-insensitive
-		{"/lib/Au/Other.epub", ""},
+	cases := []struct{ path, except, want string }{
+		{"/lib/Au/T.epub", "", "u1"},
+		{"/lib/Au/t.EPUB", "", "u1"}, // FAT is case-insensitive
+		{"/lib/Au/T.epub", "u1", ""}, // the asking book is not "another" owner
+		{"/lib/Au/Other.epub", "", ""},
 	}
 	for _, tc := range cases {
-		got, err := s.OwnerOf(tc.path)
+		got, err := s.OtherOwner(tc.path, tc.except)
 		if err != nil {
-			t.Fatalf("OwnerOf(%q): %v", tc.path, err)
+			t.Fatalf("OtherOwner(%q, %q): %v", tc.path, tc.except, err)
 		}
 		if got != tc.want {
-			t.Errorf("OwnerOf(%q) = %q, want %q", tc.path, got, tc.want)
+			t.Errorf("OtherOwner(%q, %q) = %q, want %q", tc.path, tc.except, got, tc.want)
 		}
+	}
+
+	// Stores from before filename disambiguation hold several UUIDs at one
+	// path; excluding one must still surface the other.
+	if err := s.Upsert(makeBook("u2", "Au", "T", ""), "/lib/Au/T.epub", 1); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := s.OtherOwner("/lib/Au/T.epub", "u2"); got != "u1" {
+		t.Errorf("OtherOwner with two rows, except u2 = %q, want u1", got)
+	}
+	if got, _ := s.OtherOwner("/lib/Au/T.epub", "u1"); got != "u2" {
+		t.Errorf("OtherOwner with two rows, except u1 = %q, want u2", got)
 	}
 }
