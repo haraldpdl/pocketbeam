@@ -4,6 +4,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"image"
 	"log"
@@ -37,6 +38,34 @@ const (
 // minutes is enough to page through a large CWA "All books" feed over slow
 // Wi-Fi while still bounding a hung server.
 const feedPickerTimeout = 2 * time.Minute
+
+// pickerFetch owns the cancel func of the picker level fetch currently in
+// flight. Both pickers keep the up-row tappable while a fetch runs, so a
+// user backing out of a hung server starts the next fetch before the
+// previous one has returned. Dropping the stale result by request id is
+// not enough on its own: the superseded goroutine would keep probing and
+// walking the catalog for the rest of feedPickerTimeout, so several
+// multi-minute walks pile up competing for the device's Wi-Fi and CPU,
+// and their concurrent ensureConnected calls race on Client.IsCWA.
+// Cancelling the superseded context tears that request down instead; the
+// request id stays as the filter for a result that still lands first.
+//
+// Embedded in feedPickerState and dirPickerState, guarded by their mutex.
+type pickerFetch struct {
+	cancel context.CancelFunc
+}
+
+// restart cancels the fetch in flight and returns the context for its
+// replacement. The caller must hold the picker's mutex, and the fetch
+// goroutine must defer the returned cancel.
+func (p *pickerFetch) restart() (context.Context, context.CancelFunc) {
+	if p.cancel != nil {
+		p.cancel()
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), feedPickerTimeout)
+	p.cancel = cancel
+	return ctx, cancel
+}
 
 // tapDebounce is the minimum gap between two pointer events that will
 // both be treated as taps. PocketBook sometimes fires only a PointerDown

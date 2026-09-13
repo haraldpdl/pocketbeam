@@ -27,7 +27,10 @@ type dirPickerState struct {
 	// land after the user has already moved to another folder; a fetch
 	// whose id no longer matches drops its result instead of showing
 	// one folder's subdirectories under another folder's path.
-	reqID        int
+	reqID int
+	// pickerFetch cancels the superseded listing so a stale request stops
+	// working instead of merely having its result dropped.
+	pickerFetch
 	rowRects     []image.Rectangle // paginated directory rows
 	upRect       image.Rectangle   // fixed ".. (up)" row, empty when at root
 	prevPageRect image.Rectangle
@@ -52,17 +55,19 @@ func (a *app) openDirPicker(startPath string) {
 	a.dirPicker.offset = 0
 	a.dirPicker.reqID++
 	req := a.dirPicker.reqID
+	ctx, cancel := a.dirPicker.restart()
 	a.dirPicker.mu.Unlock()
 	a.screen = screenDirPicker
 	ink.Repaint()
-	go a.fetchDirEntries(p, req)
+	go a.fetchDirEntries(ctx, cancel, p, req)
 }
 
 // fetchDirEntries lists subdirectories of path on the configured WebDAV
 // server and stores the result for the picker to render, unless the user
 // has moved on and req is no longer the listing the picker waits for.
-func (a *app) fetchDirEntries(p string, req int) {
-	ctx, cancel := context.WithTimeout(context.Background(), feedPickerTimeout)
+// ctx comes from dirPickerState.restart, so the next navigation cancels
+// this listing; cancel is owned here and released when the fetch returns.
+func (a *app) fetchDirEntries(ctx context.Context, cancel context.CancelFunc, p string, req int) {
 	defer cancel()
 	if err := a.ensureConnected(ctx); err != nil {
 		a.dirPicker.mu.Lock()

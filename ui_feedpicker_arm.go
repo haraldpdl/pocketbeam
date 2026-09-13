@@ -39,7 +39,10 @@ type feedPickerState struct {
 	// can land after the user has already drilled elsewhere; a fetch
 	// whose id no longer matches drops its result instead of showing one
 	// level's subsections under another level's breadcrumb.
-	reqID        int
+	reqID int
+	// pickerFetch cancels the superseded fetch so a stale request stops
+	// working instead of merely having its result dropped.
+	pickerFetch
 	rowRects     []image.Rectangle // per visible subsection row
 	selectRect   image.Rectangle   // primary action ("Done" or "Add this level" depending on state)
 	doneRect     image.Rectangle   // "Done" button when the selection set is non-empty
@@ -82,10 +85,11 @@ func (a *app) openShelfPicker() {
 	a.picker.selected = seeded
 	a.picker.reqID++
 	req := a.picker.reqID
+	ctx, cancel := a.picker.restart()
 	a.picker.mu.Unlock()
 	a.screen = screenShelfPicker
 	ink.Repaint()
-	go a.fetchFeedLevel("", req)
+	go a.fetchFeedLevel(ctx, cancel, "", req)
 }
 
 // drillInto pushes the current feed onto the stack and fetches the child
@@ -104,9 +108,10 @@ func (a *app) drillInto(href, title string) {
 	a.picker.offset = 0
 	a.picker.reqID++
 	req := a.picker.reqID
+	ctx, cancel := a.picker.restart()
 	a.picker.mu.Unlock()
 	ink.Repaint()
-	go a.fetchFeedLevel(href, req)
+	go a.fetchFeedLevel(ctx, cancel, href, req)
 }
 
 // shelfPickerPage scrolls the list by one page. Called from the Prev /
@@ -142,15 +147,17 @@ func (a *app) drillUp() {
 	a.picker.offset = 0
 	a.picker.reqID++
 	req := a.picker.reqID
+	ctx, cancel := a.picker.restart()
 	a.picker.mu.Unlock()
 	ink.Repaint()
-	go a.fetchFeedLevel(top.Href, req)
+	go a.fetchFeedLevel(ctx, cancel, top.Href, req)
 }
 
 // fetchFeedLevel loads one picker level and stores the result, unless the
 // user has moved on and req is no longer the fetch the picker waits for.
-func (a *app) fetchFeedLevel(href string, req int) {
-	ctx, cancel := context.WithTimeout(context.Background(), feedPickerTimeout)
+// ctx comes from feedPickerState.restart, so the next navigation cancels
+// this fetch; cancel is owned here and released when the fetch returns.
+func (a *app) fetchFeedLevel(ctx context.Context, cancel context.CancelFunc, href string, req int) {
 	defer cancel()
 	if err := a.ensureConnected(ctx); err != nil {
 		a.picker.mu.Lock()

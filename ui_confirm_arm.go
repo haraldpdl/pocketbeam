@@ -104,6 +104,7 @@ func (a *app) drawSpaceWarn() {
 	plan := a.spaceWarn.plan
 	a.spaceWarn.mu.Unlock()
 
+	title.SetActive(ink.Black)
 	ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(140)}, "Not enough space")
 	body.SetActive(ink.DarkGray)
 	ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(200)},
@@ -241,6 +242,7 @@ func (a *app) drawDeleteConfirm() {
 	pending := append([]LocalBook(nil), a.delConfirm.pending...)
 	a.delConfirm.mu.Unlock()
 
+	title.SetActive(ink.Black)
 	ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(140)}, "Confirm deletion")
 	body.SetActive(ink.DarkGray)
 	ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(200)},

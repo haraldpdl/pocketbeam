@@ -92,6 +92,7 @@ func (a *app) drawProfileList() {
 	offset := a.profileList.offset
 	a.profileList.mu.Unlock()
 
+	title.SetActive(ink.Black)
 	ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(140)}, "Server profiles")
 
 	if perr != nil {
@@ -334,6 +335,7 @@ func (a *app) drawProfileDetail() {
 	confirming := a.profileDetail.confirmDelete
 	a.profileDetail.mu.Unlock()
 
+	title.SetActive(ink.Black)
 	ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(140)}, truncate(name, 40))
 	body.SetActive(ink.DarkGray)
 	status := "Profile"
