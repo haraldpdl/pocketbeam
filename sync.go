@@ -105,6 +105,11 @@ func Sync(ctx context.Context, src Source, store *Store, library string, progres
 			return res
 		}
 	}
+	local, err := store.EntriesByUUID()
+	if err != nil {
+		res.FirstErr = fmt.Errorf("list local entries: %w", err)
+		return res
+	}
 	total := len(books)
 	for i, b := range books {
 		if err := ctx.Err(); err != nil {
@@ -114,15 +119,8 @@ func Sync(ctx context.Context, src Source, store *Store, library string, progres
 		if progress != nil {
 			progress(i+1, total, b)
 		}
-		local, oldPath, _, exists, err := store.LocalEntry(b.UUID)
-		if err != nil {
-			res.Failed++
-			if res.FirstErr == nil {
-				res.FirstErr = err
-			}
-			continue
-		}
-		if exists && !b.Updated.After(local) {
+		old, exists := local[b.UUID]
+		if exists && !b.Updated.After(old.Updated) {
 			res.Skipped++
 			continue
 		}
@@ -151,11 +149,11 @@ func Sync(ctx context.Context, src Source, store *Store, library string, progres
 		// duplicates on the device. Stores written before filenames were
 		// disambiguated can map another book to the old path, in which case
 		// the file is that book's only copy and must stay.
-		if exists && oldPath != "" && oldPath != path {
-			if other, _ := store.OtherOwner(oldPath, b.UUID); other == "" {
-				if err := os.Remove(oldPath); err == nil {
+		if exists && old.LocalPath != "" && old.LocalPath != path {
+			if other, _ := store.OtherOwner(old.LocalPath, b.UUID); other == "" {
+				if err := os.Remove(old.LocalPath); err == nil {
 					// Best-effort: also remove the old author directory if it's now empty.
-					_ = os.Remove(filepath.Dir(oldPath))
+					_ = os.Remove(filepath.Dir(old.LocalPath))
 				}
 			}
 		}
@@ -345,12 +343,13 @@ func Plan(ctx context.Context, src Source, store *Store, library string, opts Sy
 			return plan, nil, fmt.Errorf("list remote: %w", err)
 		}
 	}
+	local, err := store.EntriesByUUID()
+	if err != nil {
+		return plan, books, fmt.Errorf("list local entries: %w", err)
+	}
 	for _, b := range books {
-		local, _, cachedSize, exists, err := store.LocalEntry(b.UUID)
-		if err != nil {
-			return plan, books, err
-		}
-		if exists && !b.Updated.After(local) {
+		old, exists := local[b.UUID]
+		if exists && !b.Updated.After(old.Updated) {
 			plan.Unchanged++
 			continue
 		}
@@ -358,11 +357,11 @@ func Plan(ctx context.Context, src Source, store *Store, library string, opts Sy
 		switch {
 		case b.Size > 0:
 			size = b.Size
-		case exists && cachedSize > 0:
+		case exists && old.Size > 0:
 			// The server didn't advertise length this time but we know
 			// from a prior download how big this UUID is. Use the cache
 			// so the plan tightens up on every run.
-			size = cachedSize
+			size = old.Size
 		}
 		if size > 0 {
 			plan.DownloadBytes += size

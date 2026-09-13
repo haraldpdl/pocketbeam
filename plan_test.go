@@ -194,12 +194,12 @@ func TestPlan_CachedSizeOverwrittenByDownload(t *testing.T) {
 	if res := Sync(context.Background(), src, store, library, nil, SyncOptions{Scope: "s"}); res.FirstErr != nil {
 		t.Fatalf("Sync: %v", res.FirstErr)
 	}
-	_, _, cached, exists, err := store.LocalEntry("a")
-	if err != nil || !exists {
-		t.Fatalf("LocalEntry: exists=%v err=%v", exists, err)
+	e, exists := lookup(t, store, "a")
+	if !exists {
+		t.Fatal("book a missing from store after sync")
 	}
-	if cached != 13 {
-		t.Errorf("cached size=%d, want 13 (actual-bytes-on-disk, not the server lie)", cached)
+	if e.Size != 13 {
+		t.Errorf("cached size=%d, want 13 (actual-bytes-on-disk, not the server lie)", e.Size)
 	}
 }
 

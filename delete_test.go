@@ -46,6 +46,18 @@ func openTempStore(t *testing.T) (*Store, string) {
 	return s, dir
 }
 
+// lookup returns the tracked entry for uuid via the same per-run map
+// Plan and Sync consult; ok is false when the store does not know uuid.
+func lookup(t *testing.T, s *Store, uuid string) (LocalBook, bool) {
+	t.Helper()
+	entries, err := s.EntriesByUUID()
+	if err != nil {
+		t.Fatalf("EntriesByUUID: %v", err)
+	}
+	e, ok := entries[uuid]
+	return e, ok
+}
+
 // cancellingSource pretends to have many books and deliberately blocks
 // in Fetch so the context can be cancelled mid-download. Used to verify
 // Sync exits promptly once the caller cancels.
@@ -155,11 +167,7 @@ func TestSync_DeleteMissing_ConfirmsAndRemoves(t *testing.T) {
 		t.Errorf("Confirm called with %+v, want one entry for uuid-b", askedWith)
 	}
 	// The store should no longer know about uuid-b.
-	_, _, _, exists, err := store.LocalEntry("uuid-b")
-	if err != nil {
-		t.Fatalf("LocalEntry: %v", err)
-	}
-	if exists {
+	if _, exists := lookup(t, store, "uuid-b"); exists {
 		t.Errorf("uuid-b still present in store after delete")
 	}
 }
@@ -259,7 +267,7 @@ func TestSync_DeleteMissing_ConfirmDecline(t *testing.T) {
 	if res.Deleted != 0 {
 		t.Errorf("Deleted = %d, want 0 when declined", res.Deleted)
 	}
-	_, _, _, exists, _ := store.LocalEntry("uuid-b")
+	_, exists := lookup(t, store, "uuid-b")
 	if !exists {
 		t.Errorf("uuid-b should still be present after decline")
 	}
@@ -316,8 +324,9 @@ func TestSync_SameTitleDifferentBooks_KeepSeparateFiles(t *testing.T) {
 	if res.Downloaded != 2 || res.FirstErr != nil {
 		t.Fatalf("first sync: %+v", res)
 	}
-	_, pathA, _, _, _ := store.LocalEntry("uuid-a")
-	_, pathB, _, _, _ := store.LocalEntry("uuid-b")
+	entryA, _ := lookup(t, store, "uuid-a")
+	entryB, _ := lookup(t, store, "uuid-b")
+	pathA, pathB := entryA.LocalPath, entryB.LocalPath
 	if pathA != filepath.Join(library, "Author", "Same Title.epub") {
 		t.Errorf("first book path = %q, want plain name", pathA)
 	}
@@ -340,11 +349,11 @@ func TestSync_SameTitleDifferentBooks_KeepSeparateFiles(t *testing.T) {
 	if res.Downloaded != 2 || res.FirstErr != nil {
 		t.Fatalf("second sync: %+v", res)
 	}
-	if _, p, _, _, _ := store.LocalEntry("uuid-a"); p != pathA {
-		t.Errorf("uuid-a moved to %q on re-download", p)
+	if e, _ := lookup(t, store, "uuid-a"); e.LocalPath != pathA {
+		t.Errorf("uuid-a moved to %q on re-download", e.LocalPath)
 	}
-	if _, p, _, _, _ := store.LocalEntry("uuid-b"); p != pathB {
-		t.Errorf("uuid-b moved to %q on re-download", p)
+	if e, _ := lookup(t, store, "uuid-b"); e.LocalPath != pathB {
+		t.Errorf("uuid-b moved to %q on re-download", e.LocalPath)
 	}
 
 	// Removing the first book from the remote deletes only its file.
@@ -382,7 +391,8 @@ func TestSync_CaseOnlyTitleDifference_IsACollision(t *testing.T) {
 	if res.Downloaded != 2 || res.FirstErr != nil {
 		t.Fatalf("sync: %+v", res)
 	}
-	_, pathB, _, _, _ := store.LocalEntry("uuid-b")
+	entryB, _ := lookup(t, store, "uuid-b")
+	pathB := entryB.LocalPath
 	if want := filepath.Join(library, "Author", "TITLE ["+shortID("uuid-b")+"].epub"); pathB != want {
 		t.Errorf("uuid-b path = %q, want %q", pathB, want)
 	}
@@ -426,12 +436,12 @@ func TestSync_LegacySharedPath_UpdateKeepsOtherBooksFile(t *testing.T) {
 	if _, err := os.Stat(shared); err != nil {
 		t.Errorf("unchanged book's file was removed: %v", err)
 	}
-	if _, p, _, _, _ := store.LocalEntry("uuid-a"); p != shared {
-		t.Errorf("uuid-a path = %q, want %q", p, shared)
+	if e, _ := lookup(t, store, "uuid-a"); e.LocalPath != shared {
+		t.Errorf("uuid-a path = %q, want %q", e.LocalPath, shared)
 	}
 	wantB := filepath.Join(library, "Author", "Same Title ["+shortID("uuid-b")+"].epub")
-	if _, p, _, _, _ := store.LocalEntry("uuid-b"); p != wantB {
-		t.Errorf("uuid-b path = %q, want %q", p, wantB)
+	if e, _ := lookup(t, store, "uuid-b"); e.LocalPath != wantB {
+		t.Errorf("uuid-b path = %q, want %q", e.LocalPath, wantB)
 	}
 	if _, err := os.Stat(wantB); err != nil {
 		t.Errorf("updated book's file missing: %v", err)
@@ -480,10 +490,10 @@ func TestSync_LegacySharedPath_DeleteKeepsOtherBooksFile(t *testing.T) {
 	if _, err := os.Stat(shared); err != nil {
 		t.Errorf("surviving book uuid-b lost its only file: %v", err)
 	}
-	if _, _, _, exists, _ := store.LocalEntry("uuid-a"); exists {
+	if _, exists := lookup(t, store, "uuid-a"); exists {
 		t.Errorf("uuid-a still present in store after delete")
 	}
-	if _, p, _, exists, _ := store.LocalEntry("uuid-b"); !exists || p != shared {
-		t.Errorf("uuid-b entry = (%q, exists=%v), want (%q, true)", p, exists, shared)
+	if e, exists := lookup(t, store, "uuid-b"); !exists || e.LocalPath != shared {
+		t.Errorf("uuid-b entry = (%q, exists=%v), want (%q, true)", e.LocalPath, exists, shared)
 	}
 }

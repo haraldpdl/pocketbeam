@@ -3,6 +3,7 @@ package main
 import (
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"time"
 
@@ -18,6 +19,14 @@ type SyncSummary struct {
 	Failed     int       `json:"failed"`
 }
 
+// busyTimeout is how long a statement waits for another process's lock
+// before failing with "database is locked". The CLI and the UI can run at
+// the same time against one state file (see stalePartAge); their writes
+// are short, so waiting beats failing the whole book. mattn/go-sqlite3
+// happens to default to the same value; it is set explicitly so the wait
+// is visible here and survives a driver default change.
+const busyTimeout = 5 * time.Second
+
 // Store tracks which books we've already downloaded, keyed on the OPDS UUID.
 // The `updated` column lets us detect when a remote book has been re-imported
 // (CWA bumps mtime on edits) so we re-fetch the new version.
@@ -26,10 +35,14 @@ type Store struct {
 }
 
 func OpenStore(path string) (*Store, error) {
-	db, err := sql.Open("sqlite3", path)
+	db, err := sql.Open("sqlite3", fmt.Sprintf("%s?_busy_timeout=%d", path, busyTimeout.Milliseconds()))
 	if err != nil {
 		return nil, err
 	}
+	// One connection per process: every Store call is a single autocommit
+	// statement and SQLite serialises writers anyway, so a second pooled
+	// connection would only let this process contend with itself.
+	db.SetMaxOpenConns(1)
 	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS books (
 		uuid       TEXT PRIMARY KEY,
 		title      TEXT NOT NULL,
@@ -99,22 +112,6 @@ func (s *Store) LastSync() (SyncSummary, bool, error) {
 
 func (s *Store) Close() error { return s.db.Close() }
 
-// LocalEntry returns the last-recorded updated timestamp, local path, and
-// cached byte size for a book UUID. Size is 0 when unknown (legacy rows
-// from before the size column, or a server that never advertised length).
-// exists=false means we have not synced this book before.
-func (s *Store) LocalEntry(uuid string) (updated time.Time, path string, size int64, exists bool, err error) {
-	var ts int64
-	err = s.db.QueryRow("SELECT updated, local_path, size FROM books WHERE uuid = ?", uuid).Scan(&ts, &path, &size)
-	if err == sql.ErrNoRows {
-		return time.Time{}, "", 0, false, nil
-	}
-	if err != nil {
-		return time.Time{}, "", 0, false, err
-	}
-	return time.Unix(ts, 0), path, size, true, nil
-}
-
 // Upsert records a successful download. actualSize is the byte count read
 // off the wire during this download; it takes precedence over b.Size
 // (which is the server-advertised value and may not match). A non-positive
@@ -159,13 +156,16 @@ func (s *Store) OtherOwner(path, except string) (string, error) {
 }
 
 // LocalBook is the local view of a previously-synced book: identity,
-// human display fields, the path on disk, and the cached byte size
-// (0 if unknown). Used by the delete-missing path, the confirmation
-// prompt, and the pre-flight space check.
+// human display fields, the remote timestamp at download time, the path
+// on disk, and the cached byte size (0 if unknown: legacy rows from before
+// the size column, or a server that never advertised length). Used by the
+// sync diff, the delete-missing path, the confirmation prompt, and the
+// pre-flight space check.
 type LocalBook struct {
 	UUID      string
 	Title     string
 	Author    string
+	Updated   time.Time
 	LocalPath string
 	Size      int64
 }
@@ -173,7 +173,7 @@ type LocalBook struct {
 // AllEntries returns every tracked book. Used to compute which local
 // entries are missing from the current remote listing.
 func (s *Store) AllEntries() ([]LocalBook, error) {
-	rows, err := s.db.Query(`SELECT uuid, title, author, local_path, size FROM books`)
+	rows, err := s.db.Query(`SELECT uuid, title, author, updated, local_path, size FROM books`)
 	if err != nil {
 		return nil, err
 	}
@@ -181,12 +181,29 @@ func (s *Store) AllEntries() ([]LocalBook, error) {
 	var out []LocalBook
 	for rows.Next() {
 		var b LocalBook
-		if err := rows.Scan(&b.UUID, &b.Title, &b.Author, &b.LocalPath, &b.Size); err != nil {
+		var ts int64
+		if err := rows.Scan(&b.UUID, &b.Title, &b.Author, &ts, &b.LocalPath, &b.Size); err != nil {
 			return nil, err
 		}
+		b.Updated = time.Unix(ts, 0)
 		out = append(out, b)
 	}
 	return out, rows.Err()
+}
+
+// EntriesByUUID returns every tracked book keyed on UUID. Plan and Sync
+// load it once per run so diffing the remote list costs one query rather
+// than one per book.
+func (s *Store) EntriesByUUID() (map[string]LocalBook, error) {
+	entries, err := s.AllEntries()
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[string]LocalBook, len(entries))
+	for _, e := range entries {
+		out[e.UUID] = e
+	}
+	return out, nil
 }
 
 // Delete removes the tracked entry for a UUID. The file on disk is the

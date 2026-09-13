@@ -1,18 +1,19 @@
 package main
 
 import (
+	"context"
 	"database/sql"
 	"path/filepath"
 	"testing"
 	"time"
 )
 
-func TestStore_UpsertAndLocalEntry(t *testing.T) {
+func TestStore_UpsertAndEntriesByUUID(t *testing.T) {
 	s, _ := openTempStore(t)
 	defer s.Close()
 
-	if _, _, _, exists, err := s.LocalEntry("nope"); err != nil || exists {
-		t.Fatalf("LocalEntry(unknown) = exists=%v err=%v, want exists=false", exists, err)
+	if _, exists := lookup(t, s, "nope"); exists {
+		t.Fatal("lookup(unknown) = exists, want absent")
 	}
 
 	b := makeBook("u1", "Author", "Title", "http://x/1")
@@ -21,16 +22,19 @@ func TestStore_UpsertAndLocalEntry(t *testing.T) {
 	if err := s.Upsert(b, "/lib/Author/Title.epub", 1234); err != nil {
 		t.Fatalf("Upsert: %v", err)
 	}
-	updated, path, size, exists, err := s.LocalEntry("u1")
-	if err != nil || !exists {
-		t.Fatalf("LocalEntry = exists=%v err=%v", exists, err)
+	e, exists := lookup(t, s, "u1")
+	if !exists {
+		t.Fatal("u1 missing after Upsert")
 	}
-	if !updated.Equal(b.Updated) || path != "/lib/Author/Title.epub" {
-		t.Errorf("LocalEntry = (%v, %q), want (%v, %q)", updated, path, b.Updated, "/lib/Author/Title.epub")
+	if !e.Updated.Equal(b.Updated) || e.LocalPath != "/lib/Author/Title.epub" {
+		t.Errorf("entry = (%v, %q), want (%v, %q)", e.Updated, e.LocalPath, b.Updated, "/lib/Author/Title.epub")
+	}
+	if e.Title != "Title" || e.Author != "Author" {
+		t.Errorf("entry display fields = (%q, %q), want (Title, Author)", e.Title, e.Author)
 	}
 	// The measured transfer size wins over the advertised one.
-	if size != 1234 {
-		t.Errorf("size = %d, want 1234 (actual bytes read)", size)
+	if e.Size != 1234 {
+		t.Errorf("size = %d, want 1234 (actual bytes read)", e.Size)
 	}
 
 	// Re-upserting the same UUID updates in place rather than duplicating.
@@ -42,22 +46,22 @@ func TestStore_UpsertAndLocalEntry(t *testing.T) {
 	if n, _ := s.BookCount(); n != 1 {
 		t.Errorf("BookCount = %d, want 1 after re-upsert", n)
 	}
-	updated, path, size, _, _ = s.LocalEntry("u1")
-	if !updated.Equal(b.Updated) || path != "/lib/Author/Renamed.epub" {
-		t.Errorf("after update: (%v, %q)", updated, path)
+	e, _ = lookup(t, s, "u1")
+	if !e.Updated.Equal(b.Updated) || e.LocalPath != "/lib/Author/Renamed.epub" {
+		t.Errorf("after update: (%v, %q)", e.Updated, e.LocalPath)
 	}
 	// No measured size falls back to the server-advertised one.
-	if size != 500 {
-		t.Errorf("size = %d, want 500 (advertised fallback)", size)
+	if e.Size != 500 {
+		t.Errorf("size = %d, want 500 (advertised fallback)", e.Size)
 	}
 
 	// Neither measured nor advertised: stored as 0 (unknown), never negative.
 	b.Size = -7
-	if err := s.Upsert(b, path, -1); err != nil {
+	if err := s.Upsert(b, e.LocalPath, -1); err != nil {
 		t.Fatalf("Upsert(negative): %v", err)
 	}
-	if _, _, size, _, _ = s.LocalEntry("u1"); size != 0 {
-		t.Errorf("size = %d, want 0 for unknown", size)
+	if e, _ = lookup(t, s, "u1"); e.Size != 0 {
+		t.Errorf("size = %d, want 0 for unknown", e.Size)
 	}
 }
 
@@ -82,7 +86,7 @@ func TestStore_AllEntriesAndDelete(t *testing.T) {
 	if err := s.Delete("a"); err != nil {
 		t.Fatalf("Delete: %v", err)
 	}
-	if _, _, _, exists, _ := s.LocalEntry("a"); exists {
+	if _, exists := lookup(t, s, "a"); exists {
 		t.Error("entry a still present after Delete")
 	}
 	if n, _ := s.BookCount(); n != 1 {
@@ -175,17 +179,65 @@ func TestOpenStore_MigratesLegacySchema(t *testing.T) {
 		if err != nil {
 			t.Fatalf("OpenStore pass %d: %v", pass, err)
 		}
-		updated, local, size, exists, err := s.LocalEntry("old")
-		if err != nil || !exists {
-			t.Fatalf("pass %d: LocalEntry = exists=%v err=%v", pass, exists, err)
+		e, exists := lookup(t, s, "old")
+		if !exists {
+			t.Fatalf("pass %d: legacy row missing", pass)
 		}
-		if updated.Unix() != 42 || local != "/lib/old.epub" || size != 0 {
-			t.Errorf("pass %d: legacy row = (%d, %q, %d), want (42, /lib/old.epub, 0)", pass, updated.Unix(), local, size)
+		if e.Updated.Unix() != 42 || e.LocalPath != "/lib/old.epub" || e.Size != 0 {
+			t.Errorf("pass %d: legacy row = (%d, %q, %d), want (42, /lib/old.epub, 0)", pass, e.Updated.Unix(), e.LocalPath, e.Size)
 		}
 		if _, _, err := s.GetMeta("anything"); err != nil {
 			t.Errorf("pass %d: meta table missing after migration: %v", pass, err)
 		}
 		s.Close()
+	}
+}
+
+// The CLI and the UI can run against the same state file at once. A write
+// that meets another process's lock must wait for it rather than fail on
+// the spot with "database is locked".
+func TestOpenStore_WaitsForForeignLock(t *testing.T) {
+	s, dir := openTempStore(t)
+	defer s.Close()
+	if s.db.Stats().MaxOpenConnections != 1 {
+		t.Errorf("MaxOpenConnections = %d, want 1", s.db.Stats().MaxOpenConnections)
+	}
+
+	// A second handle without busy timeout stands in for the other process
+	// and holds the write lock via an open IMMEDIATE transaction.
+	other, err := sql.Open("sqlite3", filepath.Join(dir, "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer other.Close()
+	ctx := context.Background()
+	conn, err := other.Conn(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	if _, err := conn.ExecContext(ctx, `BEGIN IMMEDIATE`); err != nil {
+		t.Fatalf("BEGIN IMMEDIATE: %v", err)
+	}
+
+	done := make(chan error, 1)
+	go func() { done <- s.Upsert(makeBook("u1", "Au", "T", ""), "/lib/Au/T.epub", 1) }()
+
+	// Without the busy timeout Upsert returns "database is locked" at once;
+	// with it the call is still pending when the lock is released.
+	select {
+	case err := <-done:
+		t.Fatalf("Upsert returned %v while the lock was held, want it to wait", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
+		t.Fatalf("COMMIT: %v", err)
+	}
+	if err := <-done; err != nil {
+		t.Fatalf("Upsert after lock release: %v", err)
+	}
+	if _, exists := lookup(t, s, "u1"); !exists {
+		t.Error("u1 missing after the waited write")
 	}
 }
 
