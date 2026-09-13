@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"image"
 	"log"
@@ -37,6 +38,13 @@ const (
 // return to the main screen. Scanner normally exits in a few seconds; the
 // upper bound guards against a stuck scanner leaving pocketbeam modal.
 const libraryScannerTimeout = 60 * time.Second
+
+// feedPickerTimeout caps one picker level fetch (probe + every page of the
+// feed). Without it a server that accepts the connection but never answers
+// leaves the picker on "Loading..." for the client's 5-minute
+// response-header timeout. Two minutes is enough to page through a large
+// CWA "All books" feed over slow Wi-Fi while still bounding a hung server.
+const feedPickerTimeout = 2 * time.Minute
 
 // userScannerPath is where firmware 6.x installs the PocketBook library
 // scanner. The systemScannerPath fallback covers variants that only ship the
@@ -1308,7 +1316,17 @@ func (a *app) runSync() {
 		ink.SetAutoPowerOff(true)
 	}()
 
-	if err := a.ensureConnected(); err != nil {
+	// Arm Stop before the first network round-trip so a tap during the
+	// probe or the catalog listing aborts the run instead of waiting for
+	// the first download.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	a.sync.mu.Lock()
+	a.sync.cancel = cancel
+	a.sync.cancelled = false
+	a.sync.mu.Unlock()
+
+	if err := a.ensureConnected(ctx); err != nil {
 		a.finishSyncWithError(err)
 		ink.Repaint()
 		return
@@ -1332,10 +1350,7 @@ func (a *app) runSync() {
 	}
 	src, err := newSource(a.cfg)
 	if err != nil {
-		a.sync.mu.Lock()
-		a.sync.active = false
-		a.sync.err = err
-		a.sync.mu.Unlock()
+		a.finishSyncWithError(err)
 		a.refreshMainStats()
 		ink.Repaint()
 		return
@@ -1347,13 +1362,9 @@ func (a *app) runSync() {
 	if a.cfg.DeleteMissing {
 		opts.Confirm = a.confirmDeletions
 	}
-	ctx, cancel := context.WithCancel(context.Background())
 	a.sync.mu.Lock()
-	a.sync.cancel = cancel
-	a.sync.cancelled = false
 	a.sync.planning = true
 	a.sync.mu.Unlock()
-	defer cancel()
 	a.refreshProgress()
 
 	plan, books, err := Plan(ctx, src, a.store, a.cfg.Library, opts)
@@ -1466,10 +1477,17 @@ func (a *app) runLibraryScanner() {
 }
 
 // finishSyncWithError sets the sync state to inactive with the given error.
-// Used when the sync bails before calling Sync() (no network, probe fail).
+// Used when the sync bails before calling Sync() (no network, probe fail,
+// listing error). A run the user stopped reports "Sync stopped." instead
+// of the context error the aborted request surfaced.
 func (a *app) finishSyncWithError(err error) {
 	a.sync.mu.Lock()
 	a.sync.active = false
+	a.sync.cancel = nil
+	if a.sync.cancelled {
+		a.sync.cancelled = false
+		err = fmt.Errorf("Sync stopped.")
+	}
 	a.sync.err = err
 	a.sync.mu.Unlock()
 }
@@ -1480,23 +1498,24 @@ func (a *app) finishSyncWithError(err error) {
 // generic recursive walk). Returns a user-facing error on failure; nil on
 // success. All UI actions that issue HTTP requests to the server should
 // call this first so the user gets a consistent, readable error instead of
-// a raw Go transport dump.
-func (a *app) ensureConnected() error {
+// a raw Go transport dump. ctx bounds the probe and detection requests so
+// the caller's cancel or timeout also covers this step.
+func (a *app) ensureConnected(ctx context.Context) error {
 	if err := ink.ConnectDefault(); err != nil {
 		return fmt.Errorf("No Wi-Fi connection. Open Network to configure.")
 	}
 	var err error
 	switch a.cfg.Backend {
 	case BackendWebDAV:
-		err = ProbeWebDAV(context.Background(), a.cfg.Host, a.cfg.User, a.cfg.Pass, a.cfg.Path)
+		err = ProbeWebDAV(ctx, a.cfg.Host, a.cfg.User, a.cfg.Pass, a.cfg.Path)
 	default:
-		err = ProbeCWA(context.Background(), a.cfg.Host, a.cfg.User, a.cfg.Pass)
+		err = ProbeCWA(ctx, a.cfg.Host, a.cfg.User, a.cfg.Pass)
 	}
 	if err != nil {
 		return err
 	}
 	if a.cfg.Backend != BackendWebDAV && a.client != nil {
-		_ = a.client.DetectType() // non-fatal: falls back to generic walk
+		_ = a.client.DetectType(ctx) // non-fatal: falls back to generic walk
 	}
 	return nil
 }
@@ -1844,7 +1863,9 @@ func (a *app) drillUp() {
 }
 
 func (a *app) fetchFeedLevel(href, title string) {
-	if err := a.ensureConnected(); err != nil {
+	ctx, cancel := context.WithTimeout(context.Background(), feedPickerTimeout)
+	defer cancel()
+	if err := a.ensureConnected(ctx); err != nil {
 		a.picker.mu.Lock()
 		a.picker.loading = false
 		a.picker.err = err
@@ -1852,7 +1873,10 @@ func (a *app) fetchFeedLevel(href, title string) {
 		ink.Repaint()
 		return
 	}
-	lvl, err := a.client.FetchLevel(href)
+	lvl, err := a.client.FetchLevel(ctx, href)
+	if errors.Is(err, context.DeadlineExceeded) {
+		err = errors.New("Server did not respond in time.")
+	}
 	a.picker.mu.Lock()
 	a.picker.loading = false
 	a.picker.level = lvl
@@ -2281,7 +2305,7 @@ func (a *app) openDirPicker(startPath string) {
 // fetchDirEntries lists subdirectories of path on the configured WebDAV
 // server and stores the result for the picker to render.
 func (a *app) fetchDirEntries(p string) {
-	if err := a.ensureConnected(); err != nil {
+	if err := a.ensureConnected(context.Background()); err != nil {
 		a.dirPicker.mu.Lock()
 		a.dirPicker.loading = false
 		a.dirPicker.err = err

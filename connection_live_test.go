@@ -66,7 +66,7 @@ func TestLiveListShelves(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewClient: %v", err)
 	}
-	shelves, err := c.ListShelves()
+	shelves, err := c.ListShelves(context.Background())
 	if err != nil {
 		t.Fatalf("ListShelves: %v", err)
 	}
@@ -83,15 +83,15 @@ func TestLiveWalkShelf(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewClient: %v", err)
 	}
-	if err := c.DetectType(); err != nil {
+	if err := c.DetectType(context.Background()); err != nil {
 		t.Fatalf("DetectType: %v", err)
 	}
-	shelves, err := c.ListShelves()
+	shelves, err := c.ListShelves(context.Background())
 	if err != nil || len(shelves) == 0 {
 		t.Skip("no shelves on test CWA, skipping")
 	}
 	id := shelves[0].ID
-	books, err := c.WalkShelf(id)
+	books, err := c.WalkShelf(context.Background(), id)
 	if err != nil {
 		t.Fatalf("WalkShelf(%d): %v", id, err)
 	}
@@ -103,7 +103,7 @@ func TestLiveDetectType(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewClient: %v", err)
 	}
-	if err := c.DetectType(); err != nil {
+	if err := c.DetectType(context.Background()); err != nil {
 		t.Fatalf("DetectType: %v", err)
 	}
 	if !c.IsCWA {
@@ -120,7 +120,7 @@ func TestLiveWalkGeneric(t *testing.T) {
 		t.Fatalf("NewClient: %v", err)
 	}
 	// IsCWA deliberately left false so WalkAll falls through to walkGeneric
-	books, err := c.WalkAll()
+	books, err := c.WalkAll(context.Background())
 	if err != nil {
 		t.Fatalf("WalkAll (generic): %v", err)
 	}

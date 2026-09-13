@@ -2,12 +2,14 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"slices"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 // opdsFeeds is a path -> Atom body table served by newOPDSMock. Any path
@@ -145,7 +147,7 @@ func TestWalkAll_DispatchesOnServerType(t *testing.T) {
 		srv, paths := newOPDSMock(t, cwaFeeds())
 		c := newOPDSClient(t, srv.URL)
 		c.IsCWA = true
-		books, err := c.WalkAll()
+		books, err := c.WalkAll(context.Background())
 		if err != nil {
 			t.Fatalf("WalkAll: %v", err)
 		}
@@ -160,7 +162,7 @@ func TestWalkAll_DispatchesOnServerType(t *testing.T) {
 			"/opds/new/sub": feedXML("Sub", bookEntry("n1", "One again")+bookEntry("n2", "Two")),
 		}
 		srv, paths := newOPDSMock(t, feeds)
-		books, err := newOPDSClient(t, srv.URL).WalkAll()
+		books, err := newOPDSClient(t, srv.URL).WalkAll(context.Background())
 		if err != nil {
 			t.Fatalf("WalkAll: %v", err)
 		}
@@ -180,7 +182,7 @@ func TestWalkFiltered_ShelfFastPathOnlyOnCWA(t *testing.T) {
 		srv, paths := newOPDSMock(t, cwaFeeds())
 		c := newOPDSClient(t, srv.URL)
 		c.IsCWA = true
-		books, err := c.WalkFiltered("/opds/shelf/3")
+		books, err := c.WalkFiltered(context.Background(), "/opds/shelf/3")
 		if err != nil {
 			t.Fatalf("WalkFiltered: %v", err)
 		}
@@ -190,7 +192,7 @@ func TestWalkFiltered_ShelfFastPathOnlyOnCWA(t *testing.T) {
 	})
 	t.Run("generic server recurses into the shelf", func(t *testing.T) {
 		srv, paths := newOPDSMock(t, cwaFeeds())
-		books, err := newOPDSClient(t, srv.URL).WalkFiltered("/opds/shelf/3")
+		books, err := newOPDSClient(t, srv.URL).WalkFiltered(context.Background(), "/opds/shelf/3")
 		if err != nil {
 			t.Fatalf("WalkFiltered: %v", err)
 		}
@@ -202,7 +204,7 @@ func TestWalkFiltered_ShelfFastPathOnlyOnCWA(t *testing.T) {
 		srv, paths := newOPDSMock(t, cwaFeeds())
 		c := newOPDSClient(t, srv.URL)
 		c.IsCWA = true
-		if _, err := c.WalkFiltered(""); err != nil {
+		if _, err := c.WalkFiltered(context.Background(), ""); err != nil {
 			t.Fatalf("WalkFiltered: %v", err)
 		}
 		if !slices.Equal(*paths, []string{"/opds/books/letter/00"}) {
@@ -214,14 +216,14 @@ func TestWalkFiltered_ShelfFastPathOnlyOnCWA(t *testing.T) {
 func TestWalkShelf_RequiresCWA(t *testing.T) {
 	srv, paths := newOPDSMock(t, cwaFeeds())
 	c := newOPDSClient(t, srv.URL)
-	if _, err := c.WalkShelf(3); err == nil {
+	if _, err := c.WalkShelf(context.Background(), 3); err == nil {
 		t.Error("WalkShelf on a generic server should error")
 	}
 	if len(*paths) != 0 {
 		t.Errorf("requests = %v, want none before the CWA check", *paths)
 	}
 	c.IsCWA = true
-	books, err := c.WalkShelf(3)
+	books, err := c.WalkShelf(context.Background(), 3)
 	if err != nil {
 		t.Fatalf("WalkShelf: %v", err)
 	}
@@ -248,7 +250,7 @@ func TestDetectType(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			srv, _ := newOPDSMock(t, opdsFeeds{"/opds": tc.root})
 			c := newOPDSClient(t, srv.URL)
-			if err := c.DetectType(); err != nil {
+			if err := c.DetectType(context.Background()); err != nil {
 				t.Fatalf("DetectType: %v", err)
 			}
 			if c.IsCWA != tc.want {
@@ -259,15 +261,64 @@ func TestDetectType(t *testing.T) {
 	t.Run("http error is reported and leaves IsCWA false", func(t *testing.T) {
 		srv, _ := newOPDSMock(t, opdsFeeds{})
 		c := newOPDSClient(t, srv.URL)
-		if err := c.DetectType(); err == nil || c.IsCWA {
+		if err := c.DetectType(context.Background()); err == nil || c.IsCWA {
 			t.Errorf("err=%v IsCWA=%v, want 404 error and IsCWA=false", err, c.IsCWA)
 		}
 	})
 	t.Run("malformed feed is reported", func(t *testing.T) {
 		srv, _ := newOPDSMock(t, opdsFeeds{"/opds": "<feed><title>Calibre-Web</title>"})
 		c := newOPDSClient(t, srv.URL)
-		if err := c.DetectType(); err == nil || c.IsCWA {
+		if err := c.DetectType(context.Background()); err == nil || c.IsCWA {
 			t.Errorf("err=%v IsCWA=%v, want parse error and IsCWA=false", err, c.IsCWA)
 		}
 	})
+}
+
+func TestWalkGeneric_CancelStopsSiblingWalk(t *testing.T) {
+	// Sub-feed errors are tolerated so one broken section does not sink
+	// the listing, but a cancelled context must not be mistaken for a
+	// broken section: the walk stops instead of visiting every sibling
+	// only to fail each one.
+	feeds := opdsFeeds{
+		"/opds": feedXML("Root", navEntry("A", "/opds/a")+navEntry("B", "/opds/b")+navEntry("C", "/opds/c")),
+	}
+	srv, arrived, paths := blockingOPDSServer(t, feeds, func(r *http.Request) bool { return r.URL.Path == "/opds/a" })
+	c := newOPDSClient(t, srv.URL)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		_, err := c.WalkAll(ctx)
+		done <- err
+	}()
+	<-arrived
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("WalkAll returned %v, want context.Canceled", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("WalkAll did not return after cancel")
+	}
+	if got := paths(); slices.Contains(got, "/opds/b") || slices.Contains(got, "/opds/c") {
+		t.Errorf("walk kept visiting siblings after cancel: %v", got)
+	}
+}
+
+func TestOPDSSource_ListHonoursContext(t *testing.T) {
+	srv, paths := newOPDSMock(t, cwaFeeds())
+	src, err := newSource(&Config{Backend: BackendOPDS, Host: srv.URL})
+	if err != nil {
+		t.Fatalf("newSource: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := src.List(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("List with cancelled ctx returned %v, want context.Canceled", err)
+	}
+	if len(*paths) != 0 {
+		t.Errorf("cancelled List still hit the server: %v", *paths)
+	}
 }

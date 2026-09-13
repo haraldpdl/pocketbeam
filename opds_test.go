@@ -1,10 +1,15 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 )
 
 const opdsNS = `xmlns="http://www.w3.org/2005/Atom"`
@@ -49,7 +54,7 @@ func TestFetchLevel_SplitsSubsectionsFromBooks(t *testing.T) {
 	defer srv.Close()
 
 	c := newOPDSClient(t, srv.URL)
-	lvl, err := c.FetchLevel("/opds")
+	lvl, err := c.FetchLevel(context.Background(), "/opds")
 	if err != nil {
 		t.Fatalf("FetchLevel: %v", err)
 	}
@@ -101,7 +106,7 @@ func TestFetchLevel_WalksPagination(t *testing.T) {
 	defer srv.Close()
 
 	c := newOPDSClient(t, srv.URL)
-	lvl, err := c.FetchLevel("/opds/books/letter/A")
+	lvl, err := c.FetchLevel(context.Background(), "/opds/books/letter/A")
 	if err != nil {
 		t.Fatalf("FetchLevel: %v", err)
 	}
@@ -136,7 +141,7 @@ func TestFetchLevel_ParsesOPDSCount(t *testing.T) {
 	defer srv.Close()
 
 	c := newOPDSClient(t, srv.URL)
-	lvl, err := c.FetchLevel("/opds")
+	lvl, err := c.FetchLevel(context.Background(), "/opds")
 	if err != nil {
 		t.Fatalf("FetchLevel: %v", err)
 	}
@@ -236,7 +241,7 @@ func TestBookFromEntry_ParsesLength(t *testing.T) {
 	defer srv.Close()
 
 	c := newOPDSClient(t, srv.URL)
-	books, err := c.walk("/")
+	books, err := c.walk(context.Background(), "/")
 	if err != nil {
 		t.Fatalf("walk: %v", err)
 	}
@@ -268,7 +273,7 @@ func TestFetchLevel_EmptyHrefDefaultsToRoot(t *testing.T) {
 	defer srv.Close()
 
 	c := newOPDSClient(t, srv.URL)
-	if _, err := c.FetchLevel(""); err != nil {
+	if _, err := c.FetchLevel(context.Background(), ""); err != nil {
 		t.Fatalf("FetchLevel(empty): %v", err)
 	}
 	if !strings.HasPrefix(gotPath, "/opds") {
@@ -340,11 +345,93 @@ func TestClient_FollowsRedirectsWithinScheme(t *testing.T) {
 		}
 	}))
 	defer srv.Close()
-	lvl, err := newOPDSClient(t, srv.URL).FetchLevel("/opds")
+	lvl, err := newOPDSClient(t, srv.URL).FetchLevel(context.Background(), "/opds")
 	if err != nil {
 		t.Fatalf("FetchLevel through redirect: %v", err)
 	}
 	if lvl.FeedTitle != "Moved" {
 		t.Errorf("FeedTitle = %q, want Moved", lvl.FeedTitle)
+	}
+}
+
+// blockingOPDSServer serves feeds like newOPDSMock but stalls every request
+// matching stall until the client gives up, sending the stalled path on
+// arrived first so a test can cancel deterministically once the client is
+// waiting on the server.
+func blockingOPDSServer(t *testing.T, feeds opdsFeeds, stall func(*http.Request) bool) (*httptest.Server, <-chan string, func() []string) {
+	t.Helper()
+	arrived := make(chan string, 16)
+	var mu sync.Mutex
+	var paths []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		paths = append(paths, r.URL.Path)
+		mu.Unlock()
+		if stall(r) {
+			arrived <- r.URL.RequestURI()
+			<-r.Context().Done()
+			return
+		}
+		body, ok := feeds[r.URL.Path]
+		if !ok {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/atom+xml")
+		_, _ = w.Write([]byte(body))
+	}))
+	t.Cleanup(srv.Close)
+	return srv, arrived, func() []string {
+		mu.Lock()
+		defer mu.Unlock()
+		return slices.Clone(paths)
+	}
+}
+
+func TestFetchLevel_CancelAbortsStalledRequest(t *testing.T) {
+	srv, arrived, _ := blockingOPDSServer(t, nil, func(*http.Request) bool { return true })
+	c := newOPDSClient(t, srv.URL)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		_, err := c.FetchLevel(ctx, "/opds")
+		done <- err
+	}()
+
+	<-arrived
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("FetchLevel returned %v, want context.Canceled", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("FetchLevel did not return after cancel; request ignores context")
+	}
+}
+
+func TestFetchLevel_DeadlineCoversPagination(t *testing.T) {
+	// Page one answers, page two stalls: the deadline bounds the whole
+	// level walk, not just the first request.
+	feeds := opdsFeeds{"/opds": `<?xml version="1.0"?><feed ` + opdsNS + `><title>Root</title>` +
+		`<link rel="next" href="/opds?page=2"/></feed>`}
+	srv, arrived, _ := blockingOPDSServer(t, feeds, func(r *http.Request) bool { return r.URL.RawQuery == "page=2" })
+	c := newOPDSClient(t, srv.URL)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	_, err := c.FetchLevel(ctx, "/opds")
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("FetchLevel returned %v, want context.DeadlineExceeded", err)
+	}
+	select {
+	case uri := <-arrived:
+		if uri != "/opds?page=2" {
+			t.Errorf("stalled request was %q, want the second page", uri)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("second page never reached the server; page one did not paginate")
 	}
 }

@@ -36,14 +36,14 @@ type OPDSSource struct {
 // newSource so constructing a source never touches the network; a
 // failed detection is not fatal, the generic walker still works.
 func (s *OPDSSource) List(ctx context.Context) ([]Book, error) {
-	_ = s.Client.DetectType()
+	_ = s.Client.DetectType(ctx)
 	if len(s.FilterHrefs) == 0 {
-		return s.Client.WalkAll()
+		return s.Client.WalkAll(ctx)
 	}
 	seen := make(map[string]struct{})
 	var out []Book
 	for _, href := range s.FilterHrefs {
-		books, err := s.Client.WalkFiltered(href)
+		books, err := s.Client.WalkFiltered(ctx, href)
 		if err != nil {
 			return nil, err
 		}
