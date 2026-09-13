@@ -16,12 +16,12 @@ import (
 // Environment variables:
 //   POCKETBEAM_TEST_HOST (default: http://localhost:8083)
 //   POCKETBEAM_TEST_USER (default: admin)
-//   POCKETBEAM_TEST_PASS (default: admin123, Calibre-Web's factory default)
+//   POCKETBEAM_TEST_PASS (required)
 
 var (
 	liveHost = envOr("POCKETBEAM_TEST_HOST", "http://localhost:8083")
 	liveUser = envOr("POCKETBEAM_TEST_USER", "admin")
-	livePass = envOr("POCKETBEAM_TEST_PASS", "admin123")
+	livePass = os.Getenv("POCKETBEAM_TEST_PASS")
 )
 
 func envOr(key, def string) string {
