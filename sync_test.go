@@ -216,6 +216,126 @@ func TestSync_SecondLibraryGetsItsOwnCopies(t *testing.T) {
 	}
 }
 
+// A second profile that already downloaded its own copy must reuse it on
+// the next sync instead of fetching the book again. The store row points
+// at whichever profile synced last, so without this the two profiles
+// re-download their whole overlap on every switch, forever.
+func TestSync_ReusesCopyAlreadyInThisLibrary(t *testing.T) {
+	store, dir := openTempStore(t)
+	defer store.Close()
+	first := filepath.Join(dir, "Books", "home")
+	second := filepath.Join(dir, "Books", "nas")
+
+	t0 := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	src := &fakeSource{books: []Book{makeBookSized("webdav:/Books/A.epub", "A", 0, t0)}}
+	if res := Sync(context.Background(), src, store, first, nil, SyncOptions{}); res.Downloaded != 1 {
+		t.Fatalf("home sync: %+v", res)
+	}
+	if res := Sync(context.Background(), src, store, second, nil, SyncOptions{}); res.Downloaded != 1 {
+		t.Fatalf("nas sync: %+v", res)
+	}
+
+	// Back to the first profile: its copy is untouched on disk, only the
+	// store row moved.
+	res := Sync(context.Background(), src, store, first, nil, SyncOptions{})
+	if res.Skipped != 1 || res.Downloaded != 0 || res.FirstErr != nil {
+		t.Errorf("home re-sync = %+v, want Skipped 1 / Downloaded 0", res)
+	}
+	homeCopy := filepath.Join(first, "Author", "A.epub")
+	if e, _ := lookup(t, store, "webdav:/Books/A.epub"); e.LocalPath != homeCopy {
+		t.Errorf("row = %q, want it repointed at %q", e.LocalPath, homeCopy)
+	}
+	// And the plan for that run agrees with what the run did.
+	plan, _, err := Plan(context.Background(), src, store, second, SyncOptions{})
+	if err != nil {
+		t.Fatalf("Plan: %v", err)
+	}
+	if plan.Unchanged != 1 || len(plan.NewBooks)+len(plan.UpdatedBooks) != 0 {
+		t.Errorf("plan for nas = %+v, want the book unchanged", plan)
+	}
+}
+
+// A file of a different size at the target path is some other book (or a
+// truncated download), not this profile's copy, so it is fetched again.
+func TestSync_DoesNotAdoptDifferentlySizedFile(t *testing.T) {
+	store, dir := openTempStore(t)
+	defer store.Close()
+	first := filepath.Join(dir, "Books", "home")
+	second := filepath.Join(dir, "Books", "nas")
+
+	t0 := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	src := &fakeSource{books: []Book{makeBookSized("webdav:/Books/A.epub", "A", 0, t0)}}
+	if res := Sync(context.Background(), src, store, first, nil, SyncOptions{}); res.Downloaded != 1 {
+		t.Fatalf("home sync: %+v", res)
+	}
+	stub := filepath.Join(second, "Author", "A.epub")
+	if err := os.MkdirAll(filepath.Dir(stub), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(stub, []byte("half"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if res := Sync(context.Background(), src, store, second, nil, SyncOptions{}); res.Downloaded != 1 {
+		t.Errorf("nas sync = %+v, want the short file replaced by a download", res)
+	}
+}
+
+// Delete-missing must only propose books from the library being synced.
+// The store is shared and UUID-keyed, so an unscoped diff proposes every
+// other profile's books and deletes their files.
+func TestSync_DeleteMissing_LeavesOtherLibraryAlone(t *testing.T) {
+	store, dir := openTempStore(t)
+	defer store.Close()
+	home := filepath.Join(dir, "Books", "home")
+	nas := filepath.Join(dir, "Books", "nas")
+
+	t0 := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	homeSrc := &fakeSource{books: []Book{makeBookSized("uuid-home", "Home Book", 0, t0)}}
+	if res := Sync(context.Background(), homeSrc, store, home, nil, SyncOptions{Scope: "home"}); res.Downloaded != 1 {
+		t.Fatalf("home sync: %+v", res)
+	}
+	homeCopy := filepath.Join(home, "Author", "Home Book.epub")
+
+	// The nas profile syncs a different server, twice: the first run only
+	// records its scope, the second passes the scope guard and reaches the
+	// delete step.
+	nasSrc := &fakeSource{books: []Book{makeBookSized("uuid-nas", "Nas Book", 0, t0)}}
+	var asked []LocalBook
+	opts := SyncOptions{
+		DeleteMissing: true,
+		Scope:         "nas",
+		Confirm: func(d []LocalBook) bool {
+			asked = append(asked, d...)
+			return true
+		},
+	}
+	if res := Sync(context.Background(), nasSrc, store, nas, nil, opts); res.Deleted != 0 {
+		t.Fatalf("first nas sync = %+v, want the scope guard to hold", res)
+	}
+	res := Sync(context.Background(), nasSrc, store, nas, nil, opts)
+	if res.Deleted != 0 {
+		t.Errorf("Deleted = %d, want 0: the home book is not this profile's to delete", res.Deleted)
+	}
+	if len(asked) != 0 {
+		t.Errorf("Confirm asked about %+v, want nothing", asked)
+	}
+	if _, err := os.Stat(homeCopy); err != nil {
+		t.Errorf("the other profile's file was deleted: %v", err)
+	}
+	if _, exists := lookup(t, store, "uuid-home"); !exists {
+		t.Error("the other profile's store row was deleted")
+	}
+
+	// A book that really is missing from this library still goes.
+	plan, _, err := Plan(context.Background(), &fakeSource{books: []Book{makeBookSized("uuid-other", "Other", 0, t0)}}, store, nas, opts)
+	if err != nil {
+		t.Fatalf("Plan: %v", err)
+	}
+	if len(plan.Missing) != 1 || plan.Missing[0].UUID != "uuid-nas" {
+		t.Errorf("plan.Missing = %+v, want only the nas book", plan.Missing)
+	}
+}
+
 // Plan and Sync have to agree on what a run will do, so the same
 // containment check applies to the pre-flight estimate.
 func TestPlan_CountsBookOutsideLibraryAsDownload(t *testing.T) {

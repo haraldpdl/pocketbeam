@@ -325,14 +325,14 @@ func (a *app) runProbe() {
 		a.failWizard(err)
 		return
 	}
-	// When the wizard is being used to add a profile, the new section is
-	// written but the file's `active` marker still points at the existing
-	// one. Flip it so the newly-created profile becomes the working one.
-	if in.addProfile {
-		if err := SetActiveProfile(a.cfgPath, cfg.Profile); err != nil {
-			a.failWizard(err)
-			return
-		}
+	// SaveConfig writes the section but only sets `active` when the file
+	// has none, so the marker can still point at another profile: the one
+	// the user is adding from Settings, or the broken section that dropped
+	// the app into the wizard in the first place. Whatever the wizard just
+	// wrote is what the user set up, so make it the working profile.
+	if err := SetActiveProfile(a.cfgPath, cfg.Profile); err != nil {
+		a.failWizard(err)
+		return
 	}
 	client, err := NewClient(cfg.Host, cfg.User, cfg.Pass)
 	if err != nil {

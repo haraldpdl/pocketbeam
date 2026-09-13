@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -77,21 +78,28 @@ func OpenStore(path string) (*Store, error) {
 // BookCount returns the number of tracked books whose file lives under
 // library. The state DB is shared by every profile, so an unfiltered
 // count would tell the main screen the sum of all profiles' libraries.
-// Filtering happens in Go rather than in SQL because the containment
-// rule (FAT case folding) is the same one the sync diff applies.
+// Two of its callers run on the InkView event loop (app start, profile
+// switch), so the filtering stays in SQL rather than materialising every
+// row. LIKE folds ASCII case, which is the containment rule the sync diff
+// applies for the same FAT reason; recorded paths come from filepath.Join
+// and are therefore already clean.
 func (s *Store) BookCount(library string) (int, error) {
-	entries, err := s.AllEntries()
-	if err != nil {
+	prefix := filepath.Clean(library) + string(filepath.Separator)
+	var n int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM books WHERE local_path LIKE ? ESCAPE '\'`, likePrefix(prefix)).Scan(&n); err != nil {
 		return 0, err
-	}
-	n := 0
-	for _, e := range entries {
-		if underDir(library, e.LocalPath) {
-			n++
-		}
 	}
 	return n, nil
 }
+
+// likePrefix turns a literal path prefix into a LIKE pattern matching
+// everything below it. The prefix is escaped because sanitize puts "_"
+// (a single-character wildcard) into folder and file names.
+func likePrefix(prefix string) string {
+	return likeEscape.Replace(prefix) + "%"
+}
+
+var likeEscape = strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`)
 
 // SetLastSync persists the outcome of the most recent sync run.
 func (s *Store) SetLastSync(sum SyncSummary) error {

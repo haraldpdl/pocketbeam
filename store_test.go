@@ -297,6 +297,10 @@ func TestStore_BookCountScopedToLibrary(t *testing.T) {
 		{"a", filepath.Join(home, "Author", "A.epub")},
 		{"b", filepath.Join(home, "Author", "B.epub")},
 		{"c", filepath.Join(nas, "Author", "C.epub")},
+		// sanitize turns FAT-illegal characters into "_", which is a
+		// single-character wildcard in SQL LIKE.
+		{"d", filepath.Join(dir, "Books", "a_b", "Author", "D.epub")},
+		{"e", filepath.Join(dir, "Books", "axb", "Author", "E.epub")},
 	}
 	for _, e := range seed {
 		if err := s.Upsert(Book{UUID: e.uuid, Title: e.uuid, Author: "Author", Updated: time.Unix(0, 0)}, e.path, 1); err != nil {
@@ -306,7 +310,14 @@ func TestStore_BookCountScopedToLibrary(t *testing.T) {
 	for _, tc := range []struct {
 		library string
 		want    int
-	}{{home, 2}, {nas, 1}, {filepath.Join(dir, "Books", "other"), 0}} {
+	}{
+		{home, 2},
+		{nas, 1},
+		{filepath.Join(dir, "Books", "other"), 0},
+		{home + string(filepath.Separator), 2},   // hand-edited trailing slash
+		{filepath.Join(dir, "Books", "HOME"), 2}, // one folder on FAT
+		{filepath.Join(dir, "Books", "a_b"), 1},  // "_" is a literal here, not a wildcard
+	} {
 		got, err := s.BookCount(tc.library)
 		if err != nil {
 			t.Fatalf("BookCount(%q): %v", tc.library, err)

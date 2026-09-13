@@ -276,6 +276,22 @@ func TestLibraryPathForFoldsCase(t *testing.T) {
 	}
 }
 
+// A stored library path need not be clean: the README's example config is
+// hand-edited, and a trailing slash names the same folder the wizard
+// derives without one.
+func TestLibraryPathForNormalisesStoredPaths(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "pocketbeam.cfg")
+	cfg := "active = legacy\nstate_db = /db.sqlite\n\n" +
+		"[legacy]\nhost = http://one.lan\nlibrary = /mnt/ext1/Books/home/\n"
+	if err := os.WriteFile(path, []byte(cfg), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if got := libraryPathFor(path, "/mnt/ext1/Books", "home"); got != "/mnt/ext1/Books/home-2" {
+		t.Errorf("libraryPathFor(home) = %q, want /mnt/ext1/Books/home-2", got)
+	}
+}
+
 func TestProfileNameTaken(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "pocketbeam.cfg")
@@ -327,6 +343,33 @@ func TestResolveProfileForProbe(t *testing.T) {
 	if got == nil || got.Profile != "home" {
 		t.Fatalf("without session: got %+v, want the stored home profile", got)
 	}
+	// A config the loader rejects (typo'd backend, missing library, an
+	// unknown key) is what this entry point exists to repair: the profile
+	// keeps its name and its stored library, so the wizard rewrites that
+	// section instead of deriving a new folder and orphaning its books.
+	broken := filepath.Join(dir, "broken.cfg")
+	brokenCfg := "active = home\nstate_db = /db.sqlite\n\n" +
+		"[home]\nbackend = webdvv\nhost = http://one.lan\ntypo = 1\nlibrary = /mnt/ext1/Books/CWA\n"
+	if err := os.WriteFile(broken, []byte(brokenCfg), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if _, err := LoadConfig(broken); err == nil {
+		t.Fatal("LoadConfig accepted the broken config; the test no longer covers the recovery path")
+	}
+	rec := resolveProfileForProbe(broken, nil, false)
+	if rec == nil || rec.Profile != "home" {
+		t.Fatalf("broken config: got %+v, want the stored home profile", rec)
+	}
+	if rec.Library != "/mnt/ext1/Books/CWA" {
+		t.Errorf("Library = %q, want the stored path (rows after the bad one still apply)", rec.Library)
+	}
+	if rec.Backend != "" {
+		t.Errorf("Backend = %q, want it cleared so the opds default takes over", rec.Backend)
+	}
+	if !rec.CheckUpdates || rec.StateDB != "/db.sqlite" {
+		t.Errorf("globals lost: %+v", rec)
+	}
+
 	// No session and no readable config: a fresh install.
 	if got := resolveProfileForProbe(filepath.Join(dir, "absent.cfg"), nil, false); got != nil {
 		t.Errorf("first run: got %+v, want nil", got)

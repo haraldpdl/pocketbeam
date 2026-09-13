@@ -120,9 +120,24 @@ func Sync(ctx context.Context, src Source, store *Store, library string, progres
 			progress(i+1, total, b)
 		}
 		old, exists := local[b.UUID]
-		if exists && !b.Updated.After(old.Updated) && hasLocalCopy(library, old.LocalPath) {
-			res.Skipped++
-			continue
+		if exists && !b.Updated.After(old.Updated) {
+			if have := localCopyFor(store, library, b, old); have != "" {
+				if have != old.LocalPath {
+					// The row pointed into another profile's folder while
+					// this library already held the same download. Repoint
+					// it, otherwise the two profiles re-fetch their whole
+					// overlap every time the user switches between them.
+					if err := store.Upsert(b, have, old.Size); err != nil {
+						res.Failed++
+						if res.FirstErr == nil {
+							res.FirstErr = fmt.Errorf("store %q: %w", b.Title, err)
+						}
+						continue
+					}
+				}
+				res.Skipped++
+				continue
+			}
 		}
 		path, err := targetPath(store, library, b)
 		if err != nil {
@@ -172,7 +187,7 @@ func Sync(ctx context.Context, src Source, store *Store, library string, progres
 	// Delete-missing reconciliation runs after downloads so a user whose
 	// sync is interrupted gets the new books regardless.
 	if opts.DeleteMissing && opts.Confirm != nil {
-		res.Deleted = reconcileDeletions(store, books, opts, &res)
+		res.Deleted = reconcileDeletions(store, library, books, opts, &res)
 	}
 
 	// Record this run's scope even when we didn't delete, so the next
@@ -183,13 +198,14 @@ func Sync(ctx context.Context, src Source, store *Store, library string, progres
 	return res
 }
 
-// computeMissing returns the set of local entries absent from the current
-// remote listing, applying the empty-remote and scope-change guards. A nil
+// computeMissing returns the set of local entries inside library that are
+// absent from the current remote listing, applying the empty-remote and
+// scope-change guards. A nil
 // return with nil error means a guard tripped: the caller should treat it
 // as "no deletions candidate" rather than surface an error. This is the
 // shared source of truth for reconcileDeletions and Plan so the pre-flight
 // space estimate agrees with what the delete step will actually do.
-func computeMissing(store *Store, remote []Book, opts SyncOptions) ([]LocalBook, error) {
+func computeMissing(store *Store, library string, remote []Book, opts SyncOptions) ([]LocalBook, error) {
 	// Empty-remote guard: a misconfigured feed or wrong credentials often
 	// returns zero items. Treat that as "I can't trust this listing" and
 	// keep everything.
@@ -212,9 +228,18 @@ func computeMissing(store *Store, remote []Book, opts SyncOptions) ([]LocalBook,
 	}
 	var missing []LocalBook
 	for _, e := range entries {
-		if _, ok := present[e.UUID]; !ok {
-			missing = append(missing, e)
+		if _, ok := present[e.UUID]; ok {
+			continue
 		}
+		// The store is shared by every profile and keyed on UUID alone, so
+		// it also holds rows pointing into other profiles' folders. This
+		// listing is one server's; it says nothing about a book another
+		// profile downloaded, and deleting it would remove a file from a
+		// library this run is not syncing.
+		if !underDir(library, e.LocalPath) {
+			continue
+		}
+		missing = append(missing, e)
 	}
 	return missing, nil
 }
@@ -224,8 +249,8 @@ func computeMissing(store *Store, remote []Book, opts SyncOptions) ([]LocalBook,
 // deletes the confirmed items (file on disk + store row). Several safety
 // guards short-circuit before we call Confirm; a guard tripping is not
 // an error, the sync run simply keeps those books.
-func reconcileDeletions(store *Store, remote []Book, opts SyncOptions, res *SyncResult) int {
-	missing, err := computeMissing(store, remote, opts)
+func reconcileDeletions(store *Store, library string, remote []Book, opts SyncOptions, res *SyncResult) int {
+	missing, err := computeMissing(store, library, remote, opts)
 	if err != nil {
 		if res.FirstErr == nil {
 			res.FirstErr = fmt.Errorf("list local entries: %w", err)
@@ -240,27 +265,25 @@ func reconcileDeletions(store *Store, remote []Book, opts SyncOptions, res *Sync
 	}
 	deleted := 0
 	for _, m := range missing {
-		if m.LocalPath != "" {
-			// Stores written before filenames were disambiguated can map
-			// another book to this path; then the file is that book's only
-			// copy and only the row goes.
-			other, err := store.OtherOwner(m.LocalPath, m.UUID)
-			if err != nil {
+		// Stores written before filenames were disambiguated can map
+		// another book to this path; then the file is that book's only
+		// copy and only the row goes.
+		other, err := store.OtherOwner(m.LocalPath, m.UUID)
+		if err != nil {
+			if res.FirstErr == nil {
+				res.FirstErr = fmt.Errorf("delete %q: %w", m.Title, err)
+			}
+			continue
+		}
+		if other == "" {
+			if err := os.Remove(m.LocalPath); err != nil && !os.IsNotExist(err) {
 				if res.FirstErr == nil {
 					res.FirstErr = fmt.Errorf("delete %q: %w", m.Title, err)
 				}
 				continue
 			}
-			if other == "" {
-				if err := os.Remove(m.LocalPath); err != nil && !os.IsNotExist(err) {
-					if res.FirstErr == nil {
-						res.FirstErr = fmt.Errorf("delete %q: %w", m.Title, err)
-					}
-					continue
-				}
-				// Prune the author directory if it's now empty; ignore errors.
-				_ = os.Remove(filepath.Dir(m.LocalPath))
-			}
+			// Prune the author directory if it's now empty; ignore errors.
+			_ = os.Remove(filepath.Dir(m.LocalPath))
 		}
 		if err := store.Delete(m.UUID); err != nil {
 			if res.FirstErr == nil {
@@ -351,7 +374,7 @@ func Plan(ctx context.Context, src Source, store *Store, library string, opts Sy
 	}
 	for _, b := range books {
 		old, exists := local[b.UUID]
-		if exists && !b.Updated.After(old.Updated) && hasLocalCopy(library, old.LocalPath) {
+		if exists && !b.Updated.After(old.Updated) && localCopyFor(store, library, b, old) != "" {
 			plan.Unchanged++
 			continue
 		}
@@ -377,7 +400,7 @@ func Plan(ctx context.Context, src Source, store *Store, library string, opts Sy
 		}
 	}
 	if opts.DeleteMissing {
-		missing, err := computeMissing(store, books, opts)
+		missing, err := computeMissing(store, library, books, opts)
 		if err != nil {
 			return plan, books, err
 		}
@@ -413,6 +436,34 @@ func availableBytes(path string) int64 {
 	return int64(st.Bavail) * int64(st.Bsize)
 }
 
+// localCopyFor returns the path inside library that already holds b's
+// recorded download, or "" when this run has to fetch the book. The
+// recorded path wins when it is inside this library. Otherwise it belongs
+// to another profile's folder (the state DB is shared and keyed on UUID
+// alone, and two servers can hand out one identity), and the path this
+// library would download to is checked instead: a file of the recorded
+// size is the copy this profile already has, and fetching it again would
+// repeat on every switch between the two profiles. The size is the only
+// cheap evidence that the file is this book, so a legacy row that never
+// recorded one downloads.
+func localCopyFor(store *Store, library string, b Book, old LocalBook) string {
+	if hasLocalCopy(library, old.LocalPath) {
+		return old.LocalPath
+	}
+	if old.Size <= 0 {
+		return ""
+	}
+	path, err := targetPath(store, library, b)
+	if err != nil {
+		return ""
+	}
+	st, err := os.Stat(path)
+	if err != nil || st.Size() != old.Size {
+		return ""
+	}
+	return path
+}
+
 // hasLocalCopy reports whether a book's recorded download is still usable
 // for a sync into library: the file has to sit inside that library and
 // still be on disk. The state DB is shared by every profile (state_db is
@@ -429,14 +480,22 @@ func hasLocalCopy(library, path string) bool {
 	return err == nil
 }
 
-// underDir reports whether path lies inside dir. The comparison folds
-// ASCII case because the device library sits on a FAT volume, where
-// "Books/Home" and "Books/home" are one directory (see Store.OtherOwner).
+// pathKey normalises a filesystem path for comparison. Case is folded
+// because the device library sits on a FAT volume, where "Books/Home" and
+// "Books/home" are one directory (see Store.OtherOwner), and the path is
+// cleaned because config values are hand-editable: "Books/home/" names the
+// folder that filepath.Join derives as "Books/home".
+func pathKey(p string) string {
+	return strings.ToLower(filepath.Clean(p))
+}
+
+// underDir reports whether path lies inside dir, comparing both through
+// pathKey.
 func underDir(dir, path string) bool {
 	if dir == "" || path == "" {
 		return false
 	}
-	rel, err := filepath.Rel(strings.ToLower(filepath.Clean(dir)), strings.ToLower(filepath.Clean(path)))
+	rel, err := filepath.Rel(pathKey(dir), pathKey(path))
 	if err != nil {
 		return false
 	}

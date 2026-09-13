@@ -48,10 +48,11 @@ func libraryFolderName(profile string) string {
 // path. The filter is lossy ("a:b" and "a?b" both reduce to "a_b", and a
 // name of only dots reduces to "default"), so two differently named
 // profiles can derive one folder, and two servers writing into the same
-// directory is exactly what per-profile folders exist to prevent. Taken
-// paths are compared with ASCII case folded because the device storage is
-// FAT: a legacy "Books/CWA" and a derived "Books/cwa" are one directory.
-// An unreadable config file leaves nothing to collide with.
+// directory is exactly what per-profile folders exist to prevent. Stored
+// and derived paths are compared through pathKey, so a hand-edited
+// "Books/CWA/" and a derived "Books/cwa" count as the one directory they
+// are on the device's FAT storage. An unreadable config file leaves
+// nothing to collide with.
 func libraryPathFor(cfgPath, booksDir, profile string) string {
 	base := filepath.Join(booksDir, libraryFolderName(profile))
 	taken := map[string]bool{}
@@ -62,13 +63,13 @@ func libraryPathFor(cfgPath, booksDir, profile string) string {
 			}
 			for _, row := range rows {
 				if row.key == "library" && row.value != "" {
-					taken[strings.ToLower(row.value)] = true
+					taken[pathKey(row.value)] = true
 				}
 			}
 		}
 	}
 	path := base
-	for n := 2; taken[strings.ToLower(path)]; n++ {
+	for n := 2; taken[pathKey(path)]; n++ {
 		path = fmt.Sprintf("%s-%d", base, n)
 	}
 	return path
@@ -124,11 +125,51 @@ func resolveProfileForProbe(cfgPath string, session *Config, addProfile bool) *C
 	if session != nil {
 		return session
 	}
-	cur, err := LoadConfig(cfgPath)
+	if cur, err := LoadConfig(cfgPath); err == nil {
+		return cur
+	}
+	// LoadConfig rejects the whole file over one bad value (a typo'd
+	// backend, a missing library, an unknown key), which is exactly the
+	// state this entry point exists to repair. The section still names the
+	// profile and usually still carries its library, so read it leniently:
+	// treating the file as absent would derive a fresh folder, overwrite
+	// the broken section with it, and orphan the books that profile
+	// already downloaded.
+	return recoverActiveProfile(cfgPath)
+}
+
+// recoverActiveProfile returns the active profile's stored fields without
+// the validation LoadConfig applies: rows that do not parse are skipped,
+// and a backend that is neither opds nor webdav is cleared so the wizard's
+// answer (or the opds default) replaces it. Returns nil when the file
+// holds no profile at all.
+func recoverActiveProfile(path string) *Config {
+	doc, err := parseDoc(path)
 	if err != nil {
 		return nil
 	}
-	return cur
+	active := doc.active
+	if active == "" {
+		if len(doc.order) == 0 {
+			return nil
+		}
+		active = doc.order[0]
+	}
+	rows, ok := doc.sections[active]
+	if !ok {
+		return nil
+	}
+	c := &Config{Profile: active, StateDB: doc.stateDB, CheckUpdates: true, UpdateURL: doc.updateURL}
+	if doc.checkUpdatesSeen {
+		c.CheckUpdates = doc.checkUpdates
+	}
+	for _, row := range rows {
+		_ = applyProfileRow(c, row)
+	}
+	if c.Backend != BackendOPDS && c.Backend != BackendWebDAV {
+		c.Backend = ""
+	}
+	return c
 }
 
 // profileAfterProbe returns the config to persist once the probe
@@ -538,46 +579,56 @@ func writeDoc(path string, doc *fileDoc) error {
 // continue to load cleanly.
 func applyProfile(c *Config, path string, rows []kvLine) error {
 	for n, kv := range rows {
-		switch kv.key {
-		case "backend":
-			c.Backend = kv.value
-		case "host":
-			c.Host = strings.TrimRight(kv.value, "/")
-		case "user":
-			c.User = kv.value
-		case "password":
-			c.Pass = kv.value
-		case "library":
-			c.Library = kv.value
-		case "filter_href":
-			c.FilterHrefs = append(c.FilterHrefs, kv.value)
-		case "filter_name":
-			c.FilterNames = append(c.FilterNames, kv.value)
-		case "path":
-			c.Path = kv.value
-		case "delete_missing":
-			c.DeleteMissing = parseBool(kv.value)
-		case "shelf_id":
-			id, err := strconv.Atoi(kv.value)
-			if err != nil {
-				return fmt.Errorf("%s profile %q row %d: bad shelf_id %q: %w", path, c.Profile, n, kv.value, err)
-			}
-			if id > 0 && len(c.FilterHrefs) == 0 {
-				c.FilterHrefs = append(c.FilterHrefs, fmt.Sprintf("/opds/shelf/%d", id))
-			}
-		case "shelf_name":
-			if len(c.FilterNames) == 0 {
-				c.FilterNames = append(c.FilterNames, kv.value)
-			}
-		case "state_db":
-			// Legacy flat-format configs wrote state_db inside the
-			// (implicit) default section. Promote it to the global slot.
-			if c.StateDB == "" {
-				c.StateDB = kv.value
-			}
-		default:
-			return fmt.Errorf("%s profile %q: unknown key %q", path, c.Profile, kv.key)
+		if err := applyProfileRow(c, kv); err != nil {
+			return fmt.Errorf("%s profile %q row %d: %w", path, c.Profile, n, err)
 		}
+	}
+	return nil
+}
+
+// applyProfileRow writes one key/value pair onto c. Split out of
+// applyProfile so the recovery path can apply the rows it understands and
+// drop the rest.
+func applyProfileRow(c *Config, kv kvLine) error {
+	switch kv.key {
+	case "backend":
+		c.Backend = kv.value
+	case "host":
+		c.Host = strings.TrimRight(kv.value, "/")
+	case "user":
+		c.User = kv.value
+	case "password":
+		c.Pass = kv.value
+	case "library":
+		c.Library = kv.value
+	case "filter_href":
+		c.FilterHrefs = append(c.FilterHrefs, kv.value)
+	case "filter_name":
+		c.FilterNames = append(c.FilterNames, kv.value)
+	case "path":
+		c.Path = kv.value
+	case "delete_missing":
+		c.DeleteMissing = parseBool(kv.value)
+	case "shelf_id":
+		id, err := strconv.Atoi(kv.value)
+		if err != nil {
+			return fmt.Errorf("bad shelf_id %q: %w", kv.value, err)
+		}
+		if id > 0 && len(c.FilterHrefs) == 0 {
+			c.FilterHrefs = append(c.FilterHrefs, fmt.Sprintf("/opds/shelf/%d", id))
+		}
+	case "shelf_name":
+		if len(c.FilterNames) == 0 {
+			c.FilterNames = append(c.FilterNames, kv.value)
+		}
+	case "state_db":
+		// Legacy flat-format configs wrote state_db inside the
+		// (implicit) default section. Promote it to the global slot.
+		if c.StateDB == "" {
+			c.StateDB = kv.value
+		}
+	default:
+		return fmt.Errorf("unknown key %q", kv.key)
 	}
 	return nil
 }
