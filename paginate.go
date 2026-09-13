@@ -49,3 +49,53 @@ func paginate(total, pageSize, requestedOffset int) page {
 	}
 	return page{offset: off, start: off, end: end}
 }
+
+// listPage is the geometry of one page of a fixed-row-height list drawn
+// into a vertical band: which slice of the list is visible, how many
+// rows a full page holds, and where the page-navigation buttons go.
+type listPage struct {
+	offset   int  // clamped index of the first visible row
+	end      int  // one past the last visible row
+	pageSize int  // rows a full page holds; also the Prev/Next step
+	navY     int  // top edge of the page-navigation buttons
+	navShown bool // true when the list does not fit on one page
+}
+
+// layoutListPage fits as many rows of rowH as fit between top and
+// bottom, keeping navH plus gap free at the bottom for the page
+// buttons, and clamps offset onto a real page start.
+//
+// The nav row sits at a fixed y (a full page below top) so it does not
+// jump upwards on a short last page.
+func layoutListPage(top, bottom, rowH, navH, gap, total, offset int) listPage {
+	if rowH < 1 {
+		rowH = 1
+	}
+	pageSize := (bottom - top - navH - gap) / rowH
+	if pageSize < 1 {
+		pageSize = 1
+	}
+	p := paginate(total, pageSize, offset)
+	return listPage{
+		offset:   p.offset,
+		end:      p.end,
+		pageSize: pageSize,
+		navY:     top + pageSize*rowH + gap,
+		navShown: total > pageSize,
+	}
+}
+
+// pageStep moves a stored offset one page in direction (+1 next, -1
+// previous). Only the lower bound is enforced here; the upper bound is
+// paginate's job on the next draw, which is where the current list
+// length is known.
+func pageStep(offset, pageSize, direction int) int {
+	if pageSize < 1 {
+		pageSize = 1
+	}
+	off := offset + direction*pageSize
+	if off < 0 {
+		off = 0
+	}
+	return off
+}

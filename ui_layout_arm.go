@@ -195,6 +195,13 @@ func (s layout) sy(base int) int {
 	return int(float64(base)*s.scale + 0.5)
 }
 
+// rowH is the height of one full-width list row. Every stacked-row
+// screen goes through this so a picker's fixed up-row lines up with the
+// paginated rows below it.
+func (s layout) rowH() int {
+	return s.sy(110)
+}
+
 // sx scales an X coordinate the same way. Used for sub-indents (e.g.,
 // bullet-list content) where the offset must scale with the page margin.
 func (s layout) sx(base int) int {

@@ -4,7 +4,6 @@ package main
 
 import (
 	"context"
-	"fmt"
 	"image"
 	"strings"
 	"sync"
@@ -118,106 +117,64 @@ func (a *app) drawDirPicker() {
 	ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(210)}, truncate(path, 60))
 	a.drawHairline(a.layout.margin, a.layout.screen.X-a.layout.margin, a.layout.sy(240))
 
-	var prevPageRect, nextPageRect image.Rectangle
+	// Reserve space at the bottom for the "Sync this folder" button.
+	selectBtnH := a.layout.sy(100)
+	areaBottom := a.layout.pickerAreaBottom - selectBtnH - a.layout.sy(40)
+
+	var list pagedListRects
+	var upRect, selectRect image.Rectangle
 
 	if loading {
 		body.SetActive(ink.Black)
 		ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(300)}, "Loading...")
-		ink.ShowHourglassAt(image.Point{X: a.layout.margin, Y: a.layout.sy(360)})
+		a.showHourglassAt(image.Point{X: a.layout.margin, Y: a.layout.sy(360)})
 	} else if pickErr != nil {
 		body.SetActive(ink.Black)
 		ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(300)}, "Could not list folder:")
 		ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(350)}, truncate(pickErr.Error(), 60))
 	} else {
-		rowH := a.layout.sy(110)
-		pageBtnH := a.layout.sy(60)
-		areaTop := a.layout.pickerAreaTop
-		// Reserve space at the bottom for the "Sync this folder" button.
-		selectBtnH := a.layout.sy(100)
-		areaBottom := a.layout.pickerAreaBottom - selectBtnH - a.layout.sy(40)
-
-		atRoot := path == "/" || path == ""
-
 		// Up-row: full-width list-row styled, "<" on the left.
-		listTop := areaTop
-		var upRect image.Rectangle
-		if !atRoot {
+		listTop := a.layout.pickerAreaTop
+		if path != "/" && path != "" {
+			rowH := a.layout.rowH()
 			upRect = image.Rect(a.layout.margin, listTop, a.layout.screen.X-a.layout.margin, listTop+rowH-a.layout.sy(20))
 			a.drawHairline(upRect.Min.X, upRect.Max.X, upRect.Min.Y)
 			rowTitleFont.SetActive(ink.Black)
 			titleY := upRect.Min.Y + (upRect.Dy()-a.layout.fpx(36))/2
-			parent := dirParent(path)
 			ink.DrawString(image.Point{X: upRect.Min.X + a.layout.sx(40), Y: titleY},
-				"< Back to "+truncate(parent, 32))
+				"< Back to "+truncate(dirParent(path), 32))
 			listTop += rowH
 		}
 
-		visibleArea := areaBottom - listTop
-		pageSize := (visibleArea - pageBtnH - a.layout.sy(20)) / rowH
-		if pageSize < 1 {
-			pageSize = 1
+		rows := make([]listRow, 0, len(dirs))
+		for _, d := range dirs {
+			rows = append(rows, listRow{title: d})
 		}
-		p := paginate(len(dirs), pageSize, offset)
-		offset = p.offset
-		end := p.end
-
-		rects := make([]image.Rectangle, 0, end-offset)
-		for i := offset; i < end; i++ {
-			y1 := listTop + (i-offset)*rowH
-			rect := image.Rect(a.layout.margin, y1, a.layout.screen.X-a.layout.margin, y1+rowH)
-			rects = append(rects, rect)
-			a.drawListRow(rowTitleFont, rowSubFont, rect, dirs[i], "", true)
-		}
-		if n := len(rects); n > 0 {
-			last := rects[n-1]
-			a.drawHairline(last.Min.X, last.Max.X, last.Max.Y)
-		}
-		if len(dirs) > pageSize {
-			btnY1 := listTop + pageSize*rowH + a.layout.sy(20)
-			btnY2 := btnY1 + pageBtnH
-			contentW := a.layout.screen.X - 2*a.layout.margin
-			navBtnW := contentW / 4
-			if offset > 0 {
-				prevPageRect = image.Rect(a.layout.margin, btnY1, a.layout.margin+navBtnW, btnY2)
-				ink.DrawRect(prevPageRect, ink.Black)
-				drawCenteredText(btnFont, prevPageRect, "< Prev", a.layout.fpx(44))
-			}
-			if end < len(dirs) {
-				nextPageRect = image.Rect(a.layout.screen.X-a.layout.margin-navBtnW, btnY1, a.layout.screen.X-a.layout.margin, btnY2)
-				ink.DrawRect(nextPageRect, ink.Black)
-				drawCenteredText(btnFont, nextPageRect, "Next >", a.layout.fpx(44))
-			}
-			page := offset/pageSize + 1
-			total := (len(dirs) + pageSize - 1) / pageSize
-			pageLabel := fmt.Sprintf("Page %d of %d  ·  %d items", page, total, len(dirs))
-			smallFont.SetActive(ink.DarkGray)
-			pageLabelW := ink.StringWidth(pageLabel)
-			ink.DrawString(
-				image.Point{X: (a.layout.screen.X - pageLabelW) / 2, Y: btnY1 + (btnY2-btnY1-a.layout.fpx(26))/2},
-				pageLabel,
-			)
-		}
-
-		a.dirPicker.mu.Lock()
-		a.dirPicker.offset = offset
-		a.dirPicker.pageSize = pageSize
-		a.dirPicker.rowRects = rects
-		a.dirPicker.upRect = upRect
-		a.dirPicker.prevPageRect = prevPageRect
-		a.dirPicker.nextPageRect = nextPageRect
-		a.dirPicker.mu.Unlock()
+		list = a.drawPagedList(
+			listFonts{rowTitle: rowTitleFont, rowSub: rowSubFont, button: btnFont, label: smallFont},
+			listTop, areaBottom, rows, offset)
 
 		// Select button sits just above the Back button.
 		selectY2 := a.layout.backButton.Min.Y - a.layout.sy(40)
-		selectY1 := selectY2 - selectBtnH
-		selectRect := image.Rect(a.layout.margin, selectY1, a.layout.screen.X-a.layout.margin, selectY2)
+		selectRect = image.Rect(a.layout.margin, selectY2-selectBtnH, a.layout.screen.X-a.layout.margin, selectY2)
 		ink.DrawRect(selectRect, ink.Black)
 		ink.DrawRect(selectRect.Inset(2), ink.Black)
+		btnFont.SetActive(ink.Black)
 		drawCenteredText(btnFont, selectRect, "Sync this folder", a.layout.fpx(44))
-		a.dirPicker.mu.Lock()
-		a.dirPicker.selectRect = selectRect
-		a.dirPicker.mu.Unlock()
 	}
+
+	// Written on every pass, so a load or an error clears the tap
+	// targets of the folder the user came from instead of leaving
+	// invisible ones behind.
+	a.dirPicker.mu.Lock()
+	a.dirPicker.offset = list.offset
+	a.dirPicker.pageSize = list.pageSize
+	a.dirPicker.rowRects = list.rows
+	a.dirPicker.upRect = upRect
+	a.dirPicker.prevPageRect = list.prev
+	a.dirPicker.nextPageRect = list.next
+	a.dirPicker.selectRect = selectRect
+	a.dirPicker.mu.Unlock()
 
 	ink.DrawRect(a.layout.backButton, ink.Black)
 	drawCenteredText(btnFont, a.layout.backButton, "Back", a.layout.fpx(44))
@@ -277,10 +234,9 @@ func (a *app) dirPickerPointer(e ink.PointerEvent) bool {
 		a.openDirPicker(parentDir(path))
 		return true
 	}
-	if e.Point.In(selectRect) {
+	if !selectRect.Empty() && e.Point.In(selectRect) {
 		a.setPath(path)
 		a.screen = screenSettings
-		ink.HideHourglass()
 		ink.Repaint()
 		return true
 	}
@@ -309,14 +265,7 @@ func (a *app) dirPickerPointer(e ink.PointerEvent) bool {
 // dirPickerPage scrolls the directory list by one page and repaints.
 func (a *app) dirPickerPage(direction int) {
 	a.dirPicker.mu.Lock()
-	step := a.dirPicker.pageSize
-	if step <= 0 {
-		step = 1
-	}
-	a.dirPicker.offset += direction * step
-	if a.dirPicker.offset < 0 {
-		a.dirPicker.offset = 0
-	}
+	a.dirPicker.offset = pageStep(a.dirPicker.offset, a.dirPicker.pageSize, direction)
 	a.dirPicker.mu.Unlock()
 	ink.Repaint()
 }

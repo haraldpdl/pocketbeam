@@ -139,7 +139,7 @@ func (a *app) drawWizard() {
 		ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(300)}, "Testing connection")
 		body.SetActive(ink.DarkGray)
 		ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(370)}, truncate(a.wizard.url, 55))
-		ink.ShowHourglassAt(image.Point{X: a.layout.margin, Y: a.layout.sy(480)})
+		a.showHourglassAt(image.Point{X: a.layout.margin, Y: a.layout.sy(480)})
 
 	case stepError:
 		title.SetActive(ink.Black)
@@ -314,7 +314,6 @@ func (a *app) runProbe() {
 	default:
 		err = ProbeCWA(context.Background(), a.wizard.url, a.wizard.user, a.wizard.pass)
 	}
-	ink.HideHourglass()
 	if err != nil {
 		a.wizard.err = err
 		a.wizard.step = stepError

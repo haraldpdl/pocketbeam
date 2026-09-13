@@ -17,12 +17,16 @@ import (
 // opens a per-profile detail panel; per-profile destructive actions
 // live there, not on the list.
 type profileListState struct {
-	mu       sync.Mutex
-	names    []string
-	active   string
-	err      error
-	rowRects []image.Rectangle
-	addRect  image.Rectangle
+	mu           sync.Mutex
+	names        []string
+	active       string
+	err          error
+	offset       int
+	pageSize     int // rows per page; written during draw
+	rowRects     []image.Rectangle
+	prevPageRect image.Rectangle
+	nextPageRect image.Rectangle
+	addRect      image.Rectangle
 }
 
 // profileDetailState is the per-profile panel opened by tapping a row
@@ -50,7 +54,13 @@ func (a *app) openProfileList() {
 	a.profileList.names = names
 	a.profileList.active = active
 	a.profileList.err = err
+	// Drop the previous visit's tap targets: the error path returns
+	// before drawing new ones.
 	a.profileList.rowRects = nil
+	a.profileList.prevPageRect = image.Rectangle{}
+	a.profileList.nextPageRect = image.Rectangle{}
+	a.profileList.addRect = image.Rectangle{}
+	a.profileList.offset = 0
 	a.profileList.mu.Unlock()
 	a.screen = screenProfileList
 	ink.Repaint()
@@ -73,10 +83,14 @@ func (a *app) drawProfileList() {
 	defer btnFont.Close()
 	btnFont.SetActive(ink.Black)
 
+	smallFont := ink.OpenFont(ink.DefaultFont, a.layout.fpx(26), true)
+	defer smallFont.Close()
+
 	a.profileList.mu.Lock()
 	names := append([]string(nil), a.profileList.names...)
 	active := a.profileList.active
 	perr := a.profileList.err
+	offset := a.profileList.offset
 	a.profileList.mu.Unlock()
 
 	ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(140)}, "Server profiles")
@@ -90,39 +104,40 @@ func (a *app) drawProfileList() {
 		return
 	}
 
-	// One list row per profile. Tap anywhere on the row to open the
-	// detail panel. The active profile shows "Active" as its subtitle so
-	// users can see at a glance which one they're on.
-	rowH := a.layout.sy(110)
-	areaTop := a.layout.pickerAreaTop
-	rects := make([]image.Rectangle, 0, len(names))
-	for i, n := range names {
-		y1 := areaTop + i*rowH
-		rect := image.Rect(a.layout.margin, y1, a.layout.screen.X-a.layout.margin, y1+rowH)
-		rects = append(rects, rect)
+	// One list row per profile, paginated like the pickers so a long
+	// profile list cannot overrun the buttons below it. Tap anywhere on
+	// a row to open the detail panel. The active profile shows "Active"
+	// as its subtitle so users can see at a glance which one they're on.
+	btnH := a.layout.sy(100)
+	addY2 := a.layout.backButton.Min.Y - a.layout.sy(40)
+	addY1 := addY2 - btnH
+
+	rows := make([]listRow, 0, len(names))
+	for _, n := range names {
 		sub := ""
 		if n == active {
 			sub = "Active"
 		}
-		a.drawListRow(rowTitleFont, rowSubFont, rect, n, sub, true)
+		rows = append(rows, listRow{title: n, subtitle: sub})
 	}
-	if n := len(rects); n > 0 {
-		last := rects[n-1]
-		a.drawHairline(last.Min.X, last.Max.X, last.Max.Y)
-	}
+	list := a.drawPagedList(
+		listFonts{rowTitle: rowTitleFont, rowSub: rowSubFont, button: btnFont, label: smallFont},
+		a.layout.pickerAreaTop, addY1-a.layout.sy(40), rows, offset)
 
 	// Primary action: Add new server, sized like the Sync buttons so it
 	// reads as the same kind of commit action.
-	btnH := a.layout.sy(100)
-	addY2 := a.layout.backButton.Min.Y - a.layout.sy(40)
-	addY1 := addY2 - btnH
 	addRect := image.Rect(a.layout.margin, addY1, a.layout.screen.X-a.layout.margin, addY2)
 	ink.DrawRect(addRect, ink.Black)
 	ink.DrawRect(addRect.Inset(2), ink.Black)
+	btnFont.SetActive(ink.Black)
 	drawCenteredText(btnFont, addRect, "Add new server", a.layout.fpx(44))
 
 	a.profileList.mu.Lock()
-	a.profileList.rowRects = rects
+	a.profileList.offset = list.offset
+	a.profileList.pageSize = list.pageSize
+	a.profileList.rowRects = list.rows
+	a.profileList.prevPageRect = list.prev
+	a.profileList.nextPageRect = list.next
 	a.profileList.addRect = addRect
 	a.profileList.mu.Unlock()
 
@@ -152,20 +167,41 @@ func (a *app) profileListPointer(e ink.PointerEvent) bool {
 	rects := a.profileList.rowRects
 	names := append([]string(nil), a.profileList.names...)
 	addRect := a.profileList.addRect
+	offset := a.profileList.offset
+	prev := a.profileList.prevPageRect
+	next := a.profileList.nextPageRect
 	a.profileList.mu.Unlock()
 
 	if e.Point.In(addRect) {
 		a.startAddProfile()
 		return true
 	}
-	for i, r := range rects {
-		if !e.Point.In(r) || i >= len(names) {
-			continue
-		}
-		a.openProfileDetail(names[i])
+	if !prev.Empty() && e.Point.In(prev) {
+		a.profileListPage(-1)
 		return true
 	}
+	if !next.Empty() && e.Point.In(next) {
+		a.profileListPage(+1)
+		return true
+	}
+	for i, r := range rects {
+		if !e.Point.In(r) {
+			continue
+		}
+		if abs := offset + i; abs < len(names) {
+			a.openProfileDetail(names[abs])
+			return true
+		}
+	}
 	return false
+}
+
+// profileListPage scrolls the profile list by one page and repaints.
+func (a *app) profileListPage(direction int) {
+	a.profileList.mu.Lock()
+	a.profileList.offset = pageStep(a.profileList.offset, a.profileList.pageSize, direction)
+	a.profileList.mu.Unlock()
+	ink.Repaint()
 }
 
 // switchProfile marks the chosen profile active, reloads the config,

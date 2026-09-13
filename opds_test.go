@@ -470,3 +470,21 @@ func TestWalkGeneric_SubFeedErrorAbortsListing(t *testing.T) {
 		t.Errorf("walk continued to /opds/c after /opds/b failed; requests: %v", paths())
 	}
 }
+
+func TestVisibleSubsections(t *testing.T) {
+	lvl := OPDSLevel{Subsections: []FilterOption{
+		{Name: "Unknown count", Href: "/a"},
+		{Name: "Empty shelf", Href: "/b", Count: 0, CountKnown: true},
+		{Name: "Has books", Href: "/c", Count: 7, CountKnown: true},
+	}}
+	got := visibleSubsections(lvl)
+	if len(got) != 2 || got[0].Href != "/a" || got[1].Href != "/c" {
+		t.Fatalf("visibleSubsections = %+v, want the unknown-count and non-empty rows", got)
+	}
+	if n := len(lvl.Subsections); n != 3 {
+		t.Errorf("input mutated: %d subsections left", n)
+	}
+	if got := visibleSubsections(OPDSLevel{}); len(got) != 0 {
+		t.Errorf("empty level yielded %d rows", len(got))
+	}
+}

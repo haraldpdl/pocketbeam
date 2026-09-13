@@ -100,22 +100,15 @@ func (a *app) drillInto(href, title string) {
 }
 
 // shelfPickerPage scrolls the list by one page. Called from the Prev /
-// Next page buttons; the actual clamping is in drawShelfPicker so the
-// offset can never point past the current list length.
+// Next page buttons; the offset is clamped against the list length on
+// the next draw.
+//
+// The step is pageSize (written during draw) rather than len(rowRects),
+// because the last page can be shorter than a full window: stepping by
+// the partial count would land on a non-page-aligned offset.
 func (a *app) shelfPickerPage(direction int) {
 	a.picker.mu.Lock()
-	// Step by pageSize (written during draw) rather than len(rowRects),
-	// because the last page can be shorter than a full window. Using
-	// rowRects as the step here would skip forward by only the partial
-	// count and land on a non-page-aligned offset.
-	step := a.picker.pageSize
-	if step <= 0 {
-		step = 1
-	}
-	a.picker.offset += direction * step
-	if a.picker.offset < 0 {
-		a.picker.offset = 0
-	}
+	a.picker.offset = pageStep(a.picker.offset, a.picker.pageSize, direction)
 	a.picker.mu.Unlock()
 	ink.Repaint()
 }
@@ -220,28 +213,17 @@ func (a *app) drawShelfPicker() {
 	areaTop := a.layout.pickerAreaTop
 	areaBottom := a.layout.pickerAreaBottom - selectBtnH - a.layout.sy(40)
 
-	var prevPageRect, nextPageRect image.Rectangle
+	var list pagedListRects
+	var upRect image.Rectangle
 
 	if loading {
 		ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(300)}, "Loading...")
-		ink.ShowHourglassAt(image.Point{X: a.layout.margin, Y: a.layout.sy(360)})
+		a.showHourglassAt(image.Point{X: a.layout.margin, Y: a.layout.sy(360)})
 	} else if pickerErr != nil {
 		ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(300)}, "Could not load feed:")
 		ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(350)}, truncate(pickerErr.Error(), 60))
 	} else {
-		rowH := a.layout.sy(110)
-		pageBtnH := a.layout.sy(60)
-		atRoot := stackLen == 0
-		// Suppress navigation rows whose server-advertised count is zero
-		// (opds:count == 0). Servers that don't advertise counts leave
-		// CountKnown=false and the row shows normally.
-		visibleSubs := make([]FilterOption, 0, len(lvl.Subsections))
-		for _, sub := range lvl.Subsections {
-			if sub.CountKnown && sub.Count == 0 {
-				continue
-			}
-			visibleSubs = append(visibleSubs, sub)
-		}
+		subs := visibleSubsections(lvl)
 
 		// Up-row: fixed above the paginated window so the user can go
 		// up from any page. Rendered as a full-width list row with a
@@ -249,88 +231,41 @@ func (a *app) drawShelfPicker() {
 		// idiom; still visually distinct from the subsection chevron
 		// rows because its chevron points the other way.
 		listTop := areaTop
-		var upRect image.Rectangle
-		if !atRoot {
+		if stackLen > 0 {
+			rowH := a.layout.rowH()
 			upRect = image.Rect(a.layout.margin, listTop, a.layout.screen.X-a.layout.margin, listTop+rowH-a.layout.sy(20))
 			a.drawHairline(upRect.Min.X, upRect.Max.X, upRect.Min.Y)
-			parent := "previous level"
-			if stackLen > 0 {
-				parent = stackTitles[stackLen-1]
-			}
 			rowTitleFont.SetActive(ink.Black)
 			titleY := upRect.Min.Y + (upRect.Dy()-a.layout.fpx(36))/2
 			ink.DrawString(image.Point{X: upRect.Min.X + a.layout.sx(40), Y: titleY},
-				"< Back to "+truncate(parent, 32))
+				"< Back to "+truncate(stackTitles[stackLen-1], 32))
 			listTop += rowH
 		}
 
-		// Paging applies only to subsection rows. pageSize is the true
-		// viewport (used for Prev/Next steps and the "Page N" label);
-		// the last page may render fewer rows.
-		visibleArea := areaBottom - listTop
-		pageSize := (visibleArea - pageBtnH - a.layout.sy(20)) / rowH
-		if pageSize < 1 {
-			pageSize = 1
-		}
-		p := paginate(len(visibleSubs), pageSize, offset)
-		offset = p.offset
-		end := p.end
-
-		rects := make([]image.Rectangle, 0, end-offset)
-		for i := offset; i < end; i++ {
-			sub := visibleSubs[i]
+		rows := make([]listRow, 0, len(subs))
+		for _, sub := range subs {
 			var subtitle string
 			if sub.CountKnown {
 				subtitle = fmt.Sprintf("%d books", sub.Count)
 			}
-			y1 := listTop + (i-offset)*rowH
-			rect := image.Rect(a.layout.margin, y1, a.layout.screen.X-a.layout.margin, y1+rowH)
-			rects = append(rects, rect)
-			a.drawListRow(rowTitleFont, rowSubFont, rect, sub.Name, subtitle, true)
+			rows = append(rows, listRow{title: sub.Name, subtitle: subtitle})
 		}
-		if n := len(rects); n > 0 {
-			last := rects[n-1]
-			a.drawHairline(last.Min.X, last.Max.X, last.Max.Y)
-		}
-
-		// Page nav: subtle subtle single-border buttons with a muted
-		// page indicator between them. Shown only when subsections
-		// overflow a page.
-		if len(visibleSubs) > pageSize {
-			btnY1 := listTop + pageSize*rowH + a.layout.sy(20)
-			btnY2 := btnY1 + pageBtnH
-			contentW := a.layout.screen.X - 2*a.layout.margin
-			navBtnW := contentW / 4
-			if offset > 0 {
-				prevPageRect = image.Rect(a.layout.margin, btnY1, a.layout.margin+navBtnW, btnY2)
-				ink.DrawRect(prevPageRect, ink.Black)
-				drawCenteredText(btnFont, prevPageRect, "< Prev", a.layout.fpx(44))
-			}
-			if end < len(visibleSubs) {
-				nextPageRect = image.Rect(a.layout.screen.X-a.layout.margin-navBtnW, btnY1, a.layout.screen.X-a.layout.margin, btnY2)
-				ink.DrawRect(nextPageRect, ink.Black)
-				drawCenteredText(btnFont, nextPageRect, "Next >", a.layout.fpx(44))
-			}
-			page := offset/pageSize + 1
-			total := (len(visibleSubs) + pageSize - 1) / pageSize
-			pageLabel := fmt.Sprintf("Page %d of %d  ·  %d items", page, total, len(visibleSubs))
-			smallFont.SetActive(ink.DarkGray)
-			pageLabelW := ink.StringWidth(pageLabel)
-			ink.DrawString(
-				image.Point{X: (a.layout.screen.X - pageLabelW) / 2, Y: btnY1 + (btnY2-btnY1-a.layout.fpx(26))/2},
-				pageLabel,
-			)
-		}
-
-		a.picker.mu.Lock()
-		a.picker.offset = offset
-		a.picker.pageSize = pageSize
-		a.picker.rowRects = rects
-		a.picker.prevPageRect = prevPageRect
-		a.picker.nextPageRect = nextPageRect
-		a.picker.upRect = upRect
-		a.picker.mu.Unlock()
+		list = a.drawPagedList(
+			listFonts{rowTitle: rowTitleFont, rowSub: rowSubFont, button: btnFont, label: smallFont},
+			listTop, areaBottom, rows, offset)
 	}
+
+	// Written on every pass, so a load or an error clears the tap
+	// targets of the level the user came from instead of leaving
+	// invisible ones behind.
+	a.picker.mu.Lock()
+	a.picker.offset = list.offset
+	a.picker.pageSize = list.pageSize
+	a.picker.rowRects = list.rows
+	a.picker.prevPageRect = list.prev
+	a.picker.nextPageRect = list.next
+	a.picker.upRect = upRect
+	a.picker.mu.Unlock()
 
 	// Primary action button(s). With no selection the user sees a single
 	// "Sync this level" (sync-all at root) that saves and closes. Once a
@@ -343,6 +278,8 @@ func (a *app) drawShelfPicker() {
 	a.picker.mu.Unlock()
 
 	alreadyIn := pickerContains(selected, curHref)
+	// Row and page-label drawing above leaves their own faces active.
+	btnFont.SetActive(ink.Black)
 	selectY2 := a.layout.backButton.Min.Y - a.layout.sy(40)
 	selectY1 := selectY2 - selectBtnH
 	selectRect := image.Rect(a.layout.margin, selectY1, a.layout.screen.X-a.layout.margin, selectY2)
@@ -437,7 +374,9 @@ func (a *app) shelfPickerPointer(e ink.PointerEvent) bool {
 	}
 	a.picker.mu.Lock()
 	rects := a.picker.rowRects
-	subsAll := a.picker.level.Subsections
+	// Same visibility rule as drawShelfPicker, so row indices line up
+	// with what the user sees.
+	subs := visibleSubsections(a.picker.level)
 	selectRect := a.picker.selectRect
 	doneRect := a.picker.doneRect
 	offset := a.picker.offset
@@ -446,16 +385,6 @@ func (a *app) shelfPickerPointer(e ink.PointerEvent) bool {
 	upRect := a.picker.upRect
 	hasSelection := len(a.picker.selected) > 0
 	a.picker.mu.Unlock()
-
-	// Match the visible filter used in drawShelfPicker so row indices
-	// line up with what the user sees.
-	subs := make([]FilterOption, 0, len(subsAll))
-	for _, s := range subsAll {
-		if s.CountKnown && s.Count == 0 {
-			continue
-		}
-		subs = append(subs, s)
-	}
 
 	// ".. (up)" is a fixed top row and always accessible, including
 	// from page 2+ where it sits above the paginated window.
@@ -515,7 +444,6 @@ func (a *app) pickerConfirmCurrent() {
 		a.setFilters([]string{href}, []string{title})
 	}
 	a.screen = screenSettings
-	ink.HideHourglass()
 	ink.Repaint()
 }
 
@@ -555,7 +483,6 @@ func (a *app) pickerFinishMulti() {
 	}
 	a.setFilters(hrefs, names)
 	a.screen = screenSettings
-	ink.HideHourglass()
 	ink.Repaint()
 }
 

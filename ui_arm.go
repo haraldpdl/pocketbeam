@@ -5,6 +5,7 @@ package main
 
 import (
 	"fmt"
+	"image"
 	"log"
 	"os"
 	"path/filepath"
@@ -68,6 +69,29 @@ type app struct {
 	netStop       func()
 	layout        layout
 	lastTap       time.Time
+	// hourglass tracks whether InkView is currently showing the busy
+	// icon, so it is only taken down by the screen that raised it.
+	// Touched from the event loop only (draw passes and Draw itself).
+	hourglass bool
+}
+
+// showHourglassAt raises InkView's busy icon at p. Draw takes it down
+// again on the next pass, so a screen that is still busy re-raises it
+// every time it draws.
+func (a *app) showHourglassAt(p image.Point) {
+	a.hourglass = true
+	ink.ShowHourglassAt(p)
+}
+
+// hideHourglass takes the busy icon down if one is up. InkView restores
+// the pixels it saved when the icon went up, so this must run before the
+// screen is redrawn, and must not run when nothing was shown.
+func (a *app) hideHourglass() {
+	if !a.hourglass {
+		return
+	}
+	a.hourglass = false
+	ink.HideHourglass()
 }
 
 // acceptTap returns true if the event should be treated as a tap. Accepts
@@ -160,6 +184,10 @@ func (a *app) Close() error {
 }
 
 func (a *app) Draw() {
+	// Every repaint starts without the busy icon; a screen that is still
+	// loading raises it again below. This is what takes the hourglass
+	// down when a picker fetch fails or the user leaves mid-load.
+	a.hideHourglass()
 	ink.ClearScreen()
 	switch a.screen {
 	case screenFirstRun:

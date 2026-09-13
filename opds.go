@@ -255,6 +255,22 @@ func levelBookCount(lvl OPDSLevel) (n int, approximate bool) {
 	return sum, true
 }
 
+// visibleSubsections drops navigation rows the server itself reports as
+// empty (opds:count == 0); a feed that advertises no count leaves
+// CountKnown false and is kept. Both the picker's draw pass and its
+// pointer handler go through this so row indices refer to the same
+// list.
+func visibleSubsections(lvl OPDSLevel) []FilterOption {
+	subs := make([]FilterOption, 0, len(lvl.Subsections))
+	for _, sub := range lvl.Subsections {
+		if sub.CountKnown && sub.Count == 0 {
+			continue
+		}
+		subs = append(subs, sub)
+	}
+	return subs
+}
+
 // FetchLevel retrieves the feed at href (walking pagination) and splits
 // its entries into drill-in subsections and acquisition entries. An empty
 // href starts at the catalog root ("/opds" under the base URL's prefix).

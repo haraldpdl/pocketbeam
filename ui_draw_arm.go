@@ -5,6 +5,7 @@
 package main
 
 import (
+	"fmt"
 	"image"
 
 	ink "github.com/dennwc/inkview"
@@ -96,4 +97,89 @@ func (a *app) drawToggle(r image.Rectangle, on bool) {
 		ink.FillArea(thumb, ink.White)
 		ink.DrawRect(thumb, ink.Black)
 	}
+}
+
+// listRow is one row for drawPagedList: a bold title plus an optional
+// muted subtitle.
+type listRow struct {
+	title    string
+	subtitle string
+}
+
+// listFonts are the faces drawPagedList paints with. The caller passes
+// its own handles because it has already opened the same faces for the
+// screen's header and buttons, and per-row font handles are measurable
+// on e-ink.
+type listFonts struct {
+	rowTitle *ink.Font // bold row title
+	rowSub   *ink.Font // muted row subtitle
+	button   *ink.Font // Prev / Next page buttons
+	label    *ink.Font // muted "Page N of M" indicator
+}
+
+// pagedListRects is what a pointer handler needs once a paginated list
+// has been drawn: rows[i] is list item offset+i, pageSize is the step
+// the Prev/Next buttons move by, and prev/next are empty when that
+// direction has nowhere to go.
+type pagedListRects struct {
+	offset   int
+	pageSize int
+	rows     []image.Rectangle
+	prev     image.Rectangle
+	next     image.Rectangle
+}
+
+// drawPagedList paints one page of full-width rows between top and
+// bottom, followed by a "< Prev | Page N of M · K items | Next >" bar
+// when the list overflows a page. Shared by the OPDS feed picker, the
+// WebDAV directory picker and the profile list so all three page
+// identically.
+func (a *app) drawPagedList(f listFonts, top, bottom int, rows []listRow, offset int) pagedListRects {
+	rowH := a.layout.rowH()
+	navH := a.layout.sy(60)
+	gap := a.layout.sy(20)
+	p := layoutListPage(top, bottom, rowH, navH, gap, len(rows), offset)
+
+	out := pagedListRects{
+		offset:   p.offset,
+		pageSize: p.pageSize,
+		rows:     make([]image.Rectangle, 0, p.end-p.offset),
+	}
+	for i := p.offset; i < p.end; i++ {
+		y1 := top + (i-p.offset)*rowH
+		r := image.Rect(a.layout.margin, y1, a.layout.screen.X-a.layout.margin, y1+rowH)
+		out.rows = append(out.rows, r)
+		a.drawListRow(f.rowTitle, f.rowSub, r, rows[i].title, rows[i].subtitle, true)
+	}
+	if n := len(out.rows); n > 0 {
+		last := out.rows[n-1]
+		a.drawHairline(last.Min.X, last.Max.X, last.Max.Y)
+	}
+	if !p.navShown {
+		return out
+	}
+
+	navY2 := p.navY + navH
+	navW := (a.layout.screen.X - 2*a.layout.margin) / 4
+	// drawListRow leaves the row-title face active, so the button and
+	// label faces are (re)activated here rather than assumed.
+	f.button.SetActive(ink.Black)
+	if p.offset > 0 {
+		out.prev = image.Rect(a.layout.margin, p.navY, a.layout.margin+navW, navY2)
+		ink.DrawRect(out.prev, ink.Black)
+		drawCenteredText(f.button, out.prev, "< Prev", a.layout.fpx(44))
+	}
+	if p.end < len(rows) {
+		out.next = image.Rect(a.layout.screen.X-a.layout.margin-navW, p.navY, a.layout.screen.X-a.layout.margin, navY2)
+		ink.DrawRect(out.next, ink.Black)
+		drawCenteredText(f.button, out.next, "Next >", a.layout.fpx(44))
+	}
+	label := fmt.Sprintf("Page %d of %d  ·  %d items",
+		p.offset/p.pageSize+1, (len(rows)+p.pageSize-1)/p.pageSize, len(rows))
+	f.label.SetActive(ink.DarkGray)
+	ink.DrawString(image.Point{
+		X: (a.layout.screen.X - ink.StringWidth(label)) / 2,
+		Y: p.navY + (navH-a.layout.fpx(26))/2,
+	}, label)
+	return out
 }
