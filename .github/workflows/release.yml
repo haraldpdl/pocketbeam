@@ -1,0 +1,50 @@
+name: release
+on:
+  push:
+    tags: ['v*']
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    container:
+      image: docker.io/sunsung/pocketbook-go-sdk:latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: make arm VERSION=${{ github.ref_name }}
+      - name: Package
+        run: |
+          set -eu
+          cd dist
+          gzip -9 -k -n pocketbeam.app
+          sha256sum pocketbeam.app pocketbeam.app.gz > SHA256SUMS
+          cat SHA256SUMS
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with: { name: dist, path: dist/, if-no-files-found: error, retention-days: 7 }
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with: { name: dist, path: dist }
+      - name: Release notes
+        run: |
+          set -eu
+          RAW=$(cut -d' ' -f1 dist/SHA256SUMS | head -1)
+          {
+            echo "pocketbeam ${GITHUB_REF_NAME}"
+            echo
+            echo "sha256: ${RAW}"
+          } > dist/notes.md
+          cat dist/notes.md
+      - name: GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" \
+            --title "${GITHUB_REF_NAME}" --notes-file dist/notes.md \
+            dist/pocketbeam.app dist/pocketbeam.app.gz dist/SHA256SUMS

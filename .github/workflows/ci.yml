@@ -1,0 +1,33 @@
+name: ci
+on:
+  push:
+    branches: [main]
+  pull_request:
+permissions:
+  contents: read
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with: { go-version-file: .go-version, check-latest: true }
+      # Same gates as `make ci` locally. The race detector and go-sqlite3
+      # both need cgo, which GitHub runners have. The SDK toolchain is
+      # absent here, so the Makefile skips the arm gate; the `arm` job
+      # below covers it.
+      - run: make ci TESTFLAGS=-race
+  arm:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    container:
+      image: docker.io/sunsung/pocketbook-go-sdk:latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # The image ships Go + the PocketBook ARM clang; ui_arm.go only
+      # compiles here, so this is the gate that proves the InkView UI builds.
+      - run: make arm VERSION=${{ github.sha }}

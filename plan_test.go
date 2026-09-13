@@ -35,10 +35,10 @@ func TestPlan_ClassifiesNewUpdatedUnchanged(t *testing.T) {
 
 	t1 := t0.Add(time.Hour)
 	src2 := &fakeSource{books: []Book{
-		makeBookSized("a", "A", 100, t0),       // unchanged
-		makeBookSized("b", "B v2", 250, t1),    // updated
-		makeBookSized("c", "C", 300, t0),       // new
-		makeBookSized("d", "D", 0, t0),         // new, unknown size
+		makeBookSized("a", "A", 100, t0),    // unchanged
+		makeBookSized("b", "B v2", 250, t1), // updated
+		makeBookSized("c", "C", 300, t0),    // new
+		makeBookSized("d", "D", 0, t0),      // new, unknown size
 	}}
 	plan, books, err := Plan(context.Background(), src2, store, library, SyncOptions{Scope: "s1"})
 	if err != nil {
@@ -157,10 +157,10 @@ func TestPlan_MissingRespectsGuards(t *testing.T) {
 
 func TestPlan_FitsReports(t *testing.T) {
 	cases := []struct {
-		name         string
-		download     int64
-		free         int64
-		unknown      int
+		name                string
+		download            int64
+		free                int64
+		unknown             int
 		wantOK, wantCertain bool
 	}{
 		{"fits_exact", 100, 100, 0, true, true},

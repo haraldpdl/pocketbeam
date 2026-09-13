@@ -94,14 +94,14 @@ type wizardState struct {
 // syncState holds live progress from a running sync. Written by the progress
 // callback (goroutine), read by Draw (event loop). Protected by mu.
 type syncState struct {
-	mu        sync.Mutex
-	active    bool
-	planning  bool // true while Plan() is running before downloads start
-	index     int
-	total     int
-	title     string
-	author    string
-	err       error
+	mu       sync.Mutex
+	active   bool
+	planning bool // true while Plan() is running before downloads start
+	index    int
+	total    int
+	title    string
+	author   string
+	err      error
 	// unknownSizes is the count of new/updated books whose size the
 	// pre-flight plan couldn't determine. Non-zero means the post-sync
 	// summary tacks on a "lower-bound" note so the user knows the size
@@ -116,11 +116,11 @@ type syncState struct {
 // is up and routes the user's answer back to the sync goroutine over ch.
 // ch is non-nil only while a prompt is pending.
 type spaceWarnState struct {
-	mu        sync.Mutex
-	plan      SyncPlan
-	ch        chan bool
-	yesRect   image.Rectangle
-	noRect    image.Rectangle
+	mu      sync.Mutex
+	plan    SyncPlan
+	ch      chan bool
+	yesRect image.Rectangle
+	noRect  image.Rectangle
 }
 
 // feedPickerFrame is one level of the nested-navigation stack. Pushed when
@@ -161,20 +161,20 @@ type feedPickerState struct {
 // active download's progress, and any terminal message shown once the
 // install succeeds or fails.
 type updateState struct {
-	mu           sync.Mutex
-	checking     bool
-	available    bool
-	release      Release
-	checkErr     error
-	downloading  bool
-	downloaded   int64
-	total        int64 // -1 until the HTTP response's Content-Length is known
-	installErr   error
-	installed    bool // true once the new binary has been written to disk
-	installBtn   image.Rectangle
-	checkBtn     image.Rectangle
-	toggleBtn    image.Rectangle // enable/disable automatic weekly checks
-	backBtn      image.Rectangle
+	mu          sync.Mutex
+	checking    bool
+	available   bool
+	release     Release
+	checkErr    error
+	downloading bool
+	downloaded  int64
+	total       int64 // -1 until the HTTP response's Content-Length is known
+	installErr  error
+	installed   bool // true once the new binary has been written to disk
+	installBtn  image.Rectangle
+	checkBtn    image.Rectangle
+	toggleBtn   image.Rectangle // enable/disable automatic weekly checks
+	backBtn     image.Rectangle
 }
 
 // profileListState holds the snapshot shown on the profile-list screen.
@@ -210,11 +210,11 @@ type profileDetailState struct {
 // and the channel the sync goroutine blocks on. ch is non-nil only while
 // a prompt is pending.
 type deleteConfirmState struct {
-	mu       sync.Mutex
-	pending  []LocalBook
-	ch       chan bool
-	yesRect  image.Rectangle
-	noRect   image.Rectangle
+	mu      sync.Mutex
+	pending []LocalBook
+	ch      chan bool
+	yesRect image.Rectangle
+	noRect  image.Rectangle
 }
 
 // dirPickerState holds the current WebDAV directory the user is drilling
@@ -260,16 +260,16 @@ type layout struct {
 	// title and a muted value subtitle. deleteToggle is a smaller pill
 	// drawn inside deleteRow, left in place for the pointer handler
 	// only because the whole row is tappable anyway.
-	serverRow       image.Rectangle
-	profileRow      image.Rectangle
-	filterRow       image.Rectangle
-	deleteRow       image.Rectangle
-	deleteToggle    image.Rectangle
-	updateRow       image.Rectangle
-	serverLabelY    int
-	libraryLabelY   int
-	aboutLabelY     int
-	backButton      image.Rectangle
+	serverRow     image.Rectangle
+	profileRow    image.Rectangle
+	filterRow     image.Rectangle
+	deleteRow     image.Rectangle
+	deleteToggle  image.Rectangle
+	updateRow     image.Rectangle
+	serverLabelY  int
+	libraryLabelY int
+	aboutLabelY   int
+	backButton    image.Rectangle
 
 	// shelf picker: per-row tap rects computed dynamically in draw.
 	pickerAreaTop    int
@@ -439,27 +439,27 @@ const tapDebounce = 250 * time.Millisecond
 
 // app implements ink.App for the pocketbeam device UI.
 type app struct {
-	cfgPath     string
-	cfg         *Config
-	client      *Client
-	store       *Store
-	screen      screen
-	wizard      wizardState
-	sync        syncState
-	picker      feedPickerState
-	dirPicker   dirPickerState
+	cfgPath       string
+	cfg           *Config
+	client        *Client
+	store         *Store
+	screen        screen
+	wizard        wizardState
+	sync          syncState
+	picker        feedPickerState
+	dirPicker     dirPickerState
 	delConfirm    deleteConfirmState
 	spaceWarn     spaceWarnState
 	profileList   profileListState
 	profileDetail profileDetailState
 	update        updateState
 	libRefresh    libRefreshState
-	lastSync    SyncSummary
-	hasLastSync bool
-	bookCount   int
-	netStop           func()
-	layout            layout
-	lastTap           time.Time
+	lastSync      SyncSummary
+	hasLastSync   bool
+	bookCount     int
+	netStop       func()
+	layout        layout
+	lastTap       time.Time
 }
 
 // acceptTap returns true if the event should be treated as a tap. Accepts
@@ -1177,10 +1177,10 @@ func (a *app) drawMainProgressContent(body *ink.Font) {
 		if total > 0 {
 			fillW := (a.layout.progressBar.Dx() - 6) * idx / total
 			ink.FillArea(image.Rect(
-				a.layout.progressBar.Min.X + a.layout.sx(3),
-				a.layout.progressBar.Min.Y + a.layout.sy(3),
-				a.layout.progressBar.Min.X + a.layout.sx(3)+fillW,
-				a.layout.progressBar.Max.Y - a.layout.sy(3),
+				a.layout.progressBar.Min.X+a.layout.sx(3),
+				a.layout.progressBar.Min.Y+a.layout.sy(3),
+				a.layout.progressBar.Min.X+a.layout.sx(3)+fillW,
+				a.layout.progressBar.Max.Y-a.layout.sy(3),
 			), ink.DarkGray)
 		}
 		ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.progressArea.Min.Y + a.layout.sy(180)}, truncate(curAuthor+": "+curTitle, 60))
