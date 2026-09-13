@@ -157,7 +157,17 @@ func recoverActiveProfile(path string) *Config {
 	}
 	rows, ok := doc.sections[active]
 	if !ok {
-		return nil
+		// active names a section that is not in the file: it was renamed
+		// or deleted by hand. Fall back to the first profile, as the
+		// empty-active branch does. Returning nil here would send the
+		// wizard down the new-profile path, which derives a fresh
+		// Books/default and lets SaveConfig overwrite an existing
+		// [default] section, orphaning the books it already holds.
+		if len(doc.order) == 0 {
+			return nil
+		}
+		active = doc.order[0]
+		rows = doc.sections[active]
 	}
 	c := &Config{Profile: active, StateDB: doc.stateDB, CheckUpdates: true, UpdateURL: doc.updateURL}
 	if doc.checkUpdatesSeen {

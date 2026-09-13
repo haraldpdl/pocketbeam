@@ -265,6 +265,9 @@ func reconcileDeletions(store *Store, library string, remote []Book, opts SyncOp
 	}
 	deleted := 0
 	for _, m := range missing {
+		// m.LocalPath is never empty: computeMissing only keeps rows that
+		// pass underDir, which rejects an empty path.
+		//
 		// Stores written before filenames were disambiguated can map
 		// another book to this path; then the file is that book's only
 		// copy and only the row goes.

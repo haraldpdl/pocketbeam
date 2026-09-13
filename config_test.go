@@ -376,6 +376,48 @@ func TestResolveProfileForProbe(t *testing.T) {
 	}
 }
 
+func TestResolveProfileForProbeDanglingActive(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "pocketbeam.cfg")
+	// `active` names a section that is not in the file: someone renamed
+	// or deleted [home] by hand and left the key behind. LoadConfig
+	// rejects this, so the wizard's recovery path has to decide what the
+	// user is editing. It must land on the profile that is actually
+	// there, not report "no profile" and let SaveConfig overwrite
+	// [default] with a freshly derived library.
+	cfg := "active = home\nstate_db = /db.sqlite\n\n" +
+		"[default]\nbackend = webdav\nhost = http://one.lan\nlibrary = /mnt/ext1/Books/old\n"
+	if err := os.WriteFile(path, []byte(cfg), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if _, err := LoadConfig(path); err == nil {
+		t.Fatal("LoadConfig accepted a dangling active; the test no longer covers the recovery path")
+	}
+	got := resolveProfileForProbe(path, nil, false)
+	if got == nil {
+		t.Fatal("dangling active: got nil, want the first profile in the file")
+	}
+	if got.Profile != defaultProfileName {
+		t.Errorf("Profile = %q, want %q", got.Profile, defaultProfileName)
+	}
+	if got.Library != "/mnt/ext1/Books/old" {
+		t.Errorf("Library = %q, want the stored path so the wizard keeps the existing folder", got.Library)
+	}
+	if got.StateDB != "/db.sqlite" {
+		t.Errorf("StateDB = %q, want the file's global", got.StateDB)
+	}
+
+	// A file whose only content is a dangling active really has no
+	// profile to recover.
+	empty := filepath.Join(dir, "empty.cfg")
+	if err := os.WriteFile(empty, []byte("active = home\n"), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if got := resolveProfileForProbe(empty, nil, false); got != nil {
+		t.Errorf("no sections: got %+v, want nil", got)
+	}
+}
+
 func TestProfileAfterProbeKeepsStoredProfile(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "pocketbeam.cfg")

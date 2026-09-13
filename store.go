@@ -80,9 +80,10 @@ func OpenStore(path string) (*Store, error) {
 // count would tell the main screen the sum of all profiles' libraries.
 // Two of its callers run on the InkView event loop (app start, profile
 // switch), so the filtering stays in SQL rather than materialising every
-// row. LIKE folds ASCII case, which is the containment rule the sync diff
-// applies for the same FAT reason; recorded paths come from filepath.Join
-// and are therefore already clean.
+// row. The sync diff case-folds with strings.ToLower (Unicode) while LIKE
+// folds ASCII only, so the two containment rules agree on ASCII paths and
+// can disagree on a library path with non-ASCII cased letters; recorded
+// paths come from filepath.Join and are therefore already clean.
 func (s *Store) BookCount(library string) (int, error) {
 	prefix := filepath.Clean(library) + string(filepath.Separator)
 	var n int
