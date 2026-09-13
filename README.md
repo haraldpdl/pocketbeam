@@ -16,7 +16,7 @@ The stock OPDS catalog browser is regionally gated; on the German-market firmwar
 
 ### 1. Build the `.app`
 
-The project expects to be built inside the [`sunsung/pocketbook-go-sdk`](https://hub.docker.com/r/sunsung/pocketbook-go-sdk) Docker image, which ships the PocketBook ARMv7 cross-compile toolchain and Go 1.24.
+The project expects to be built inside the [`sunsung/pocketbook-go-sdk`](https://hub.docker.com/r/sunsung/pocketbook-go-sdk) Docker image, which ships the PocketBook ARMv7 cross-compile toolchain. Inside the container `make arm` builds `dist/pocketbeam.app` with the version baked in and verifies the result is an ARM binary; the plain `go build` below is the same thing spelled out:
 
 ```sh
 docker run --rm -v "$PWD":/app -w /app sunsung/pocketbook-go-sdk:latest \
@@ -26,7 +26,7 @@ docker run --rm -v "$PWD":/app -w /app sunsung/pocketbook-go-sdk:latest \
 
 The stripped binary is about 8 MB. The `-X main.version=...` flag bakes the
 current git tag into the binary; the on-device updater compares that against
-the latest Gitea release to decide whether to offer an upgrade. A bare
+the latest published release to decide whether to offer an upgrade. A bare
 `go build` without the flag leaves the version as `dev`, which the updater
 treats as older than any tagged release (so the updater is always willing
 to replace a dev build with a real release).
@@ -96,9 +96,13 @@ path     = /Books/Fiction
 
 `filter_href` / `filter_name` can repeat to sync more than one feed per profile; books are deduped by UUID across the union. `state_db` is global and shared by every profile (identities don't collide across real catalogs).
 
+Two more optional top-level keys: `check_updates = off` disables the weekly update check, and `update_url = https://...` points the checker at another release endpoint (a GitHub or Gitea releases API URL works, as does anything that serves the same JSON shape).
+
 You can edit this by hand over USB if you prefer not to go through the on-device wizard.
 
 ## Development
+
+Quality gates live in the `Makefile`. `make ci` is exactly what GitHub Actions runs: gofmt, `go vet`, staticcheck, `go mod tidy` drift, tests, an amd64 build, govulncheck, and the ARM build whenever the SDK toolchain is present. `make hooks` wires the same gates into your clone as pre-commit (`make quick`) and pre-push (`make ci`) hooks. Tests need cgo and a C compiler because of go-sqlite3. Every change goes through a pull request; `main` requires the `quality` check.
 
 A second entry point compiles for amd64 and runs the sync as a plain CLI without InkView, so you can iterate on the core logic without sideloading:
 
@@ -116,11 +120,13 @@ Unit tests:
 go test ./...
 ```
 
-Live tests against a real CWA (gated behind the `live` build tag):
+Live tests against a real CWA (gated behind the `live` build tag; host and credentials come from `POCKETBEAM_TEST_HOST`, `POCKETBEAM_TEST_USER`, `POCKETBEAM_TEST_PASS`):
 
 ```sh
-go test -tags=live -run TestLive
+POCKETBEAM_TEST_HOST=http://cwa.lan:8083 go test -tags=live -run TestLive
 ```
+
+Releases are cut by pushing a `vX.Y.Z` tag on `main`. The release workflow builds the ARM binary in the SDK container, publishes a GitHub Release with `pocketbeam.app`, `pocketbeam.app.gz` and `SHA256SUMS`, and pushes the same files to the update endpoint the app polls.
 
 ## Known limitations
 
@@ -136,11 +142,11 @@ pocketbeam checks for new releases so you don't have to re-sideload manually. Th
 
 - **Once at first launch** after sideloading (there's no prior check timestamp, so the app hits the release endpoint within a few seconds of startup).
 - **Once a week thereafter**, gated by the `last_update_check` timestamp stored in the local state DB.
-- **On demand** when you tap the version line in Settings.
+- **On demand** via **Check for updates** in Settings.
 
-The update check is a single HTTPS GET to the release endpoint (dev builds: Gitea on your LAN; public builds: a project-hosted JSON endpoint). The request includes a `User-Agent` header of the form `pocketbeam/<version> (<device-model>; <hardware-type>; fw <firmware>; <width>x<height>)` so the release backend can see which PocketBook models and firmware versions are running which release. No personal data, no library contents, no identifiers beyond what you'd leak to any HTTPS server you visit. The backend logs whatever its web-server access log records, which includes your IP address at the time of the request.
+The update check is a single HTTPS GET to `https://pocketbeam.shinyredapples.com/releases/latest` (or whatever `update_url` you set in the config). The request includes a `User-Agent` header of the form `pocketbeam/<version> (<device-model>; <hardware-type>; fw <firmware>; <width>x<height>)` so the release backend can see which PocketBook models and firmware versions are running which release. No personal data, no library contents, no identifiers beyond what you'd leak to any HTTPS server you visit. The backend logs whatever its web-server access log records, which includes your IP address at the time of the request.
 
-To disable all automatic update checks, tap the version line in Settings to open the update screen, then tap the **Automatic weekly checks: on** row to flip it off. Manual "Check for updates" remains available on that screen even when automatic checks are disabled. Power users can also set `check_updates = off` at the top of `pocketbeam.cfg`.
+To disable all automatic update checks, open **Check for updates** in Settings, then tap the **Automatic weekly checks: on** row to flip it off. Manual "Check for updates" remains available on that screen even when automatic checks are disabled. Power users can also set `check_updates = off` at the top of `pocketbeam.cfg`.
 
 The app does **no other telemetry**: no usage stats, no crash pings, no version beacons outside the update check. The only outbound HTTP traffic pocketbeam ever initiates is (a) OPDS / WebDAV requests to your configured server, (b) the update check described above, (c) the release binary download when you tap Install. KOReader has the same posture minus the weekly check.
 

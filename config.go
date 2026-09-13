@@ -23,10 +23,10 @@ const (
 const defaultProfileName = "default"
 
 // defaultUpdateURL is the release endpoint queried when check_updates is
-// on and the config hasn't overridden it. Points at the Gitea instance
-// during dev; the public release will flip this to a project-hosted
-// JSON at build time via ldflags.
-const defaultUpdateURL = "http://gitea.example.internal:3000/api/v1/repos/haraldpdl/pocketbeam/releases/latest"
+// on and the config hasn't overridden it via update_url. It is a var so a
+// build can point it elsewhere with
+// -ldflags "-X main.defaultUpdateURL=https://host/path".
+var defaultUpdateURL = "https://pocketbeam.shinyredapples.com/releases/latest"
 
 // Config represents the currently-active profile's fields, plus its name.
 // The on-disk file can hold multiple profiles as [sections]; LoadConfig

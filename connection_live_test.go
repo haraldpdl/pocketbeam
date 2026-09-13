@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"os"
 	"strings"
 	"testing"
 )
@@ -13,15 +14,22 @@ import (
 // Run with: go test -tags=live -run 'TestLive'
 //
 // Environment variables:
-//   BOOKBEAM_TEST_HOST (default: http://cwa.example.internal:8083)
-//   BOOKBEAM_TEST_USER (default: admin)
-//   BOOKBEAM_TEST_PASS (default: changeme)
+//   POCKETBEAM_TEST_HOST (default: http://localhost:8083)
+//   POCKETBEAM_TEST_USER (default: admin)
+//   POCKETBEAM_TEST_PASS (default: admin123, Calibre-Web's factory default)
 
-const (
-	liveHost = "http://cwa.example.internal:8083"
-	liveUser = "admin"
-	livePass = "changeme"
+var (
+	liveHost = envOr("POCKETBEAM_TEST_HOST", "http://localhost:8083")
+	liveUser = envOr("POCKETBEAM_TEST_USER", "admin")
+	livePass = envOr("POCKETBEAM_TEST_PASS", "admin123")
 )
+
+func envOr(key, def string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return def
+}
 
 func TestLiveProbe_Happy(t *testing.T) {
 	if err := ProbeCWA(context.Background(), liveHost, liveUser, livePass); err != nil {
