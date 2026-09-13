@@ -178,10 +178,20 @@ func (a *app) drawToggleRow(titleF, subF *ink.Font, r image.Rectangle, title, su
 // strip to the panel. Flipping a toggle changes nothing else on the
 // screen, so routing it through Draw would clear and re-flash the whole
 // panel for a pill that moved a few millimetres.
+//
+// It runs under DrawFull: only the pointer handlers call it, so the
+// screen is current by construction and DrawIfOn's test would be
+// redundant, but a background goroutine can be mid-draw in its own
+// strip, and the two passes share InkView's single active face and
+// colour. Unserialized, the row and the goroutine's strip render in each
+// other's face - and unlike the strip, which the next tick repaints, the
+// row stays wrong until the user leaves and re-enters the screen.
 func (a *app) refreshToggleRow(r image.Rectangle, title, subtitle string, on bool) {
-	ink.FillArea(r, ink.White)
-	a.drawToggleRow(a.font(ink.DefaultFontBold, 36), a.font(ink.DefaultFont, 28), r, title, subtitle, on)
-	ink.PartialUpdate(r)
+	a.DrawFull(func() {
+		ink.FillArea(r, ink.White)
+		a.drawToggleRow(a.font(ink.DefaultFontBold, 36), a.font(ink.DefaultFont, 28), r, title, subtitle, on)
+		ink.PartialUpdate(r)
+	})
 }
 
 // listRow is one row for drawPagedList: a bold title plus an optional

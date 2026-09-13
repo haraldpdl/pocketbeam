@@ -142,12 +142,14 @@ func (s *appState) DrawIfOn(want screen, draw func()) {
 	draw()
 }
 
-// DrawFull runs a whole-screen repaint under the same lock DrawIfOn
-// takes, so a full pass and a goroutine's partial one cannot interleave.
-// They share InkView's single active face and colour, and a full pass
-// clears the screen before it draws, so an unserialized overlap renders
-// labels in the wrong face or leaves a blank band where the partial draw
-// landed between the clear and the redraw.
+// DrawFull runs a repaint raised on the InkView event loop - a whole
+// screen or a single row - under the same lock DrawIfOn takes, so it
+// cannot interleave with a goroutine's partial one. They share InkView's
+// single active face and colour, and a full pass clears the screen
+// before it draws, so an unserialized overlap renders labels in the
+// wrong face or leaves a blank band where the partial draw landed
+// between the clear and the redraw. No screen test: the event loop is
+// what changes the screen, so whatever it is drawing is what is up.
 func (s *appState) DrawFull(draw func()) {
 	s.drawMu.Lock()
 	defer s.drawMu.Unlock()
