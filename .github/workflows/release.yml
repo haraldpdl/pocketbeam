@@ -28,34 +28,19 @@ jobs:
     timeout-minutes: 10
     permissions:
       contents: write
-    env:
-      PUBLISH_HOST: pocketbeam.shinyredapples.com
-      PUBLISH_SSH_HOST: ${{ vars.PUBLISH_SSH_HOST }}
     steps:
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with: { name: dist, path: dist }
-      - name: Compose release notes and latest.json
-        id: notes
+      - name: Release notes
         run: |
           set -eu
-          TAG="${GITHUB_REF_NAME}"
           RAW=$(cut -d' ' -f1 dist/SHA256SUMS | head -1)
-          RAW_SIZE=$(stat -c %s dist/pocketbeam.app)
-          GZ_SIZE=$(stat -c %s dist/pocketbeam.app.gz)
-          BASE="https://${PUBLISH_HOST}/releases/${TAG}"
           {
-            echo "pocketbeam ${TAG}"
+            echo "pocketbeam ${GITHUB_REF_NAME}"
             echo
             echo "sha256: ${RAW}"
           } > dist/notes.md
-          jq -n --arg tag "$TAG" --arg body "$(cat dist/notes.md)" \
-                --arg raw "$BASE/pocketbeam.app" --argjson rawsize "$RAW_SIZE" \
-                --arg gz "$BASE/pocketbeam.app.gz" --argjson gzsize "$GZ_SIZE" \
-            '{tag_name:$tag, body:$body, assets:[
-               {name:"pocketbeam.app",    browser_download_url:$raw, size:$rawsize},
-               {name:"pocketbeam.app.gz", browser_download_url:$gz,  size:$gzsize}]}' \
-            > dist/latest.json
-          cat dist/latest.json
+          cat dist/notes.md
       - name: GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -63,20 +48,3 @@ jobs:
           gh release create "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" \
             --title "${GITHUB_REF_NAME}" --notes-file dist/notes.md \
             dist/pocketbeam.app dist/pocketbeam.app.gz dist/SHA256SUMS
-      # The on-device updater polls https://<PUBLISH_HOST>/releases/latest.
-      # The receiver on that host is a forced SSH command that validates the
-      # bundle and swaps it in atomically. Skipped until the key is configured.
-      - name: Publish to update endpoint
-        if: env.PUBLISH_SSH_HOST != ''
-        env:
-          PUBLISH_KEY: ${{ secrets.PUBLISH_SSH_KEY }}
-          PUBLISH_KNOWN_HOSTS: ${{ vars.PUBLISH_SSH_KNOWN_HOSTS }}
-        run: |
-          set -eu
-          umask 077
-          mkdir -p ~/.ssh
-          printf '%s\n' "$PUBLISH_KEY" > ~/.ssh/publish_key
-          printf '%s\n' "$PUBLISH_KNOWN_HOSTS" > ~/.ssh/known_hosts
-          tar -C dist -cf - pocketbeam.app pocketbeam.app.gz SHA256SUMS latest.json \
-            | ssh -i ~/.ssh/publish_key -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes \
-                "pocketbeam@${PUBLISH_SSH_HOST}" "publish ${GITHUB_REF_NAME}"
