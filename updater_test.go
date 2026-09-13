@@ -298,3 +298,145 @@ func TestDownload_RejectsBadSHAOnCompressedStream(t *testing.T) {
 
 // Suppress unused-import warning when io is only needed through helpers.
 var _ = io.EOF
+
+func TestCheckLatest_ErrorBranches(t *testing.T) {
+	t.Run("non-200 status", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			http.Error(w, "down", http.StatusServiceUnavailable)
+		}))
+		defer srv.Close()
+		newer, _, err := CheckLatest(context.Background(), srv.URL, "v0.1.0")
+		if err == nil || !strings.Contains(err.Error(), "503") || newer {
+			t.Errorf("got newer=%v err=%v, want a 503 error", newer, err)
+		}
+	})
+	t.Run("malformed json", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			_, _ = io.WriteString(w, `<html>not json</html>`)
+		}))
+		defer srv.Close()
+		if _, _, err := CheckLatest(context.Background(), srv.URL, "v0.1.0"); err == nil || !strings.Contains(err.Error(), "parse release") {
+			t.Errorf("got %v, want 'parse release' error", err)
+		}
+	})
+	t.Run("release without assets or sha", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			_, _ = io.WriteString(w, `{"tag_name":"v9.0.0","body":"no checksum here","assets":[]}`)
+		}))
+		defer srv.Close()
+		newer, rel, err := CheckLatest(context.Background(), srv.URL, "v0.1.0")
+		if err != nil || !newer {
+			t.Fatalf("got newer=%v err=%v, want newer=true", newer, err)
+		}
+		if rel.BinaryURL != "" || rel.CompressedURL != "" || rel.SHA256 != "" || rel.BinarySize != 0 {
+			t.Errorf("rel = %+v, want empty asset fields", rel)
+		}
+		// Such a release is reported but cannot be installed.
+		if err := Download(context.Background(), rel, filepath.Join(t.TempDir(), "x"), nil); err == nil || !strings.Contains(err.Error(), "no binary URL") {
+			t.Errorf("Download = %v, want 'no binary URL'", err)
+		}
+	})
+	t.Run("unreachable endpoint", func(t *testing.T) {
+		srv := httptest.NewServer(http.NotFoundHandler())
+		url := srv.URL
+		srv.Close()
+		if _, _, err := CheckLatest(context.Background(), url, "v0.1.0"); err == nil {
+			t.Error("expected a transport error")
+		}
+	})
+}
+
+func TestDownload_ErrorBranches(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/missing":
+			http.NotFound(w, r)
+		case "/bad.gz":
+			_, _ = io.WriteString(w, "this is not gzip")
+		case "/truncated.gz":
+			var buf bytes.Buffer
+			gzw := gzip.NewWriter(&buf)
+			_, _ = io.WriteString(gzw, strings.Repeat("payload", 100))
+			_ = gzw.Close()
+			_, _ = w.Write(buf.Bytes()[:buf.Len()/2])
+		default:
+			_, _ = io.WriteString(w, "ok")
+		}
+	}))
+	defer srv.Close()
+
+	cases := []struct {
+		name    string
+		rel     Release
+		wantErr string
+	}{
+		{"asset missing", Release{BinaryURL: srv.URL + "/missing"}, "404"},
+		{"compressed asset not gzip", Release{CompressedURL: srv.URL + "/bad.gz"}, "gzip"},
+		{"compressed asset truncated", Release{CompressedURL: srv.URL + "/truncated.gz"}, "EOF"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			staged := filepath.Join(t.TempDir(), "pocketbeam.app.new")
+			err := Download(context.Background(), tc.rel, staged, nil)
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Errorf("Download = %v, want %q", err, tc.wantErr)
+			}
+			if _, statErr := os.Stat(staged); !os.IsNotExist(statErr) {
+				t.Errorf("failed download left a file behind: %v", statErr)
+			}
+		})
+	}
+	t.Run("cancelled context", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		staged := filepath.Join(t.TempDir(), "pocketbeam.app.new")
+		if err := Download(ctx, Release{BinaryURL: srv.URL + "/ok"}, staged, nil); err == nil {
+			t.Error("expected an error from a cancelled context")
+		}
+	})
+	t.Run("creates the staging directory", func(t *testing.T) {
+		staged := filepath.Join(t.TempDir(), "nested", "dir", "pocketbeam.app.new")
+		if err := Download(context.Background(), Release{BinaryURL: srv.URL + "/ok"}, staged, nil); err != nil {
+			t.Fatalf("Download: %v", err)
+		}
+		if got, _ := os.ReadFile(staged); string(got) != "ok" {
+			t.Errorf("staged = %q, want ok", got)
+		}
+	})
+}
+
+func TestDownload_ProgressReportsUnknownTotal(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Chunked transfer: no Content-Length for the progress callback.
+		flusher := w.(http.Flusher)
+		_, _ = io.WriteString(w, "part one ")
+		flusher.Flush()
+		_, _ = io.WriteString(w, "part two")
+	}))
+	defer srv.Close()
+	var lastWritten, lastTotal int64
+	staged := filepath.Join(t.TempDir(), "pocketbeam.app.new")
+	err := Download(context.Background(), Release{BinaryURL: srv.URL}, staged, func(w, tot int64) {
+		lastWritten, lastTotal = w, tot
+	})
+	if err != nil {
+		t.Fatalf("Download: %v", err)
+	}
+	if lastWritten != int64(len("part one part two")) || lastTotal != -1 {
+		t.Errorf("progress = (%d, %d), want (%d, -1)", lastWritten, lastTotal, len("part one part two"))
+	}
+}
+
+func TestInstall_FailedRenameRemovesStaged(t *testing.T) {
+	dir := t.TempDir()
+	staged := filepath.Join(dir, "pocketbeam.app.new")
+	if err := os.WriteFile(staged, []byte("new"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := Install(staged, filepath.Join(dir, "no-such-dir", "pocketbeam.app")); err == nil {
+		t.Fatal("Install into a missing directory should fail")
+	}
+	if _, err := os.Stat(staged); !os.IsNotExist(err) {
+		t.Errorf("staged file should be cleaned up after a failed install: %v", err)
+	}
+}

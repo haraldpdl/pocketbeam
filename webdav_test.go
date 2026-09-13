@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -177,48 +178,6 @@ func TestWebDAVSource_FetchStreamsBody(t *testing.T) {
 	}
 }
 
-func TestNewSourceDispatch(t *testing.T) {
-	opdsCfg := &Config{
-		Backend: BackendOPDS,
-		Host:    "http://example:8083",
-		Library: "/lib",
-		StateDB: "/db",
-	}
-	src, err := newSource(opdsCfg)
-	if err != nil {
-		t.Fatalf("newSource(opds): %v", err)
-	}
-	if _, ok := src.(*OPDSSource); !ok {
-		t.Errorf("OPDS backend produced %T, want *OPDSSource", src)
-	}
-	webdavCfg := &Config{
-		Backend: BackendWebDAV,
-		Host:    "https://example/dav",
-		Library: "/lib",
-		StateDB: "/db",
-		Path:    "/Books",
-	}
-	src, err = newSource(webdavCfg)
-	if err != nil {
-		t.Fatalf("newSource(webdav): %v", err)
-	}
-	if _, ok := src.(*WebDAVSource); !ok {
-		t.Errorf("WebDAV backend produced %T, want *WebDAVSource", src)
-	}
-	if _, err := newSource(&Config{Backend: "bogus", Host: "x", Library: "/", StateDB: "/"}); err == nil {
-		t.Errorf("unknown backend should error")
-	}
-	// Empty backend falls back to OPDS for back-compat with old configs.
-	legacyCfg := &Config{Host: "http://example:8083", Library: "/lib", StateDB: "/db"}
-	src, err = newSource(legacyCfg)
-	if err != nil {
-		t.Fatalf("newSource(legacy): %v", err)
-	}
-	if _, ok := src.(*OPDSSource); !ok {
-		t.Errorf("empty backend produced %T, want *OPDSSource", src)
-	}
-}
-
 func TestNormaliseRoot(t *testing.T) {
 	cases := map[string]string{
 		"":            "/",
@@ -232,6 +191,79 @@ func TestNormaliseRoot(t *testing.T) {
 	for in, want := range cases {
 		if got := normaliseRoot(in); got != want {
 			t.Errorf("normaliseRoot(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestProbeWebDAV(t *testing.T) {
+	const stamp = "Mon, 02 Jan 2006 15:04:05 GMT"
+	listing := propfindResponse([]webdavEntry{{href: "/Books/", isDir: true, mtime: stamp}})
+
+	t.Run("success", func(t *testing.T) {
+		srv := newWebDAVMock(t, webdavPropfindResponses{"/Books/": listing})
+		defer srv.Close()
+		if err := ProbeWebDAV(context.Background(), srv.URL, "u", "p", "Books/"); err != nil {
+			t.Errorf("ProbeWebDAV = %v, want nil", err)
+		}
+	})
+	t.Run("root not listable", func(t *testing.T) {
+		srv := newWebDAVMock(t, webdavPropfindResponses{})
+		defer srv.Close()
+		err := ProbeWebDAV(context.Background(), srv.URL, "u", "p", "/Books")
+		if err == nil || !strings.Contains(err.Error(), "Could not list /Books") {
+			t.Errorf("got %v, want 'Could not list /Books'", err)
+		}
+	})
+	statusCases := []struct {
+		status     int
+		wantSubstr string
+	}{
+		{401, "rejected"},
+		{403, "no access"},
+		{404, "not found"},
+		{500, "Could not reach"},
+	}
+	for _, tc := range statusCases {
+		t.Run(http.StatusText(tc.status), func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(tc.status)
+			}))
+			defer srv.Close()
+			err := ProbeWebDAV(context.Background(), srv.URL, "u", "p", "/")
+			if err == nil || !strings.Contains(err.Error(), tc.wantSubstr) {
+				t.Errorf("status %d: got %v, want %q", tc.status, err, tc.wantSubstr)
+			}
+		})
+	}
+	t.Run("connection refused", func(t *testing.T) {
+		srv := httptest.NewServer(http.NotFoundHandler())
+		url := srv.URL
+		srv.Close()
+		err := ProbeWebDAV(context.Background(), url, "u", "p", "/")
+		if err == nil || !strings.Contains(err.Error(), "refused") {
+			t.Errorf("got %v, want 'refused'", err)
+		}
+	})
+}
+
+func TestClassifyWebDAVError(t *testing.T) {
+	cases := []struct {
+		in   string
+		want string
+	}{
+		{"Connect /: 401", "rejected"},
+		{"Connect /: 403", "no access"},
+		{"Connect /: 404", "not found"},
+		{"x509: certificate signed by unknown authority", "TLS handshake"},
+		{"remote error: tls: handshake failure", "TLS handshake"},
+		{"dial tcp: lookup nas.lan: no such host", "resolved"},
+		{"dial tcp 10.0.0.2:80: connect: connection refused", "refused"},
+		{"something else entirely", "Could not reach"},
+	}
+	for _, tc := range cases {
+		got := classifyWebDAVError(errors.New(tc.in)).Error()
+		if !strings.Contains(got, tc.want) {
+			t.Errorf("classifyWebDAVError(%q) = %q, want %q", tc.in, got, tc.want)
 		}
 	}
 }

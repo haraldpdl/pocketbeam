@@ -1,3 +1,10 @@
+// The plain CLI entry point for every target that is not the PocketBook
+// (GOARCH=arm). Keeping the constraint explicit instead of relying on a
+// _amd64 filename suffix lets the package build on arm64 and macOS hosts
+// too, so the core logic can be run and tested wherever Go runs.
+
+//go:build !arm
+
 package main
 
 import (

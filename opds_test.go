@@ -275,3 +275,76 @@ func TestFetchLevel_EmptyHrefDefaultsToRoot(t *testing.T) {
 		t.Errorf("empty href did not default to /opds; server saw %q", gotPath)
 	}
 }
+
+func TestRejectSchemeDowngrade(t *testing.T) {
+	mk := func(raw string) *http.Request {
+		r, err := http.NewRequest("GET", raw, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return r
+	}
+	via := func(n int, raw string) []*http.Request {
+		out := make([]*http.Request, n)
+		for i := range out {
+			out[i] = mk(raw)
+		}
+		return out
+	}
+	cases := []struct {
+		name    string
+		next    string
+		via     []*http.Request
+		wantErr string
+	}{
+		{"first request has no history", "http://cwa/opds", nil, ""},
+		{"https to https", "https://cwa/opds/", via(1, "https://cwa/opds"), ""},
+		{"http to http", "http://cwa/opds/", via(1, "http://cwa/opds"), ""},
+		{"http upgraded to https", "https://cwa/opds", via(1, "http://cwa/opds"), ""},
+		{"https downgraded to http", "http://cwa/opds", via(1, "https://cwa/opds"), "refusing redirect"},
+		// The downgrade check looks at the origin, not the last hop.
+		{"downgrade after an https hop", "http://cwa/x", via(2, "https://cwa/opds"), "refusing redirect"},
+		{"nine hops still allowed", "https://cwa/x", via(9, "https://cwa/opds"), ""},
+		{"ten hops is a loop", "https://cwa/x", via(10, "https://cwa/opds"), "too many redirects"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := rejectSchemeDowngrade(mk(tc.next), tc.via)
+			switch {
+			case tc.wantErr == "" && err != nil:
+				t.Errorf("got %v, want nil", err)
+			case tc.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tc.wantErr)):
+				t.Errorf("got %v, want %q", err, tc.wantErr)
+			}
+		})
+	}
+	// Credentials pasted into the URL must not surface in the error.
+	err := rejectSchemeDowngrade(mk("http://alice:hunter2@cwa/opds"), via(1, "https://cwa/opds"))
+	if err == nil || strings.Contains(err.Error(), "hunter2") {
+		t.Errorf("got %v, want a downgrade error without the password", err)
+	}
+}
+
+// The redirect policy is wired into the client's http.Client, so a
+// cleartext hop out of an https origin fails the request itself.
+func TestClient_FollowsRedirectsWithinScheme(t *testing.T) {
+	const feed = `<?xml version="1.0"?><feed ` + opdsNS + `><title>Moved</title></feed>`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/opds":
+			http.Redirect(w, r, "/opds/", http.StatusMovedPermanently)
+		case "/opds/":
+			_, _ = w.Write([]byte(feed))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	lvl, err := newOPDSClient(t, srv.URL).FetchLevel("/opds")
+	if err != nil {
+		t.Fatalf("FetchLevel through redirect: %v", err)
+	}
+	if lvl.FeedTitle != "Moved" {
+		t.Errorf("FeedTitle = %q, want Moved", lvl.FeedTitle)
+	}
+}

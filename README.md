@@ -106,7 +106,7 @@ You can edit this by hand over USB if you prefer not to go through the on-device
 
 Quality gates live in the `Makefile`. `make ci` is exactly what GitHub Actions runs: gofmt, `go vet`, staticcheck, `go mod tidy` drift, tests, an amd64 build, govulncheck, and the ARM build whenever the SDK toolchain is present. `make hooks` wires the same gates into your clone as pre-commit (`make quick`) and pre-push (`make ci`) hooks. Tests need cgo and a C compiler because of go-sqlite3. Every change goes through a pull request; `main` requires the `quality` check.
 
-A second entry point compiles for amd64 and runs the sync as a plain CLI without InkView, so you can iterate on the core logic without sideloading:
+A second entry point compiles on every architecture except ARM (the device build) and runs the sync as a plain CLI without InkView, so you can iterate on the core logic without sideloading:
 
 ```sh
 # dev build for fast iteration on a workstation or in a container
