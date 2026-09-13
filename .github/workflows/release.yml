@@ -45,6 +45,9 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          # GitHub refuses release assets with a .app extension, so only the
+          # gzip copy is published; the updater prefers it and sideloaders
+          # unpack it. SHA256SUMS still lists both files.
           gh release create "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" \
             --title "${GITHUB_REF_NAME}" --notes-file dist/notes.md \
-            dist/pocketbeam.app dist/pocketbeam.app.gz dist/SHA256SUMS
+            dist/pocketbeam.app.gz dist/SHA256SUMS
