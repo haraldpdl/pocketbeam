@@ -14,7 +14,9 @@ The stock OPDS catalog browser is regionally gated; on the German-market firmwar
 
 ## Install
 
-### 1. Build the `.app`
+### 1. Get the `.app`
+
+Download `pocketbeam.app.gz` from the [latest release](https://github.com/haraldpdl/pocketbeam/releases/latest) and unpack it (`gunzip pocketbeam.app.gz`, or any archive tool). Verify it against `SHA256SUMS` if you like. Or build it yourself:
 
 The project expects to be built inside the [`sunsung/pocketbook-go-sdk`](https://hub.docker.com/r/sunsung/pocketbook-go-sdk) Docker image, which ships the PocketBook ARMv7 cross-compile toolchain. Inside the container `make arm` builds `dist/pocketbeam.app` with the version baked in and verifies the result is an ARM binary; the plain `go build` below is the same thing spelled out:
 
