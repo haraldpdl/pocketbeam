@@ -55,21 +55,21 @@ func TestSetSessionClosesReplacedStore(t *testing.T) {
 	s.SetSession(&Config{}, nil, first)
 	s.SetSession(&Config{}, nil, second)
 
-	if _, err := first.BookCount(); err == nil {
+	if _, err := first.BookCount("/lib"); err == nil {
 		t.Error("replaced store is still open")
 	}
-	if _, err := second.BookCount(); err != nil {
+	if _, err := second.BookCount("/lib"); err != nil {
 		t.Errorf("published store is not usable: %v", err)
 	}
 
 	// Re-publishing the same store must not close it.
 	s.SetSession(&Config{}, nil, second)
-	if _, err := second.BookCount(); err != nil {
+	if _, err := second.BookCount("/lib"); err != nil {
 		t.Errorf("re-publishing the same store closed it: %v", err)
 	}
 
 	s.ClearSession()
-	if _, err := second.BookCount(); err == nil {
+	if _, err := second.BookCount("/lib"); err == nil {
 		t.Error("ClearSession left the store open")
 	}
 	if cfg, client, store := s.Session(); cfg != nil || client != nil || store != nil {

@@ -6,6 +6,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"image"
 	"path/filepath"
 
@@ -49,6 +50,9 @@ func (a *app) drawWizard() {
 		a.drawHairline(a.layout.margin, a.layout.screen.X-a.layout.margin, a.layout.sy(300))
 		body.SetActive(ink.Black)
 		ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(370)}, "Tap or press OK to re-open the keyboard.")
+		if wiz.err != nil {
+			ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(430)}, truncate(wiz.err.Error(), 60))
+		}
 		if wiz.name != "" {
 			body.SetActive(ink.DarkGray)
 			ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(480)}, "Name: "+wiz.name)
@@ -247,8 +251,18 @@ func (a *app) onKeyboardInput(text string) {
 			ink.OpenKeyboard("new-profile-name", 40)
 			return
 		}
+		if profileNameTaken(a.cfgPath, name) {
+			// Reusing a name would make SaveConfig overwrite that
+			// profile's section with a library derived without it,
+			// orphaning the books it already downloaded.
+			a.UpdateWizard(func(w *wizardState) { w.err = fmt.Errorf("profile %q already exists", name) })
+			ink.Repaint()
+			ink.OpenKeyboard("new-profile-name", 40)
+			return
+		}
 		a.UpdateWizard(func(w *wizardState) {
 			w.name = name
+			w.err = nil
 			w.step = stepBackend
 		})
 		ink.Repaint()
@@ -277,73 +291,35 @@ func (a *app) onKeyboardInput(text string) {
 // runProbe probes the server and transitions the UI on success or failure.
 // Runs on its own goroutine, so it reads the entered details as one
 // snapshot and publishes every result through the appState accessors.
+// The config to be written is assembled before the probe so the probe
+// tests exactly the backend and credentials that get saved; resolving
+// the profile being edited (and merging it) lives in config.go, where
+// amd64 tests can reach it.
 func (a *app) runProbe() {
 	in := a.Wizard()
-	// Two paths reach the probe as an edit of an existing profile rather
-	// than the creation of a new one: Settings -> "Change server info",
-	// which re-enters the wizard at the URL step for the profile in
-	// session, and the first-run screen Init falls back to when the config
-	// file parses but NewClient or OpenStore fails (a hand-edited host, an
-	// SD card that is not there yet). Neither carries a profile name, and
-	// the second has no session config either, so the file on disk is the
-	// only source. What is stored has to survive the rewrite: deriving a
-	// fresh name and library would rename the profile and point it at an
-	// empty folder, and since sync skips by UUID without checking that the
-	// file is still on disk, the books already downloaded would be neither
-	// moved nor fetched again.
-	var cur *Config
-	if !in.addProfile {
-		if cur = a.Config(); cur == nil {
-			cur, _ = LoadConfig(a.cfgPath)
-		}
-	}
-	backend := in.backend
-	if backend == "" && cur != nil {
-		// "Change server info" skips the backend step; probing a WebDAV
-		// profile as OPDS would fail, or worse, succeed and rewrite it.
-		backend = cur.Backend
-	}
-	if backend == "" {
-		backend = BackendOPDS
-	}
+	cur := resolveProfileForProbe(a.cfgPath, a.Config(), in.addProfile)
+	cfg := profileAfterProbe(a.cfgPath, cur, probeInput{
+		Profile:  in.name,
+		Backend:  in.backend,
+		Host:     in.url,
+		User:     in.user,
+		Pass:     in.pass,
+		BooksDir: filepath.Join(ink.FlashDir, "Books"),
+		StateDB:  filepath.Join(ink.ConfigPath, "pocketbeam.db"),
+	})
 	var err error
-	switch backend {
+	switch cfg.Backend {
 	case BackendWebDAV:
-		err = ProbeWebDAV(context.Background(), in.url, in.user, in.pass, "/")
+		// The root is probed rather than cfg.Path: the credentials are
+		// what is under test, and a profile scoped to a sub-directory
+		// should still be reachable from the top.
+		err = ProbeWebDAV(context.Background(), cfg.Host, cfg.User, cfg.Pass, "/")
 	default:
-		err = ProbeCWA(context.Background(), in.url, in.user, in.pass)
+		err = ProbeCWA(context.Background(), cfg.Host, cfg.User, cfg.Pass)
 	}
 	if err != nil {
 		a.failWizard(err)
 		return
-	}
-	profile, library := in.name, ""
-	if cur != nil {
-		profile, library = cur.Profile, cur.Library
-	}
-	if profile == "" {
-		profile = defaultProfileName
-	}
-	if library == "" {
-		library = libraryPathFor(a.cfgPath, filepath.Join(ink.FlashDir, "Books"), profile)
-	}
-	cfg := &Config{
-		Profile:      profile,
-		Backend:      backend,
-		Host:         in.url,
-		User:         in.user,
-		Pass:         in.pass,
-		Library:      library,
-		StateDB:      filepath.Join(ink.ConfigPath, "pocketbeam.db"),
-		CheckUpdates: true,
-	}
-	if backend == BackendWebDAV {
-		cfg.Path = "/"
-		if cur != nil && cur.Path != "" {
-			// Same reason as the library: re-entering credentials must not
-			// widen the sync from one folder to the whole DAV root.
-			cfg.Path = cur.Path
-		}
 	}
 	if err := SaveConfig(a.cfgPath, cfg); err != nil {
 		a.failWizard(err)
@@ -353,7 +329,7 @@ func (a *app) runProbe() {
 	// written but the file's `active` marker still points at the existing
 	// one. Flip it so the newly-created profile becomes the working one.
 	if in.addProfile {
-		if err := SetActiveProfile(a.cfgPath, profile); err != nil {
+		if err := SetActiveProfile(a.cfgPath, cfg.Profile); err != nil {
 			a.failWizard(err)
 			return
 		}

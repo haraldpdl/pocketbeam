@@ -120,7 +120,7 @@ func Sync(ctx context.Context, src Source, store *Store, library string, progres
 			progress(i+1, total, b)
 		}
 		old, exists := local[b.UUID]
-		if exists && !b.Updated.After(old.Updated) {
+		if exists && !b.Updated.After(old.Updated) && hasLocalCopy(library, old.LocalPath) {
 			res.Skipped++
 			continue
 		}
@@ -148,8 +148,10 @@ func Sync(ctx context.Context, src Source, store *Store, library string, progres
 		// lands at a new path; tidy up the old file so we don't accumulate
 		// duplicates on the device. Stores written before filenames were
 		// disambiguated can map another book to the old path, in which case
-		// the file is that book's only copy and must stay.
-		if exists && old.LocalPath != "" && old.LocalPath != path {
+		// the file is that book's only copy and must stay. A recorded path
+		// outside this library belongs to another profile's folder, and
+		// that copy is the only one that profile has.
+		if exists && old.LocalPath != path && underDir(library, old.LocalPath) {
 			if other, _ := store.OtherOwner(old.LocalPath, b.UUID); other == "" {
 				if err := os.Remove(old.LocalPath); err == nil {
 					// Best-effort: also remove the old author directory if it's now empty.
@@ -349,7 +351,7 @@ func Plan(ctx context.Context, src Source, store *Store, library string, opts Sy
 	}
 	for _, b := range books {
 		old, exists := local[b.UUID]
-		if exists && !b.Updated.After(old.Updated) {
+		if exists && !b.Updated.After(old.Updated) && hasLocalCopy(library, old.LocalPath) {
 			plan.Unchanged++
 			continue
 		}
@@ -409,6 +411,36 @@ func availableBytes(path string) int64 {
 	// fundamental filesystem block size. Multiply in int64 to avoid the
 	// overflow that plain int would hit on >2 GB fields on 32-bit ARM.
 	return int64(st.Bavail) * int64(st.Bsize)
+}
+
+// hasLocalCopy reports whether a book's recorded download is still usable
+// for a sync into library: the file has to sit inside that library and
+// still be on disk. The state DB is shared by every profile (state_db is
+// a global key) and keyed on UUID alone, so a row can point into another
+// profile's folder (WebDAV UUIDs are "webdav:<path>", identical for the
+// same relative path on two servers) or at a file the user deleted.
+// Skipping on the row alone would report books as skipped into an empty
+// library.
+func hasLocalCopy(library, path string) bool {
+	if !underDir(library, path) {
+		return false
+	}
+	_, err := os.Stat(path)
+	return err == nil
+}
+
+// underDir reports whether path lies inside dir. The comparison folds
+// ASCII case because the device library sits on a FAT volume, where
+// "Books/Home" and "Books/home" are one directory (see Store.OtherOwner).
+func underDir(dir, path string) bool {
+	if dir == "" || path == "" {
+		return false
+	}
+	rel, err := filepath.Rel(strings.ToLower(filepath.Clean(dir)), strings.ToLower(filepath.Clean(path)))
+	if err != nil {
+		return false
+	}
+	return rel != "." && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
 // targetPath decides where b lands in the library:

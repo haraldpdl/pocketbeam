@@ -43,7 +43,7 @@ func TestStore_UpsertAndEntriesByUUID(t *testing.T) {
 	if err := s.Upsert(b, "/lib/Author/Renamed.epub", 0); err != nil {
 		t.Fatalf("Upsert(again): %v", err)
 	}
-	if n, _ := s.BookCount(); n != 1 {
+	if n, _ := s.BookCount("/lib"); n != 1 {
 		t.Errorf("BookCount = %d, want 1 after re-upsert", n)
 	}
 	e, _ = lookup(t, s, "u1")
@@ -89,7 +89,7 @@ func TestStore_AllEntriesAndDelete(t *testing.T) {
 	if _, exists := lookup(t, s, "a"); exists {
 		t.Error("entry a still present after Delete")
 	}
-	if n, _ := s.BookCount(); n != 1 {
+	if n, _ := s.BookCount("/lib"); n != 1 {
 		t.Errorf("BookCount = %d, want 1", n)
 	}
 	// Deleting an unknown UUID is a no-op, not an error.
@@ -280,5 +280,39 @@ func TestStore_OtherOwner(t *testing.T) {
 	}
 	if got, _ := s.OtherOwner("/lib/Au/T.epub", "u1"); got != "u2" {
 		t.Errorf("OtherOwner with two rows, except u1 = %q, want u2", got)
+	}
+}
+
+// The state DB is shared by every profile, so the main screen's count has
+// to be restricted to the library of the profile it is showing.
+func TestStore_BookCountScopedToLibrary(t *testing.T) {
+	s, dir := openTempStore(t)
+	defer s.Close()
+	home := filepath.Join(dir, "Books", "home")
+	nas := filepath.Join(dir, "Books", "nas")
+
+	seed := []struct {
+		uuid, path string
+	}{
+		{"a", filepath.Join(home, "Author", "A.epub")},
+		{"b", filepath.Join(home, "Author", "B.epub")},
+		{"c", filepath.Join(nas, "Author", "C.epub")},
+	}
+	for _, e := range seed {
+		if err := s.Upsert(Book{UUID: e.uuid, Title: e.uuid, Author: "Author", Updated: time.Unix(0, 0)}, e.path, 1); err != nil {
+			t.Fatalf("Upsert: %v", err)
+		}
+	}
+	for _, tc := range []struct {
+		library string
+		want    int
+	}{{home, 2}, {nas, 1}, {filepath.Join(dir, "Books", "other"), 0}} {
+		got, err := s.BookCount(tc.library)
+		if err != nil {
+			t.Fatalf("BookCount(%q): %v", tc.library, err)
+		}
+		if got != tc.want {
+			t.Errorf("BookCount(%q) = %d, want %d", tc.library, got, tc.want)
+		}
 	}
 }

@@ -259,3 +259,168 @@ func TestLibraryPathForAvoidsExistingLibraries(t *testing.T) {
 		t.Errorf("libraryPathFor(first run) = %q, want /mnt/ext1/Books/default", got)
 	}
 }
+
+// A legacy install's library differs only in case from what a new profile
+// derives. The device's FAT storage cannot tell the two apart, so the
+// collision has to be detected with case folded.
+func TestLibraryPathForFoldsCase(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "pocketbeam.cfg")
+	cfg := "active = legacy\nstate_db = /db.sqlite\n\n" +
+		"[legacy]\nhost = http://one.lan\nlibrary = /mnt/ext1/Books/CWA\n"
+	if err := os.WriteFile(path, []byte(cfg), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if got := libraryPathFor(path, "/mnt/ext1/Books", "cwa"); got != "/mnt/ext1/Books/cwa-2" {
+		t.Errorf("libraryPathFor(cwa) = %q, want /mnt/ext1/Books/cwa-2", got)
+	}
+}
+
+func TestProfileNameTaken(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "pocketbeam.cfg")
+	cfg := "active = home\nstate_db = /db.sqlite\n\n" +
+		"[home]\nhost = http://one.lan\nlibrary = /mnt/ext1/Books/CWA\n"
+	if err := os.WriteFile(path, []byte(cfg), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	cases := []struct {
+		name string
+		want bool
+	}{
+		{"home", true},
+		{"HOME", true}, // one folder on FAT, so one name here too
+		{"nas", false},
+	}
+	for _, tc := range cases {
+		if got := profileNameTaken(path, tc.name); got != tc.want {
+			t.Errorf("profileNameTaken(%q) = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+	// Nothing to clash with before the first profile exists.
+	if profileNameTaken(filepath.Join(dir, "absent.cfg"), "home") {
+		t.Error("profileNameTaken on a missing file = true, want false")
+	}
+}
+
+func TestResolveProfileForProbe(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "pocketbeam.cfg")
+	cfg := "active = home\nstate_db = /db.sqlite\n\n" +
+		"[home]\nbackend = webdav\nhost = http://one.lan\nlibrary = /mnt/ext1/Books/CWA\n"
+	if err := os.WriteFile(path, []byte(cfg), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	session := &Config{Profile: "session", Host: "http://session.lan"}
+
+	// Adding a profile never reuses another one, session or not.
+	if got := resolveProfileForProbe(path, session, true); got != nil {
+		t.Errorf("addProfile: got %+v, want nil", got)
+	}
+	// Editing prefers the profile in session.
+	if got := resolveProfileForProbe(path, session, false); got != session {
+		t.Errorf("with session: got %+v, want the session config", got)
+	}
+	// No session (the app fell back to the wizard after a client or store
+	// failure): the file on disk is the source.
+	got := resolveProfileForProbe(path, nil, false)
+	if got == nil || got.Profile != "home" {
+		t.Fatalf("without session: got %+v, want the stored home profile", got)
+	}
+	// No session and no readable config: a fresh install.
+	if got := resolveProfileForProbe(filepath.Join(dir, "absent.cfg"), nil, false); got != nil {
+		t.Errorf("first run: got %+v, want nil", got)
+	}
+}
+
+func TestProfileAfterProbeKeepsStoredProfile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "pocketbeam.cfg")
+	cur := &Config{
+		Profile:       "home",
+		Backend:       BackendWebDAV,
+		Host:          "http://old.lan",
+		User:          "old",
+		Pass:          "old",
+		Library:       "/mnt/ext1/Books/CWA",
+		StateDB:       "/mnt/ext1/system/config/pocketbeam.db",
+		Path:          "/Books/Fiction",
+		DeleteMissing: true,
+		FilterHrefs:   []string{"/opds/shelf/3"},
+		FilterNames:   []string{"Shelf"},
+	}
+	got := profileAfterProbe(path, cur, probeInput{
+		Host: "http://new.lan", User: "new", Pass: "secret",
+		BooksDir: "/mnt/ext1/Books", StateDB: "/other.db",
+	})
+	if got.Host != "http://new.lan" || got.User != "new" || got.Pass != "secret" {
+		t.Errorf("connection details not applied: %+v", got)
+	}
+	// "Change server info" skips the backend step and asks for nothing
+	// else, so everything the wizard did not collect stays as stored.
+	if got.Backend != BackendWebDAV {
+		t.Errorf("Backend = %q, want webdav (probing it as OPDS would fail)", got.Backend)
+	}
+	if got.Profile != "home" || got.Library != "/mnt/ext1/Books/CWA" {
+		t.Errorf("profile/library changed: %q / %q", got.Profile, got.Library)
+	}
+	if got.Path != "/Books/Fiction" {
+		t.Errorf("Path = %q, want the stored sub-directory", got.Path)
+	}
+	if !got.DeleteMissing || !reflect.DeepEqual(got.FilterHrefs, cur.FilterHrefs) ||
+		!reflect.DeepEqual(got.FilterNames, cur.FilterNames) {
+		t.Errorf("settings dropped: %+v", got)
+	}
+	if got.StateDB != cur.StateDB {
+		t.Errorf("StateDB = %q, want the configured %q", got.StateDB, cur.StateDB)
+	}
+	if cur.Host != "http://old.lan" {
+		t.Errorf("the stored config was mutated in place: %+v", cur)
+	}
+}
+
+func TestProfileAfterProbeNewProfile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "pocketbeam.cfg")
+	cfg := "active = home\nstate_db = /db.sqlite\ncheck_updates = off\n\n" +
+		"[home]\nhost = http://one.lan\nlibrary = /mnt/ext1/Books/home\n"
+	if err := os.WriteFile(path, []byte(cfg), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	got := profileAfterProbe(path, nil, probeInput{
+		Profile: "nas", Backend: BackendWebDAV,
+		Host: "http://two.lan", User: "u", Pass: "p",
+		BooksDir: "/mnt/ext1/Books", StateDB: "/mnt/ext1/system/config/pocketbeam.db",
+	})
+	if got.Profile != "nas" || got.Library != "/mnt/ext1/Books/nas" {
+		t.Errorf("profile/library = %q / %q, want nas / /mnt/ext1/Books/nas", got.Profile, got.Library)
+	}
+	if got.Path != "/" {
+		t.Errorf("Path = %q, want / for a new WebDAV profile", got.Path)
+	}
+	if got.StateDB != "/db.sqlite" {
+		t.Errorf("StateDB = %q, want the file's global /db.sqlite", got.StateDB)
+	}
+	// check_updates is a global key that SaveConfig rewrites from the
+	// config it is handed; adding a profile must not switch it back on.
+	if got.CheckUpdates {
+		t.Error("CheckUpdates = true, want the file's explicit off")
+	}
+}
+
+func TestProfileAfterProbeFirstRun(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "absent.cfg")
+	got := profileAfterProbe(path, nil, probeInput{
+		Host: "http://one.lan", BooksDir: "/mnt/ext1/Books", StateDB: "/state.db",
+	})
+	if got.Profile != defaultProfileName || got.Library != "/mnt/ext1/Books/default" {
+		t.Errorf("profile/library = %q / %q, want default / /mnt/ext1/Books/default", got.Profile, got.Library)
+	}
+	if got.Backend != BackendOPDS {
+		t.Errorf("Backend = %q, want opds", got.Backend)
+	}
+	if got.StateDB != "/state.db" || !got.CheckUpdates {
+		t.Errorf("StateDB/CheckUpdates = %q / %v, want /state.db / true", got.StateDB, got.CheckUpdates)
+	}
+}

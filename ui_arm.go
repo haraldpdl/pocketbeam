@@ -354,7 +354,11 @@ func (a *app) refreshMainStats() {
 		return
 	}
 	sum, haveSum, sumErr := store.LastSync()
-	count, countErr := store.BookCount()
+	library := ""
+	if cfg := a.Config(); cfg != nil {
+		library = cfg.Library
+	}
+	count, countErr := store.BookCount(library)
 	a.UpdateStats(func(st *mainStats) {
 		if sumErr == nil && haveSum {
 			st.lastSync = sum

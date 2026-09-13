@@ -74,11 +74,23 @@ func OpenStore(path string) (*Store, error) {
 	return &Store{db: db}, nil
 }
 
-// BookCount returns the number of books tracked locally.
-func (s *Store) BookCount() (int, error) {
-	var n int
-	err := s.db.QueryRow(`SELECT COUNT(*) FROM books`).Scan(&n)
-	return n, err
+// BookCount returns the number of tracked books whose file lives under
+// library. The state DB is shared by every profile, so an unfiltered
+// count would tell the main screen the sum of all profiles' libraries.
+// Filtering happens in Go rather than in SQL because the containment
+// rule (FAT case folding) is the same one the sync diff applies.
+func (s *Store) BookCount(library string) (int, error) {
+	entries, err := s.AllEntries()
+	if err != nil {
+		return 0, err
+	}
+	n := 0
+	for _, e := range entries {
+		if underDir(library, e.LocalPath) {
+			n++
+		}
+	}
+	return n, nil
 }
 
 // SetLastSync persists the outcome of the most recent sync run.

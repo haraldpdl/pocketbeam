@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -129,5 +130,115 @@ func TestShortID(t *testing.T) {
 	}
 	if a != shortID("webdav:x/Book.epub") {
 		t.Errorf("shortID not deterministic")
+	}
+}
+
+func TestUnderDir(t *testing.T) {
+	cases := []struct {
+		dir, path string
+		want      bool
+	}{
+		{"/mnt/ext1/Books/home", "/mnt/ext1/Books/home/Author/Title.epub", true},
+		{"/mnt/ext1/Books/home", "/mnt/ext1/Books/HOME/Author/Title.epub", true}, // FAT folds case
+		{"/mnt/ext1/Books/home", "/mnt/ext1/Books/home2/Author/Title.epub", false},
+		{"/mnt/ext1/Books/home", "/mnt/ext1/Books/nas/Author/Title.epub", false},
+		{"/mnt/ext1/Books/home", "/mnt/ext1/Books/home", false}, // the directory itself is not a book
+		{"/mnt/ext1/Books/home", "", false},
+		{"", "/mnt/ext1/Books/home/Author/Title.epub", false},
+	}
+	for _, tc := range cases {
+		if got := underDir(tc.dir, tc.path); got != tc.want {
+			t.Errorf("underDir(%q, %q) = %v, want %v", tc.dir, tc.path, got, tc.want)
+		}
+	}
+}
+
+// A tracked book whose file is gone from the library has to be fetched
+// again. Sync skipped on the store row alone, so a user who deleted books
+// from the device saw "Skipped N, Downloaded 0" and an empty folder.
+func TestSync_RefetchesBookMissingFromDisk(t *testing.T) {
+	store, dir := openTempStore(t)
+	defer store.Close()
+	library := filepath.Join(dir, "lib")
+
+	src := &fakeSource{books: []Book{makeBook("uuid-a", "Author", "A", "http://x/a")}}
+	if res := Sync(context.Background(), src, store, library, nil, SyncOptions{}); res.Downloaded != 1 {
+		t.Fatalf("seed sync: %+v", res)
+	}
+	e, ok := lookup(t, store, "uuid-a")
+	if !ok {
+		t.Fatal("book not tracked after seed sync")
+	}
+	if err := os.Remove(e.LocalPath); err != nil {
+		t.Fatalf("remove: %v", err)
+	}
+
+	res := Sync(context.Background(), src, store, library, nil, SyncOptions{})
+	if res.Downloaded != 1 || res.Skipped != 0 {
+		t.Errorf("second sync = %+v, want Downloaded 1 / Skipped 0", res)
+	}
+	if _, err := os.Stat(e.LocalPath); err != nil {
+		t.Errorf("book not back on disk: %v", err)
+	}
+}
+
+// The state DB is shared by every profile and keyed on UUID alone, so a
+// second profile with its own library finds rows pointing into the first
+// profile's folder. It must download its own copies and leave the other
+// profile's files alone.
+func TestSync_SecondLibraryGetsItsOwnCopies(t *testing.T) {
+	store, dir := openTempStore(t)
+	defer store.Close()
+	first := filepath.Join(dir, "Books", "home")
+	second := filepath.Join(dir, "Books", "nas")
+
+	// Two WebDAV servers with the same relative path produce the same
+	// synthetic UUID (see webdav.go), which is how the two profiles
+	// collide in the shared store.
+	src := &fakeSource{books: []Book{makeBook("webdav:/Books/A.epub", "Author", "A", "http://one/a")}}
+	if res := Sync(context.Background(), src, store, first, nil, SyncOptions{}); res.Downloaded != 1 {
+		t.Fatalf("first profile sync: %+v", res)
+	}
+	firstCopy := filepath.Join(first, "Author", "A.epub")
+	if _, err := os.Stat(firstCopy); err != nil {
+		t.Fatalf("first profile copy missing: %v", err)
+	}
+
+	res := Sync(context.Background(), src, store, second, nil, SyncOptions{})
+	if res.Downloaded != 1 || res.Skipped != 0 {
+		t.Errorf("second profile sync = %+v, want Downloaded 1 / Skipped 0", res)
+	}
+	if _, err := os.Stat(filepath.Join(second, "Author", "A.epub")); err != nil {
+		t.Errorf("second profile copy missing: %v", err)
+	}
+	if _, err := os.Stat(firstCopy); err != nil {
+		t.Errorf("the other profile's copy was deleted: %v", err)
+	}
+}
+
+// Plan and Sync have to agree on what a run will do, so the same
+// containment check applies to the pre-flight estimate.
+func TestPlan_CountsBookOutsideLibraryAsDownload(t *testing.T) {
+	store, dir := openTempStore(t)
+	defer store.Close()
+	first := filepath.Join(dir, "Books", "home")
+	second := filepath.Join(dir, "Books", "nas")
+
+	t0 := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	book := makeBookSized("webdav:/Books/A.epub", "A", 100, t0)
+	src := &fakeSource{books: []Book{book}}
+	if res := Sync(context.Background(), src, store, first, nil, SyncOptions{}); res.Downloaded != 1 {
+		t.Fatalf("first profile sync: %+v", res)
+	}
+
+	plan, _, err := Plan(context.Background(), src, store, second, SyncOptions{})
+	if err != nil {
+		t.Fatalf("Plan: %v", err)
+	}
+	if plan.Unchanged != 0 || len(plan.NewBooks)+len(plan.UpdatedBooks) != 1 {
+		t.Errorf("plan = %+v, want the book queued for download", plan)
+	}
+	if plan.DownloadBytes == 0 {
+		t.Error("DownloadBytes = 0, want the book's size")
 	}
 }

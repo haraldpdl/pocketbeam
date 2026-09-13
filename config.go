@@ -48,8 +48,10 @@ func libraryFolderName(profile string) string {
 // path. The filter is lossy ("a:b" and "a?b" both reduce to "a_b", and a
 // name of only dots reduces to "default"), so two differently named
 // profiles can derive one folder, and two servers writing into the same
-// directory is exactly what per-profile folders exist to prevent. An
-// unreadable config file leaves nothing to collide with.
+// directory is exactly what per-profile folders exist to prevent. Taken
+// paths are compared with ASCII case folded because the device storage is
+// FAT: a legacy "Books/CWA" and a derived "Books/cwa" are one directory.
+// An unreadable config file leaves nothing to collide with.
 func libraryPathFor(cfgPath, booksDir, profile string) string {
 	base := filepath.Join(booksDir, libraryFolderName(profile))
 	taken := map[string]bool{}
@@ -60,16 +62,118 @@ func libraryPathFor(cfgPath, booksDir, profile string) string {
 			}
 			for _, row := range rows {
 				if row.key == "library" && row.value != "" {
-					taken[row.value] = true
+					taken[strings.ToLower(row.value)] = true
 				}
 			}
 		}
 	}
 	path := base
-	for n := 2; taken[path]; n++ {
+	for n := 2; taken[strings.ToLower(path)]; n++ {
 		path = fmt.Sprintf("%s-%d", base, n)
 	}
 	return path
+}
+
+// profileNameTaken reports whether the config file already holds a
+// profile called name. The wizard rejects a duplicate rather than
+// letting SaveConfig overwrite the existing section, which would repoint
+// that profile at a freshly derived library and orphan its books. Names
+// are compared with ASCII case folded for the same reason library paths
+// are: two profiles that differ only in case would fight over one folder
+// on the device's FAT storage. A file that does not exist yet (or does
+// not parse) holds no names to clash with.
+func profileNameTaken(cfgPath, name string) bool {
+	names, _, err := ListProfiles(cfgPath)
+	if err != nil {
+		return false
+	}
+	for _, n := range names {
+		if strings.EqualFold(n, name) {
+			return true
+		}
+	}
+	return false
+}
+
+// probeInput carries the connection details the setup wizard collected,
+// ready to be merged into the profile that gets written once the probe
+// succeeds. Profile is empty when the wizard is editing an existing
+// profile, Backend when the entry point skipped the backend question.
+type probeInput struct {
+	Profile  string
+	Backend  string
+	Host     string
+	User     string
+	Pass     string
+	BooksDir string // parent directory of a newly derived library folder
+	StateDB  string // default state DB path, used only when none is configured
+}
+
+// resolveProfileForProbe returns the stored profile the wizard is about
+// to rewrite, or nil when it is creating a new one. Two entry points
+// reach the probe as an edit: Settings -> "Change server info", which
+// re-enters the wizard at the URL step with the active profile in
+// session, and the first-run screen the app falls back to when the config
+// file parses but the client or the store cannot be opened (a hand-edited
+// host, an SD card that is not in the device yet). The second has no
+// session, so the file on disk is the only source.
+func resolveProfileForProbe(cfgPath string, session *Config, addProfile bool) *Config {
+	if addProfile {
+		return nil
+	}
+	if session != nil {
+		return session
+	}
+	cur, err := LoadConfig(cfgPath)
+	if err != nil {
+		return nil
+	}
+	return cur
+}
+
+// profileAfterProbe returns the config to persist once the probe
+// succeeds: the profile being edited with the newly entered connection
+// details written over it, or a new profile when cur is nil. Everything
+// the wizard does not ask about is carried over, because re-entering a
+// URL and password must not silently widen the next sync (dropping an
+// OPDS feed filter or a WebDAV sub-path) or flip a setting the user made
+// (delete-missing, update checks). For a new profile the file's global
+// keys are read off disk for the same reason: state_db, check_updates
+// and update_url are shared by every profile and SaveConfig rewrites
+// them from whatever config it is handed, so adding a profile would
+// otherwise move the whole install's state DB and re-enable update
+// checks. in.StateDB is only the default for an install that has none.
+func profileAfterProbe(cfgPath string, cur *Config, in probeInput) *Config {
+	cfg := &Config{CheckUpdates: true}
+	if cur != nil {
+		c := *cur
+		cfg = &c
+	} else if disk, err := LoadConfig(cfgPath); err == nil {
+		cfg.StateDB, cfg.CheckUpdates, cfg.UpdateURL = disk.StateDB, disk.CheckUpdates, disk.UpdateURL
+	}
+	if in.Profile != "" {
+		cfg.Profile = in.Profile
+	}
+	if cfg.Profile == "" {
+		cfg.Profile = defaultProfileName
+	}
+	if in.Backend != "" {
+		cfg.Backend = in.Backend
+	}
+	if cfg.Backend == "" {
+		cfg.Backend = BackendOPDS
+	}
+	cfg.Host, cfg.User, cfg.Pass = in.Host, in.User, in.Pass
+	if cfg.StateDB == "" {
+		cfg.StateDB = in.StateDB
+	}
+	if cfg.Library == "" {
+		cfg.Library = libraryPathFor(cfgPath, in.BooksDir, cfg.Profile)
+	}
+	if cfg.Backend == BackendWebDAV && cfg.Path == "" {
+		cfg.Path = "/"
+	}
+	return cfg
 }
 
 // defaultUpdateURL is the release endpoint queried when check_updates is
