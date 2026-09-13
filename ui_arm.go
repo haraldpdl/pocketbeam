@@ -51,14 +51,6 @@ func (p *pickerFetch) restart() (context.Context, context.CancelFunc) {
 	return ctx, cancel
 }
 
-// tapDebounce is the minimum gap between two pointer events that will
-// both be treated as taps. PocketBook sometimes fires only a PointerDown
-// or only a PointerUp for a glancing touch; the bottom-row Network
-// button was the most visible victim. Reacting to both event states and
-// dropping close duplicates gives every tap a chance to land without
-// letting a genuine down+up pair fire the same action twice.
-const tapDebounce = 250 * time.Millisecond
-
 // app implements ink.App for the pocketbeam device UI. The state shared
 // with background goroutines lives in the embedded appState; everything
 // declared here is either fixed at startup or touched by the InkView
@@ -78,7 +70,8 @@ type app struct {
 	libRefresh    libRefreshState
 	netStop       func()
 	layout        layout
-	lastTap       time.Time
+	// taps gates the pointer stream for every screen; see taps.go.
+	taps tapGate
 	// hourglass tracks whether InkView is currently showing the busy
 	// icon, so it is only taken down by the screen that raised it.
 	// Touched from the event loop only (draw passes and Draw itself).
@@ -104,20 +97,26 @@ func (a *app) hideHourglass() {
 	ink.HideHourglass()
 }
 
-// acceptTap returns true if the event should be treated as a tap. Accepts
-// PointerDown OR PointerUp to maximise the chance a glancing touch
-// registers, but drops any event within tapDebounce of the previous
-// accepted one so a normal down+up pair fires the handler exactly once.
+// acceptTap reports whether a pointer event should fire a tap handler.
+// Called once per event in Pointer, ahead of the dispatch, so the gate
+// sees whole touches even when one screen hands over to another
+// mid-touch.
 func (a *app) acceptTap(e ink.PointerEvent) bool {
-	if e.State != ink.PointerDown && e.State != ink.PointerUp {
-		return false
+	return a.taps.accept(pointerPhase(e.State), time.Now())
+}
+
+// pointerPhase maps an InkView pointer state onto the portable phase the
+// gate reasons about. Move, long and hold are carried by tapOther: they
+// belong to a touch that is already open, not to a new tap.
+func pointerPhase(s ink.PointerState) tapPhase {
+	switch s {
+	case ink.PointerDown:
+		return tapPress
+	case ink.PointerUp:
+		return tapRelease
+	default:
+		return tapOther
 	}
-	now := time.Now()
-	if now.Sub(a.lastTap) < tapDebounce {
-		return false
-	}
-	a.lastTap = now
-	return true
 }
 
 func newApp() *app {
@@ -289,7 +288,20 @@ func (a *app) Key(e ink.KeyEvent) bool {
 }
 
 func (a *app) Pointer(e ink.PointerEvent) bool {
-	switch a.Screen() {
+	cur := a.Screen()
+	// One gate for the whole app: the screen handlers below see taps,
+	// never raw pointer events. Library refresh is modal and hands the
+	// foreground to the PocketBook scanner, so it swallows everything
+	// either way, but its events still go through the gate so the
+	// press/release pairing survives into the screen that follows.
+	tap := a.acceptTap(e)
+	if cur == screenLibraryRefresh {
+		return true
+	}
+	if !tap {
+		return false
+	}
+	switch cur {
 	case screenFirstRun:
 		return a.wizardPointer(e)
 	case screenMain:
@@ -310,8 +322,6 @@ func (a *app) Pointer(e ink.PointerEvent) bool {
 		return a.profileDetailPointer(e)
 	case screenUpdate:
 		return a.updatePointer(e)
-	case screenLibraryRefresh:
-		return true
 	}
 	return false
 }

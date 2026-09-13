@@ -307,9 +307,6 @@ func (a *app) updateKey(e ink.KeyEvent) bool {
 }
 
 func (a *app) updatePointer(e ink.PointerEvent) bool {
-	if e.State != ink.PointerDown {
-		return false
-	}
 	a.update.mu.Lock()
 	installBtn := a.update.installBtn
 	checkBtn := a.update.checkBtn

@@ -248,9 +248,6 @@ func (a *app) mainKey(e ink.KeyEvent) bool {
 }
 
 func (a *app) mainPointer(e ink.PointerEvent) bool {
-	if !a.acceptTap(e) {
-		return false
-	}
 	p := e.Point
 	// During an active sync the only tap target is the Sync button,
 	// which doubles as Cancel.

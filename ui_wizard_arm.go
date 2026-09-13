@@ -172,9 +172,6 @@ func (a *app) wizardKey(e ink.KeyEvent) bool {
 }
 
 func (a *app) wizardPointer(e ink.PointerEvent) bool {
-	if e.State != ink.PointerDown {
-		return false
-	}
 	wiz := a.Wizard()
 	switch wiz.step {
 	case stepWelcome:

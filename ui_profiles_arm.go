@@ -154,9 +154,6 @@ func (a *app) profileListKey(e ink.KeyEvent) bool {
 }
 
 func (a *app) profileListPointer(e ink.PointerEvent) bool {
-	if e.State != ink.PointerDown {
-		return false
-	}
 	if e.Point.In(a.layout.backButton) {
 		a.SetScreen(screenSettings)
 		ink.Repaint()
@@ -408,9 +405,6 @@ func (a *app) profileDetailKey(e ink.KeyEvent) bool {
 }
 
 func (a *app) profileDetailPointer(e ink.PointerEvent) bool {
-	if e.State != ink.PointerDown {
-		return false
-	}
 	if e.Point.In(a.layout.backButton) {
 		a.SetScreen(screenProfileList)
 		ink.Repaint()

@@ -241,9 +241,6 @@ func (a *app) dirPickerKey(e ink.KeyEvent) bool {
 }
 
 func (a *app) dirPickerPointer(e ink.PointerEvent) bool {
-	if e.State != ink.PointerDown {
-		return false
-	}
 	if e.Point.In(a.layout.backButton) {
 		a.SetScreen(screenSettings)
 		ink.Repaint()

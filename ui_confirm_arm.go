@@ -174,9 +174,6 @@ func (a *app) spaceWarnKey(e ink.KeyEvent) bool {
 }
 
 func (a *app) spaceWarnPointer(e ink.PointerEvent) bool {
-	if e.State != ink.PointerDown {
-		return false
-	}
 	a.spaceWarn.mu.Lock()
 	yes := a.spaceWarn.yesRect
 	no := a.spaceWarn.noRect
@@ -304,9 +301,6 @@ func (a *app) deleteConfirmKey(e ink.KeyEvent) bool {
 }
 
 func (a *app) deleteConfirmPointer(e ink.PointerEvent) bool {
-	if e.State != ink.PointerDown {
-		return false
-	}
 	a.delConfirm.mu.Lock()
 	yes := a.delConfirm.yesRect
 	no := a.delConfirm.noRect

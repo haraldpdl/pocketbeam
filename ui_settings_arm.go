@@ -98,9 +98,6 @@ func (a *app) settingsKey(e ink.KeyEvent) bool {
 }
 
 func (a *app) settingsPointer(e ink.PointerEvent) bool {
-	if e.State != ink.PointerDown {
-		return false
-	}
 	p := e.Point
 	switch {
 	case p.In(a.layout.serverRow):

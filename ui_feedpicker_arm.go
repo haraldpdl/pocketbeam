@@ -402,9 +402,6 @@ func (a *app) shelfPickerKey(e ink.KeyEvent) bool {
 }
 
 func (a *app) shelfPickerPointer(e ink.PointerEvent) bool {
-	if e.State != ink.PointerDown {
-		return false
-	}
 	if e.Point.In(a.layout.backButton) {
 		a.SetScreen(screenSettings)
 		ink.Repaint()
