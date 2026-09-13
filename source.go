@@ -31,7 +31,12 @@ type OPDSSource struct {
 	FilterHrefs []string
 }
 
+// List detects the server type right before walking so the walk picks
+// the CWA fast path when it applies. Detection lives here rather than in
+// newSource so constructing a source never touches the network; a
+// failed detection is not fatal, the generic walker still works.
 func (s *OPDSSource) List(ctx context.Context) ([]Book, error) {
+	_ = s.Client.DetectType()
 	if len(s.FilterHrefs) == 0 {
 		return s.Client.WalkAll()
 	}
@@ -58,7 +63,7 @@ func (s *OPDSSource) Fetch(ctx context.Context, b Book) (io.ReadCloser, error) {
 }
 
 // newSource constructs the source implied by the config, dispatching on
-// cfg.Backend.
+// cfg.Backend. It performs no I/O; the first List call does.
 func newSource(cfg *Config) (Source, error) {
 	switch cfg.Backend {
 	case "", BackendOPDS:
@@ -66,7 +71,6 @@ func newSource(cfg *Config) (Source, error) {
 		if err != nil {
 			return nil, err
 		}
-		_ = client.DetectType()
 		return &OPDSSource{Client: client, FilterHrefs: cfg.FilterHrefs}, nil
 	case BackendWebDAV:
 		return NewWebDAVSource(cfg.Host, cfg.User, cfg.Pass, cfg.Path), nil
