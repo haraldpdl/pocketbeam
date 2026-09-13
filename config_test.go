@@ -204,15 +204,58 @@ func TestConfigMultiFilterRoundTrip(t *testing.T) {
 func TestLibraryFolderName(t *testing.T) {
 	cases := []struct{ in, want string }{
 		{"home", "home"},
-		{"Nextcloud Books", "Nextcloud Books"}, // spaces survive, they are legal on vfat
-		{"sci/fi:shelf", "sci_fi_shelf"},       // path separators and FAT-illegal chars
-		{"  spaced  ", "spaced"},               // outer whitespace trimmed
-		{"", "default"},                        // no name at all
-		{"...", "default"},                     // filters away to nothing
+		{"sci/fi:shelf", "sci_fi_shelf"}, // path separators and FAT-illegal chars
+		{"", "default"},                  // no name at all
+		{"...", "default"},               // filters away to nothing
 	}
 	for _, tc := range cases {
 		if got := libraryFolderName(tc.in); got != tc.want {
 			t.Errorf("libraryFolderName(%q) = %q, want %q", tc.in, got, tc.want)
 		}
+	}
+}
+
+// TestProfileNameToLibraryFolder covers the composition the device runs:
+// keyboard input becomes a profile name through sanitizeProfileName, and
+// only that name reaches libraryFolderName.
+func TestProfileNameToLibraryFolder(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"Nextcloud Books", "Nextcloud-Books"}, // spaces become dashes in the name itself
+		{"  spaced  ", "spaced"},               // outer whitespace is gone before the filter
+		{"sci/fi", "sci_fi"},                   // the filter still has to catch separators
+		{"...", "default"},
+	}
+	for _, tc := range cases {
+		if got := libraryFolderName(sanitizeProfileName(tc.in)); got != tc.want {
+			t.Errorf("libraryFolderName(sanitizeProfileName(%q)) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+func TestLibraryPathForAvoidsExistingLibraries(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "pocketbeam.cfg")
+	cfg := "active = a:b\nstate_db = /db.sqlite\n\n" +
+		"[a:b]\nhost = http://one.lan\nlibrary = /mnt/ext1/Books/a_b\n\n" +
+		"[a?b]\nhost = http://two.lan\nlibrary = /mnt/ext1/Books/a_b-2\n"
+	if err := os.WriteFile(path, []byte(cfg), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	books := "/mnt/ext1/Books"
+	// A third name that filters to the same folder skips both taken ones.
+	if got := libraryPathFor(path, books, "a*b"); got != "/mnt/ext1/Books/a_b-3" {
+		t.Errorf("libraryPathFor(a*b) = %q, want /mnt/ext1/Books/a_b-3", got)
+	}
+	// A profile does not collide with itself: re-deriving keeps the folder.
+	if got := libraryPathFor(path, books, "a:b"); got != "/mnt/ext1/Books/a_b" {
+		t.Errorf("libraryPathFor(a:b) = %q, want /mnt/ext1/Books/a_b", got)
+	}
+	// An unrelated name is untouched, and so is the first run, where the
+	// config file does not exist yet.
+	if got := libraryPathFor(path, books, "nas"); got != "/mnt/ext1/Books/nas" {
+		t.Errorf("libraryPathFor(nas) = %q, want /mnt/ext1/Books/nas", got)
+	}
+	if got := libraryPathFor(filepath.Join(dir, "absent.cfg"), books, "default"); got != "/mnt/ext1/Books/default" {
+		t.Errorf("libraryPathFor(first run) = %q, want /mnt/ext1/Books/default", got)
 	}
 }

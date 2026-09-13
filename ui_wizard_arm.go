@@ -8,7 +8,6 @@ import (
 	"context"
 	"image"
 	"path/filepath"
-	"strings"
 
 	ink "github.com/dennwc/inkview"
 )
@@ -275,22 +274,35 @@ func (a *app) onKeyboardInput(text string) {
 	}
 }
 
-// sanitizeProfileName strips whitespace and characters that would confuse
-// the config-file section parser (brackets, equals). Empty input returns
-// "" so the wizard can re-ask.
-func sanitizeProfileName(s string) string {
-	s = strings.TrimSpace(s)
-	s = strings.ReplaceAll(s, " ", "-")
-	s = strings.Trim(s, "[]=")
-	return s
-}
-
 // runProbe probes the server and transitions the UI on success or failure.
 // Runs on its own goroutine, so it reads the entered details as one
 // snapshot and publishes every result through the appState accessors.
 func (a *app) runProbe() {
 	in := a.Wizard()
+	// Two paths reach the probe as an edit of an existing profile rather
+	// than the creation of a new one: Settings -> "Change server info",
+	// which re-enters the wizard at the URL step for the profile in
+	// session, and the first-run screen Init falls back to when the config
+	// file parses but NewClient or OpenStore fails (a hand-edited host, an
+	// SD card that is not there yet). Neither carries a profile name, and
+	// the second has no session config either, so the file on disk is the
+	// only source. What is stored has to survive the rewrite: deriving a
+	// fresh name and library would rename the profile and point it at an
+	// empty folder, and since sync skips by UUID without checking that the
+	// file is still on disk, the books already downloaded would be neither
+	// moved nor fetched again.
+	var cur *Config
+	if !in.addProfile {
+		if cur = a.Config(); cur == nil {
+			cur, _ = LoadConfig(a.cfgPath)
+		}
+	}
 	backend := in.backend
+	if backend == "" && cur != nil {
+		// "Change server info" skips the backend step; probing a WebDAV
+		// profile as OPDS would fail, or worse, succeed and rewrite it.
+		backend = cur.Backend
+	}
 	if backend == "" {
 		backend = BackendOPDS
 	}
@@ -305,21 +317,15 @@ func (a *app) runProbe() {
 		a.failWizard(err)
 		return
 	}
-	profile := in.name
-	library := ""
-	if cur := a.Config(); cur != nil && !in.addProfile {
-		// "Change server info" re-enters the wizard at the URL step for
-		// the profile already in session, so it carries no name: keep
-		// that profile's name and library folder instead of deriving a
-		// new one, which would leave the books it already synced behind
-		// in the old folder.
+	profile, library := in.name, ""
+	if cur != nil {
 		profile, library = cur.Profile, cur.Library
 	}
 	if profile == "" {
 		profile = defaultProfileName
 	}
 	if library == "" {
-		library = filepath.Join(ink.FlashDir, "Books", libraryFolderName(profile))
+		library = libraryPathFor(a.cfgPath, filepath.Join(ink.FlashDir, "Books"), profile)
 	}
 	cfg := &Config{
 		Profile:      profile,
@@ -333,6 +339,11 @@ func (a *app) runProbe() {
 	}
 	if backend == BackendWebDAV {
 		cfg.Path = "/"
+		if cur != nil && cur.Path != "" {
+			// Same reason as the library: re-entering credentials must not
+			// widen the sync from one folder to the whole DAV root.
+			cfg.Path = cur.Path
+		}
 	}
 	if err := SaveConfig(a.cfgPath, cfg); err != nil {
 		a.failWizard(err)

@@ -22,14 +22,54 @@ const (
 // the wizard creates.
 const defaultProfileName = "default"
 
-// libraryFolderName returns the folder under <flash>/Books that holds a
-// profile's downloaded books. Naming it after the profile keeps two
+// sanitizeProfileName strips whitespace and characters that would confuse
+// the config-file section parser (brackets, equals). Empty input returns
+// "" so the wizard can re-ask.
+func sanitizeProfileName(s string) string {
+	s = strings.TrimSpace(s)
+	s = strings.ReplaceAll(s, " ", "-")
+	s = strings.Trim(s, "[]=")
+	return s
+}
+
+// libraryFolderName returns the folder name under <flash>/Books that holds
+// a profile's downloaded books. Naming it after the profile keeps two
 // profiles pointing at different servers from sharing one folder. The name
 // goes through the same filename filter as book titles because the
 // device's storage is vfat; a name that filters away to nothing falls back
 // to defaultProfileName rather than the opaque "_" used for filenames.
 func libraryFolderName(profile string) string {
 	return sanitizeWith(profile, defaultProfileName)
+}
+
+// libraryPathFor returns the library directory for a newly created
+// profile: its filtered name under booksDir, suffixed with "-2", "-3", ...
+// when another profile in the config file already downloads into that
+// path. The filter is lossy ("a:b" and "a?b" both reduce to "a_b", and a
+// name of only dots reduces to "default"), so two differently named
+// profiles can derive one folder, and two servers writing into the same
+// directory is exactly what per-profile folders exist to prevent. An
+// unreadable config file leaves nothing to collide with.
+func libraryPathFor(cfgPath, booksDir, profile string) string {
+	base := filepath.Join(booksDir, libraryFolderName(profile))
+	taken := map[string]bool{}
+	if doc, err := parseDoc(cfgPath); err == nil {
+		for name, rows := range doc.sections {
+			if name == profile {
+				continue
+			}
+			for _, row := range rows {
+				if row.key == "library" && row.value != "" {
+					taken[row.value] = true
+				}
+			}
+		}
+	}
+	path := base
+	for n := 2; taken[path]; n++ {
+		path = fmt.Sprintf("%s-%d", base, n)
+	}
+	return path
 }
 
 // defaultUpdateURL is the release endpoint queried when check_updates is
