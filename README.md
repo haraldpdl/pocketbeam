@@ -152,6 +152,8 @@ To disable all automatic update checks, open **Check for updates** in Settings, 
 
 The only outbound HTTP traffic pocketbeam ever initiates is (a) OPDS / WebDAV requests to your configured server, (b) the update check described above, (c) the release binary download when you tap Install.
 
+Installs are verified: the downloaded binary must match the `sha256:` digest published in the release notes, and a release that publishes no digest is refused rather than installed unverified. Redirects from `https://` to `http://` are refused for the update check and the download, as they are for OPDS requests.
+
 ## License
 
 MIT. See [LICENSE](LICENSE).

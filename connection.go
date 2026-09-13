@@ -42,6 +42,17 @@ func newTransport() *http.Transport {
 	}
 }
 
+// newHTTPClient pairs newTransport with the https-to-http downgrade
+// guard. Every client that carries credentials or fetches code to run
+// (OPDS, updater) is built here so the redirect policy is applied in
+// one place.
+func newHTTPClient() *http.Client {
+	return &http.Client{
+		Transport:     newTransport(),
+		CheckRedirect: rejectSchemeDowngrade,
+	}
+}
+
 // ProbeCWA verifies that host points to a CWA (or compatible) OPDS server
 // that accepts the given credentials. Returns nil on success; on failure the
 // error message is short and suitable for display on the device.

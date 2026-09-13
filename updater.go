@@ -25,6 +25,13 @@ var UserAgentFn = func() string {
 	return "pocketbeam/" + version
 }
 
+// updateClient serves both the release check and the binary download.
+// It carries the same redirect policy as the OPDS client: a release
+// endpoint or asset host that answers https with a redirect to http
+// is refused rather than silently followed, so the binary that gets
+// installed always travelled over TLS.
+var updateClient = newHTTPClient()
+
 // Release captures the subset of a Gitea / GitHub release payload that
 // the updater needs: the tag name (treated as a semver), a direct URL to
 // the ARM .app asset, the asset byte size (for "X.Y MB" in the UI
@@ -83,7 +90,7 @@ func CheckLatest(ctx context.Context, endpoint, currentVersion string) (newer bo
 	}
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("User-Agent", UserAgentFn())
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := updateClient.Do(req)
 	if err != nil {
 		return false, Release{}, err
 	}
@@ -127,6 +134,11 @@ func CheckLatest(ctx context.Context, endpoint, currentVersion string) (newer bo
 // wire and the Content-Length total (-1 when unknown), so the UI's
 // percentage matches what's actually being fetched rather than the
 // final on-disk size. On failure the incomplete file is removed.
+//
+// A release whose body carries no sha256 line is refused before any
+// bytes are fetched: without a published digest there is nothing to
+// verify the binary against, and a self-updater must not install what
+// it cannot verify.
 func Download(ctx context.Context, rel Release, destPath string, progress func(written, total int64)) error {
 	url := rel.CompressedURL
 	compressed := url != ""
@@ -136,6 +148,9 @@ func Download(ctx context.Context, rel Release, destPath string, progress func(w
 	if url == "" {
 		return errors.New("release has no binary URL")
 	}
+	if rel.SHA256 == "" {
+		return errors.New("release has no sha256 checksum")
+	}
 	if err := os.MkdirAll(filepath.Dir(destPath), 0o755); err != nil {
 		return err
 	}
@@ -144,7 +159,7 @@ func Download(ctx context.Context, rel Release, destPath string, progress func(w
 		return err
 	}
 	req.Header.Set("User-Agent", UserAgentFn())
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := updateClient.Do(req)
 	if err != nil {
 		return err
 	}
@@ -180,7 +195,7 @@ func Download(ctx context.Context, rel Release, destPath string, progress func(w
 		return err
 	}
 	got := hex.EncodeToString(hasher.Sum(nil))
-	if rel.SHA256 != "" && got != rel.SHA256 {
+	if got != rel.SHA256 {
 		os.Remove(destPath)
 		return fmt.Errorf("sha256 mismatch: got %s, want %s", got, rel.SHA256)
 	}

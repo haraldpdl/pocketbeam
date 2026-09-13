@@ -3671,8 +3671,18 @@ func (a *app) updatePointer(e ink.PointerEvent) bool {
 // to the running binary, verifies the SHA, and renames it into place.
 // The user relaunches to pick up the new version; we do not call
 // ink.Exit() automatically so they can read the success message.
+//
+// The downloading/installed flags double as the re-entrancy guard:
+// drawUpdate clears the Install rect while a download runs, but the
+// repaint that clears it is asynchronous, so a second tap (or OK key)
+// landing before it would otherwise start a second download into the
+// same .new file.
 func (a *app) runUpdateInstall() {
 	a.update.mu.Lock()
+	if a.update.downloading || a.update.installed {
+		a.update.mu.Unlock()
+		return
+	}
 	rel := a.update.release
 	a.update.downloading = true
 	a.update.downloaded = 0

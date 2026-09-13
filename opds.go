@@ -94,10 +94,7 @@ func NewClient(base, user, pass string) (*Client, error) {
 		Base: u,
 		User: user,
 		Pass: pass,
-		HTTP: &http.Client{
-			Transport:     newTransport(),
-			CheckRedirect: rejectSchemeDowngrade,
-		},
+		HTTP: newHTTPClient(),
 	}, nil
 }
 

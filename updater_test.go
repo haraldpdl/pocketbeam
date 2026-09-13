@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 )
 
@@ -351,6 +352,8 @@ func TestDownload_ErrorBranches(t *testing.T) {
 		switch r.URL.Path {
 		case "/missing":
 			http.NotFound(w, r)
+		case "/broken":
+			http.Error(w, "upstream exploded", http.StatusBadGateway)
 		case "/bad.gz":
 			_, _ = io.WriteString(w, "this is not gzip")
 		case "/truncated.gz":
@@ -364,15 +367,17 @@ func TestDownload_ErrorBranches(t *testing.T) {
 		}
 	}))
 	defer srv.Close()
+	okSHA := sha256Hex("ok")
 
 	cases := []struct {
 		name    string
 		rel     Release
 		wantErr string
 	}{
-		{"asset missing", Release{BinaryURL: srv.URL + "/missing"}, "404"},
-		{"compressed asset not gzip", Release{CompressedURL: srv.URL + "/bad.gz"}, "gzip"},
-		{"compressed asset truncated", Release{CompressedURL: srv.URL + "/truncated.gz"}, "EOF"},
+		{"asset missing", Release{BinaryURL: srv.URL + "/missing", SHA256: okSHA}, "404"},
+		{"asset server error", Release{BinaryURL: srv.URL + "/broken", SHA256: okSHA}, "502"},
+		{"compressed asset not gzip", Release{CompressedURL: srv.URL + "/bad.gz", SHA256: okSHA}, "gzip"},
+		{"compressed asset truncated", Release{CompressedURL: srv.URL + "/truncated.gz", SHA256: okSHA}, "EOF"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -390,13 +395,13 @@ func TestDownload_ErrorBranches(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		cancel()
 		staged := filepath.Join(t.TempDir(), "pocketbeam.app.new")
-		if err := Download(ctx, Release{BinaryURL: srv.URL + "/ok"}, staged, nil); err == nil {
+		if err := Download(ctx, Release{BinaryURL: srv.URL + "/ok", SHA256: okSHA}, staged, nil); err == nil {
 			t.Error("expected an error from a cancelled context")
 		}
 	})
 	t.Run("creates the staging directory", func(t *testing.T) {
 		staged := filepath.Join(t.TempDir(), "nested", "dir", "pocketbeam.app.new")
-		if err := Download(context.Background(), Release{BinaryURL: srv.URL + "/ok"}, staged, nil); err != nil {
+		if err := Download(context.Background(), Release{BinaryURL: srv.URL + "/ok", SHA256: okSHA}, staged, nil); err != nil {
 			t.Fatalf("Download: %v", err)
 		}
 		if got, _ := os.ReadFile(staged); string(got) != "ok" {
@@ -416,7 +421,8 @@ func TestDownload_ProgressReportsUnknownTotal(t *testing.T) {
 	defer srv.Close()
 	var lastWritten, lastTotal int64
 	staged := filepath.Join(t.TempDir(), "pocketbeam.app.new")
-	err := Download(context.Background(), Release{BinaryURL: srv.URL}, staged, func(w, tot int64) {
+	rel := Release{BinaryURL: srv.URL, SHA256: sha256Hex("part one part two")}
+	err := Download(context.Background(), rel, staged, func(w, tot int64) {
 		lastWritten, lastTotal = w, tot
 	})
 	if err != nil {
@@ -424,6 +430,73 @@ func TestDownload_ProgressReportsUnknownTotal(t *testing.T) {
 	}
 	if lastWritten != int64(len("part one part two")) || lastTotal != -1 {
 		t.Errorf("progress = (%d, %d), want (%d, -1)", lastWritten, lastTotal, len("part one part two"))
+	}
+}
+
+// sha256Hex returns the lowercase hex digest of s, the form CheckLatest
+// extracts from a release body.
+func sha256Hex(s string) string {
+	sum := sha256.Sum256([]byte(s))
+	return hex.EncodeToString(sum[:])
+}
+
+func TestDownload_RefusesReleaseWithoutSHA(t *testing.T) {
+	var hits int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&hits, 1)
+		_, _ = io.WriteString(w, "unverifiable binary")
+	}))
+	defer srv.Close()
+
+	for _, rel := range []Release{
+		{BinaryURL: srv.URL + "/asset"},
+		{BinaryURL: srv.URL + "/asset", CompressedURL: srv.URL + "/asset.gz"},
+	} {
+		staged := filepath.Join(t.TempDir(), "pocketbeam.app.new")
+		err := Download(context.Background(), rel, staged, nil)
+		if err == nil || !strings.Contains(err.Error(), "no sha256") {
+			t.Errorf("Download(%+v) = %v, want 'no sha256' error", rel, err)
+		}
+		if _, statErr := os.Stat(staged); !os.IsNotExist(statErr) {
+			t.Errorf("refused download left a file behind: %v", statErr)
+		}
+	}
+	// Refusal happens before any bytes are requested: the device should
+	// not spend Wi-Fi on a binary it will never install.
+	if n := atomic.LoadInt32(&hits); n != 0 {
+		t.Errorf("asset server saw %d requests, want 0", n)
+	}
+}
+
+// The updater shares the OPDS redirect policy: an https endpoint that
+// bounces to plain http is refused for both the release check and the
+// binary download. The TLS test server's own transport is swapped into
+// updateClient so its self-signed certificate is trusted; the redirect
+// policy under test lives on the client, not the transport.
+func TestUpdater_RefusesSchemeDowngradeRedirect(t *testing.T) {
+	plain := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, `{"tag_name":"v9.9.9","body":"","assets":[]}`)
+	}))
+	defer plain.Close()
+	tls := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, plain.URL+r.URL.Path, http.StatusFound)
+	}))
+	defer tls.Close()
+
+	origTransport := updateClient.Transport
+	updateClient.Transport = tls.Client().Transport
+	defer func() { updateClient.Transport = origTransport }()
+
+	if _, _, err := CheckLatest(context.Background(), tls.URL+"/latest", "v0.1.0"); err == nil || !strings.Contains(err.Error(), "refusing redirect") {
+		t.Errorf("CheckLatest = %v, want 'refusing redirect' error", err)
+	}
+	staged := filepath.Join(t.TempDir(), "pocketbeam.app.new")
+	rel := Release{BinaryURL: tls.URL + "/asset", SHA256: sha256Hex("x")}
+	if err := Download(context.Background(), rel, staged, nil); err == nil || !strings.Contains(err.Error(), "refusing redirect") {
+		t.Errorf("Download = %v, want 'refusing redirect' error", err)
+	}
+	if _, statErr := os.Stat(staged); !os.IsNotExist(statErr) {
+		t.Errorf("refused download left a file behind: %v", statErr)
 	}
 }
 
