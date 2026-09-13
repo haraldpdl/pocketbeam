@@ -379,7 +379,8 @@ func (c *Client) ListShelves(ctx context.Context) ([]Shelf, error) {
 // maxWalkDepth levels deep to bound work on pathological catalogs. Books
 // are deduplicated by UUID at the end since generic catalogs often expose
 // the same book under multiple navigation sections (e.g. by-author and
-// by-series).
+// by-series). Any sub-feed that fails to load or parse fails the walk:
+// the result is either the complete catalog or an error, never a subset.
 const maxWalkDepth = 5
 
 func (c *Client) walkGeneric(ctx context.Context, start string) ([]Book, error) {
@@ -433,15 +434,14 @@ func (c *Client) walkGenericRec(ctx context.Context, path string, visited map[st
 				continue
 			}
 			if sub := navigationHref(e.Links); sub != "" {
+				// A failed sub-feed aborts the whole listing. Silently
+				// skipping it would return a partial catalog that
+				// delete-missing then reads as "these books are gone".
 				child, err := c.walkGenericRec(ctx, sub, visited, depth+1)
-				if err == nil {
-					out = append(out, child...)
-				} else if ctx.Err() != nil {
-					// A sub-feed failure is tolerated, but once the caller
-					// has cancelled there is no point visiting the
-					// remaining siblings only to fail each one in turn.
-					return nil, ctx.Err()
+				if err != nil {
+					return nil, err
 				}
+				out = append(out, child...)
 			}
 		}
 		href = nextLink(f.Links)

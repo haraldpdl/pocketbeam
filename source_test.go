@@ -275,10 +275,9 @@ func TestDetectType(t *testing.T) {
 }
 
 func TestWalkGeneric_CancelStopsSiblingWalk(t *testing.T) {
-	// Sub-feed errors are tolerated so one broken section does not sink
-	// the listing, but a cancelled context must not be mistaken for a
-	// broken section: the walk stops instead of visiting every sibling
-	// only to fail each one.
+	// Any sub-feed error aborts the walk, including cancellation: once
+	// the caller has cancelled, the walk must return context.Canceled
+	// without visiting the remaining siblings.
 	feeds := opdsFeeds{
 		"/opds": feedXML("Root", navEntry("A", "/opds/a")+navEntry("B", "/opds/b")+navEntry("C", "/opds/c")),
 	}

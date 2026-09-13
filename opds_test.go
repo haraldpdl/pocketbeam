@@ -435,3 +435,38 @@ func TestFetchLevel_DeadlineCoversPagination(t *testing.T) {
 		t.Fatal("second page never reached the server; page one did not paginate")
 	}
 }
+
+func TestWalkGeneric_SubFeedErrorAbortsListing(t *testing.T) {
+	// /opds/b is not served (404). The walk must fail rather than return
+	// the books from /opds/a alone: a partial listing would make
+	// delete-missing propose every book under /opds/b for deletion.
+	feeds := opdsFeeds{
+		"/opds": `<?xml version="1.0"?><feed ` + opdsNS + `><title>Root</title>
+		  <entry><id>a</id><title>A</title><link rel="subsection" type="application/atom+xml" href="/opds/a"/></entry>
+		  <entry><id>b</id><title>B</title><link rel="subsection" type="application/atom+xml" href="/opds/b"/></entry>
+		  <entry><id>c</id><title>C</title><link rel="subsection" type="application/atom+xml" href="/opds/c"/></entry>
+		</feed>`,
+		"/opds/a": `<?xml version="1.0"?><feed ` + opdsNS + `><title>A</title>
+		  <entry><id>urn:uuid:book-a</id><title>Book A</title>
+		    <link rel="http://opds-spec.org/acquisition" type="application/epub+zip" href="/dl/a"/>
+		  </entry>
+		</feed>`,
+		"/opds/c": `<?xml version="1.0"?><feed ` + opdsNS + `><title>C</title></feed>`,
+	}
+	srv, _, paths := blockingOPDSServer(t, feeds, func(*http.Request) bool { return false })
+	c := newOPDSClient(t, srv.URL)
+
+	books, err := c.WalkAll(context.Background())
+	if err == nil {
+		t.Fatalf("WalkAll returned %d books and no error, want an error for the failed sub-feed", len(books))
+	}
+	if !strings.Contains(err.Error(), "/opds/b") {
+		t.Errorf("error %q does not name the failed sub-feed", err)
+	}
+	if books != nil {
+		t.Errorf("WalkAll returned partial books %+v alongside the error", books)
+	}
+	if slices.Contains(paths(), "/opds/c") {
+		t.Errorf("walk continued to /opds/c after /opds/b failed; requests: %v", paths())
+	}
+}
