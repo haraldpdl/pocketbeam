@@ -141,7 +141,6 @@ func (a *app) drawUpdate() {
 
 	btnFont := ink.OpenFont(ink.DefaultFontBold, a.layout.fpx(44), true)
 	defer btnFont.Close()
-	btnFont.SetActive(ink.Black)
 
 	a.update.mu.Lock()
 	checking := a.update.checking

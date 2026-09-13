@@ -99,7 +99,6 @@ func (a *app) drawSpaceWarn() {
 
 	btnFont := ink.OpenFont(ink.DefaultFontBold, a.layout.fpx(44), true)
 	defer btnFont.Close()
-	btnFont.SetActive(ink.Black)
 
 	a.spaceWarn.mu.Lock()
 	plan := a.spaceWarn.plan
@@ -237,7 +236,6 @@ func (a *app) drawDeleteConfirm() {
 
 	btnFont := ink.OpenFont(ink.DefaultFontBold, a.layout.fpx(44), true)
 	defer btnFont.Close()
-	btnFont.SetActive(ink.Black)
 
 	a.delConfirm.mu.Lock()
 	pending := append([]LocalBook(nil), a.delConfirm.pending...)

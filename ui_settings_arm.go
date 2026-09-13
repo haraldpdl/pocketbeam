@@ -76,7 +76,6 @@ func (a *app) drawSettings() {
 
 	// Back button in the bottom-left, matching other screens.
 	ink.DrawRect(a.layout.backButton, ink.Black)
-	btnFont.SetActive(ink.Black)
 	drawCenteredText(btnFont, a.layout.backButton, "Back", a.layout.fpx(44))
 }
 

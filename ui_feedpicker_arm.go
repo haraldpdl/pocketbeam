@@ -25,15 +25,21 @@ type feedPickerFrame struct {
 // the first-row-index in the current page; prevPageRect / nextPageRect
 // are the navigation buttons for long lists that don't fit on screen.
 type feedPickerState struct {
-	mu           sync.Mutex
-	loading      bool
-	href         string
-	title        string
-	stack        []feedPickerFrame
-	level        OPDSLevel
-	err          error
-	offset       int
-	pageSize     int               // rows per page; written during draw so paging stays consistent when the last page is short
+	mu       sync.Mutex
+	loading  bool
+	href     string
+	title    string
+	stack    []feedPickerFrame
+	level    OPDSLevel
+	err      error
+	offset   int
+	pageSize int // rows per page; written during draw so paging stays consistent when the last page is short
+	// reqID identifies the level fetch currently being awaited. The
+	// up-row is tappable while a fetch is in flight, so a slow response
+	// can land after the user has already drilled elsewhere; a fetch
+	// whose id no longer matches drops its result instead of showing one
+	// level's subsections under another level's breadcrumb.
+	reqID        int
 	rowRects     []image.Rectangle // per visible subsection row
 	selectRect   image.Rectangle   // primary action ("Done" or "Add this level" depending on state)
 	doneRect     image.Rectangle   // "Done" button when the selection set is non-empty
@@ -74,10 +80,12 @@ func (a *app) openShelfPicker() {
 	a.picker.rowRects = nil
 	a.picker.offset = 0
 	a.picker.selected = seeded
+	a.picker.reqID++
+	req := a.picker.reqID
 	a.picker.mu.Unlock()
 	a.screen = screenShelfPicker
 	ink.Repaint()
-	go a.fetchFeedLevel("", "All books")
+	go a.fetchFeedLevel("", req)
 }
 
 // drillInto pushes the current feed onto the stack and fetches the child
@@ -94,9 +102,11 @@ func (a *app) drillInto(href, title string) {
 	a.picker.err = nil
 	a.picker.rowRects = nil
 	a.picker.offset = 0
+	a.picker.reqID++
+	req := a.picker.reqID
 	a.picker.mu.Unlock()
 	ink.Repaint()
-	go a.fetchFeedLevel(href, title)
+	go a.fetchFeedLevel(href, req)
 }
 
 // shelfPickerPage scrolls the list by one page. Called from the Prev /
@@ -130,16 +140,24 @@ func (a *app) drillUp() {
 	a.picker.err = nil
 	a.picker.rowRects = nil
 	a.picker.offset = 0
+	a.picker.reqID++
+	req := a.picker.reqID
 	a.picker.mu.Unlock()
 	ink.Repaint()
-	go a.fetchFeedLevel(top.Href, top.Title)
+	go a.fetchFeedLevel(top.Href, req)
 }
 
-func (a *app) fetchFeedLevel(href, title string) {
+// fetchFeedLevel loads one picker level and stores the result, unless the
+// user has moved on and req is no longer the fetch the picker waits for.
+func (a *app) fetchFeedLevel(href string, req int) {
 	ctx, cancel := context.WithTimeout(context.Background(), feedPickerTimeout)
 	defer cancel()
 	if err := a.ensureConnected(ctx); err != nil {
 		a.picker.mu.Lock()
+		if a.picker.reqID != req {
+			a.picker.mu.Unlock()
+			return
+		}
 		a.picker.loading = false
 		a.picker.err = err
 		a.picker.mu.Unlock()
@@ -151,6 +169,10 @@ func (a *app) fetchFeedLevel(href, title string) {
 		err = errors.New("Server did not respond in time.")
 	}
 	a.picker.mu.Lock()
+	if a.picker.reqID != req {
+		a.picker.mu.Unlock()
+		return
+	}
 	a.picker.loading = false
 	a.picker.level = lvl
 	a.picker.err = err
@@ -171,7 +193,6 @@ func (a *app) drawShelfPicker() {
 
 	body := ink.OpenFont(ink.DefaultFont, a.layout.fpx(32), true)
 	defer body.Close()
-	body.SetActive(ink.Black)
 
 	rowTitleFont := ink.OpenFont(ink.DefaultFontBold, a.layout.fpx(36), true)
 	defer rowTitleFont.Close()
@@ -182,7 +203,6 @@ func (a *app) drawShelfPicker() {
 
 	btnFont := ink.OpenFont(ink.DefaultFontBold, a.layout.fpx(44), true)
 	defer btnFont.Close()
-	btnFont.SetActive(ink.Black)
 
 	a.picker.mu.Lock()
 	loading := a.picker.loading
@@ -196,7 +216,6 @@ func (a *app) drawShelfPicker() {
 	// Breadcrumb path: every ancestor title joined by " / ", current
 	// level last. Collapses middle segments when the full path is too
 	// wide for the header.
-	body.SetActive(ink.Black)
 	a.picker.mu.Lock()
 	stackTitles := make([]string, 0, stackLen)
 	for _, f := range a.picker.stack {
@@ -216,31 +235,43 @@ func (a *app) drawShelfPicker() {
 	var list pagedListRects
 	var upRect image.Rectangle
 
+	// Up-row: fixed above the paginated window so the user can go up from
+	// any page. Rendered as a full-width list row with a left-aligned
+	// "< Back" label so it shares the app-wide row idiom; still visually
+	// distinct from the subsection chevron rows because its chevron
+	// points the other way.
+	//
+	// Drawn on every pass, including while loading and after a failed
+	// fetch, because it is the only way back to the parent level: the
+	// on-screen Back button and the hardware Back key both leave the
+	// picker for Settings and throw the whole drill-down away. It also
+	// lets the user walk away from a fetch that is still in flight.
+	listTop := areaTop
+	if stackLen > 0 {
+		rowH := a.layout.rowH()
+		upRect = image.Rect(a.layout.margin, listTop, a.layout.screen.X-a.layout.margin, listTop+rowH-a.layout.sy(20))
+		a.drawHairline(upRect.Min.X, upRect.Max.X, upRect.Min.Y)
+		rowTitleFont.SetActive(ink.Black)
+		titleY := upRect.Min.Y + (upRect.Dy()-a.layout.fpx(36))/2
+		ink.DrawString(image.Point{X: upRect.Min.X + a.layout.sx(40), Y: titleY},
+			"< Back to "+truncate(stackTitles[stackLen-1], 32))
+		listTop += rowH
+	}
+
+	// Status text shares the band with the list, so it starts below the
+	// up-row rather than at a fixed y. The breadcrumb and the up-row both
+	// leave their own face active, so body is activated here.
+	msgY := listTop + a.layout.sy(20)
 	if loading {
-		ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(300)}, "Loading...")
-		a.showHourglassAt(image.Point{X: a.layout.margin, Y: a.layout.sy(360)})
+		body.SetActive(ink.Black)
+		ink.DrawString(image.Point{X: a.layout.margin, Y: msgY}, "Loading...")
+		a.showHourglassAt(image.Point{X: a.layout.margin, Y: msgY + a.layout.sy(60)})
 	} else if pickerErr != nil {
-		ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(300)}, "Could not load feed:")
-		ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(350)}, truncate(pickerErr.Error(), 60))
+		body.SetActive(ink.Black)
+		ink.DrawString(image.Point{X: a.layout.margin, Y: msgY}, "Could not load feed:")
+		ink.DrawString(image.Point{X: a.layout.margin, Y: msgY + a.layout.sy(50)}, truncate(pickerErr.Error(), 60))
 	} else {
 		subs := visibleSubsections(lvl)
-
-		// Up-row: fixed above the paginated window so the user can go
-		// up from any page. Rendered as a full-width list row with a
-		// left-aligned "< Back" label so it shares the app-wide row
-		// idiom; still visually distinct from the subsection chevron
-		// rows because its chevron points the other way.
-		listTop := areaTop
-		if stackLen > 0 {
-			rowH := a.layout.rowH()
-			upRect = image.Rect(a.layout.margin, listTop, a.layout.screen.X-a.layout.margin, listTop+rowH-a.layout.sy(20))
-			a.drawHairline(upRect.Min.X, upRect.Max.X, upRect.Min.Y)
-			rowTitleFont.SetActive(ink.Black)
-			titleY := upRect.Min.Y + (upRect.Dy()-a.layout.fpx(36))/2
-			ink.DrawString(image.Point{X: upRect.Min.X + a.layout.sx(40), Y: titleY},
-				"< Back to "+truncate(stackTitles[stackLen-1], 32))
-			listTop += rowH
-		}
 
 		rows := make([]listRow, 0, len(subs))
 		for _, sub := range subs {
@@ -255,9 +286,10 @@ func (a *app) drawShelfPicker() {
 			listTop, areaBottom, rows, offset)
 	}
 
-	// Written on every pass, so a load or an error clears the tap
-	// targets of the level the user came from instead of leaving
-	// invisible ones behind.
+	// Written on every pass, so a load or an error clears the row and
+	// page targets of the level the user came from instead of leaving
+	// invisible ones behind. upRect is the exception: it is drawn on
+	// every pass, so it is always live.
 	a.picker.mu.Lock()
 	a.picker.offset = list.offset
 	a.picker.pageSize = list.pageSize
@@ -278,8 +310,6 @@ func (a *app) drawShelfPicker() {
 	a.picker.mu.Unlock()
 
 	alreadyIn := pickerContains(selected, curHref)
-	// Row and page-label drawing above leaves their own faces active.
-	btnFont.SetActive(ink.Black)
 	selectY2 := a.layout.backButton.Min.Y - a.layout.sy(40)
 	selectY1 := selectY2 - selectBtnH
 	selectRect := image.Rect(a.layout.margin, selectY1, a.layout.screen.X-a.layout.margin, selectY2)

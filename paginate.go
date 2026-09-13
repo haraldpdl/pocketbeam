@@ -66,7 +66,9 @@ type listPage struct {
 // buttons, and clamps offset onto a real page start.
 //
 // The nav row sits at a fixed y (a full page below top) so it does not
-// jump upwards on a short last page.
+// jump upwards on a short last page, and never below bottom-navH so it
+// cannot land on whatever the caller reserved the space under the band
+// for (the Sync / Add button, which is hit-tested first).
 func layoutListPage(top, bottom, rowH, navH, gap, total, offset int) listPage {
 	if rowH < 1 {
 		rowH = 1
@@ -76,11 +78,17 @@ func layoutListPage(top, bottom, rowH, navH, gap, total, offset int) listPage {
 		pageSize = 1
 	}
 	p := paginate(total, pageSize, offset)
+	navY := top + pageSize*rowH + gap
+	// A band too short for one row plus the nav floors pageSize up to 1,
+	// which puts the nav row past bottom.
+	if navY+navH > bottom {
+		navY = bottom - navH
+	}
 	return listPage{
 		offset:   p.offset,
 		end:      p.end,
 		pageSize: pageSize,
-		navY:     top + pageSize*rowH + gap,
+		navY:     navY,
 		navShown: total > pageSize,
 	}
 }

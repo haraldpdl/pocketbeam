@@ -63,8 +63,9 @@ func TestLayoutListPage(t *testing.T) {
 		{"negative_offset", top, bottom, rowH, 20, -5, 0, 8, 8, 1240, true},
 		// An up-row above the list shrinks the band by exactly one row.
 		{"band_shrunk_by_up_row", top + rowH, bottom, rowH, 20, 0, 0, 7, 7, 1240, true},
-		// Bands too small for even one row still render a single row.
-		{"band_smaller_than_a_row", top, top + 100, rowH, 3, 0, 0, 1, 1, 470, true},
+		// Bands too small for even one row still render a single row,
+		// with the nav row pulled back inside the band.
+		{"band_smaller_than_a_row", top, top + 100, rowH, 3, 0, 0, 1, 1, 380, true},
 		{"zero_row_height", top, bottom, 0, 3, 0, 0, 3, 980, 1340, false},
 	}
 	for _, tc := range cases {
@@ -85,6 +86,9 @@ func TestLayoutListPage(t *testing.T) {
 			}
 			if got.end-got.offset > got.pageSize {
 				t.Errorf("page holds %d rows, more than pageSize %d", got.end-got.offset, got.pageSize)
+			}
+			if got.navShown && got.navY+navH > tc.bottom {
+				t.Errorf("nav row ends at %d, past the band bottom %d", got.navY+navH, tc.bottom)
 			}
 		})
 	}

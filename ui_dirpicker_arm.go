@@ -15,13 +15,19 @@ import (
 // through. path is the currently-browsed directory (always absolute, always
 // starts with "/"); dirs is the list of subdirectories to display.
 type dirPickerState struct {
-	mu           sync.Mutex
-	loading      bool
-	path         string
-	dirs         []string
-	err          error
-	offset       int
-	pageSize     int
+	mu       sync.Mutex
+	loading  bool
+	path     string
+	dirs     []string
+	err      error
+	offset   int
+	pageSize int
+	// reqID identifies the listing currently being awaited. The up-row
+	// is tappable while a listing is in flight, so a slow response can
+	// land after the user has already moved to another folder; a fetch
+	// whose id no longer matches drops its result instead of showing
+	// one folder's subdirectories under another folder's path.
+	reqID        int
 	rowRects     []image.Rectangle // paginated directory rows
 	upRect       image.Rectangle   // fixed ".. (up)" row, empty when at root
 	prevPageRect image.Rectangle
@@ -44,19 +50,26 @@ func (a *app) openDirPicker(startPath string) {
 	a.dirPicker.err = nil
 	a.dirPicker.rowRects = nil
 	a.dirPicker.offset = 0
+	a.dirPicker.reqID++
+	req := a.dirPicker.reqID
 	a.dirPicker.mu.Unlock()
 	a.screen = screenDirPicker
 	ink.Repaint()
-	go a.fetchDirEntries(p)
+	go a.fetchDirEntries(p, req)
 }
 
 // fetchDirEntries lists subdirectories of path on the configured WebDAV
-// server and stores the result for the picker to render.
-func (a *app) fetchDirEntries(p string) {
+// server and stores the result for the picker to render, unless the user
+// has moved on and req is no longer the listing the picker waits for.
+func (a *app) fetchDirEntries(p string, req int) {
 	ctx, cancel := context.WithTimeout(context.Background(), feedPickerTimeout)
 	defer cancel()
 	if err := a.ensureConnected(ctx); err != nil {
 		a.dirPicker.mu.Lock()
+		if a.dirPicker.reqID != req {
+			a.dirPicker.mu.Unlock()
+			return
+		}
 		a.dirPicker.loading = false
 		a.dirPicker.err = err
 		a.dirPicker.mu.Unlock()
@@ -76,6 +89,10 @@ func (a *app) fetchDirEntries(p string) {
 		}
 	}
 	a.dirPicker.mu.Lock()
+	if a.dirPicker.reqID != req {
+		a.dirPicker.mu.Unlock()
+		return
+	}
 	a.dirPicker.loading = false
 	a.dirPicker.dirs = dirs
 	a.dirPicker.err = err
@@ -100,7 +117,6 @@ func (a *app) drawDirPicker() {
 
 	btnFont := ink.OpenFont(ink.DefaultFontBold, a.layout.fpx(44), true)
 	defer btnFont.Close()
-	btnFont.SetActive(ink.Black)
 
 	a.dirPicker.mu.Lock()
 	loading := a.dirPicker.loading
@@ -124,28 +140,36 @@ func (a *app) drawDirPicker() {
 	var list pagedListRects
 	var upRect, selectRect image.Rectangle
 
+	// Up-row: full-width list-row styled, "<" on the left. Drawn on every
+	// pass, including while loading and after a failed listing, because it
+	// is the only way back to the parent folder: the on-screen Back button
+	// and the hardware Back key both leave the picker for Settings and
+	// throw the whole drill-down away. It also lets the user walk away
+	// from a listing that is still in flight.
+	listTop := a.layout.pickerAreaTop
+	if path != "/" && path != "" {
+		rowH := a.layout.rowH()
+		upRect = image.Rect(a.layout.margin, listTop, a.layout.screen.X-a.layout.margin, listTop+rowH-a.layout.sy(20))
+		a.drawHairline(upRect.Min.X, upRect.Max.X, upRect.Min.Y)
+		rowTitleFont.SetActive(ink.Black)
+		titleY := upRect.Min.Y + (upRect.Dy()-a.layout.fpx(36))/2
+		ink.DrawString(image.Point{X: upRect.Min.X + a.layout.sx(40), Y: titleY},
+			"< Back to "+truncate(dirParent(path), 32))
+		listTop += rowH
+	}
+
+	// Status text shares the band with the list, so it starts below the
+	// up-row rather than at a fixed y.
+	msgY := listTop + a.layout.sy(20)
 	if loading {
 		body.SetActive(ink.Black)
-		ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(300)}, "Loading...")
-		a.showHourglassAt(image.Point{X: a.layout.margin, Y: a.layout.sy(360)})
+		ink.DrawString(image.Point{X: a.layout.margin, Y: msgY}, "Loading...")
+		a.showHourglassAt(image.Point{X: a.layout.margin, Y: msgY + a.layout.sy(60)})
 	} else if pickErr != nil {
 		body.SetActive(ink.Black)
-		ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(300)}, "Could not list folder:")
-		ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(350)}, truncate(pickErr.Error(), 60))
+		ink.DrawString(image.Point{X: a.layout.margin, Y: msgY}, "Could not list folder:")
+		ink.DrawString(image.Point{X: a.layout.margin, Y: msgY + a.layout.sy(50)}, truncate(pickErr.Error(), 60))
 	} else {
-		// Up-row: full-width list-row styled, "<" on the left.
-		listTop := a.layout.pickerAreaTop
-		if path != "/" && path != "" {
-			rowH := a.layout.rowH()
-			upRect = image.Rect(a.layout.margin, listTop, a.layout.screen.X-a.layout.margin, listTop+rowH-a.layout.sy(20))
-			a.drawHairline(upRect.Min.X, upRect.Max.X, upRect.Min.Y)
-			rowTitleFont.SetActive(ink.Black)
-			titleY := upRect.Min.Y + (upRect.Dy()-a.layout.fpx(36))/2
-			ink.DrawString(image.Point{X: upRect.Min.X + a.layout.sx(40), Y: titleY},
-				"< Back to "+truncate(dirParent(path), 32))
-			listTop += rowH
-		}
-
 		rows := make([]listRow, 0, len(dirs))
 		for _, d := range dirs {
 			rows = append(rows, listRow{title: d})
@@ -159,13 +183,13 @@ func (a *app) drawDirPicker() {
 		selectRect = image.Rect(a.layout.margin, selectY2-selectBtnH, a.layout.screen.X-a.layout.margin, selectY2)
 		ink.DrawRect(selectRect, ink.Black)
 		ink.DrawRect(selectRect.Inset(2), ink.Black)
-		btnFont.SetActive(ink.Black)
 		drawCenteredText(btnFont, selectRect, "Sync this folder", a.layout.fpx(44))
 	}
 
-	// Written on every pass, so a load or an error clears the tap
-	// targets of the folder the user came from instead of leaving
-	// invisible ones behind.
+	// Written on every pass, so a load or an error clears the row and
+	// page targets of the folder the user came from instead of leaving
+	// invisible ones behind. upRect is the exception: it is drawn on
+	// every pass, so it is always live.
 	a.dirPicker.mu.Lock()
 	a.dirPicker.offset = list.offset
 	a.dirPicker.pageSize = list.pageSize

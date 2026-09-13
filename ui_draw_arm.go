@@ -14,7 +14,15 @@ import (
 // drawCenteredText writes s centered inside rect using the given font. fontPx
 // is the font's pixel height (used for vertical centering since DrawString
 // interprets Y as the top-left corner).
+//
+// InkView measures and draws with whatever face was last made active, so f
+// is activated here instead of trusting the caller's most recent
+// SetActive: anything drawn in between (a list row, a body paragraph, a
+// muted subtitle) would otherwise silently swap the face out and the label
+// would render in the wrong size and colour while still being centred for
+// fontPx. Every centred label in the app is black.
 func drawCenteredText(f *ink.Font, rect image.Rectangle, s string, fontPx int) {
+	f.SetActive(ink.Black)
 	w := ink.StringWidth(s)
 	x := rect.Min.X + (rect.Dx()-w)/2
 	y := rect.Min.Y + (rect.Dy()-fontPx)/2
@@ -161,9 +169,6 @@ func (a *app) drawPagedList(f listFonts, top, bottom int, rows []listRow, offset
 
 	navY2 := p.navY + navH
 	navW := (a.layout.screen.X - 2*a.layout.margin) / 4
-	// drawListRow leaves the row-title face active, so the button and
-	// label faces are (re)activated here rather than assumed.
-	f.button.SetActive(ink.Black)
 	if p.offset > 0 {
 		out.prev = image.Rect(a.layout.margin, p.navY, a.layout.margin+navW, navY2)
 		ink.DrawRect(out.prev, ink.Black)
@@ -176,6 +181,8 @@ func (a *app) drawPagedList(f listFonts, top, bottom int, rows []listRow, offset
 	}
 	label := fmt.Sprintf("Page %d of %d  ·  %d items",
 		p.offset/p.pageSize+1, (len(rows)+p.pageSize-1)/p.pageSize, len(rows))
+	// drawListRow and drawCenteredText both leave their own face active,
+	// so the muted label face is activated rather than assumed.
 	f.label.SetActive(ink.DarkGray)
 	ink.DrawString(image.Point{
 		X: (a.layout.screen.X - ink.StringWidth(label)) / 2,

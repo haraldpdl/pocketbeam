@@ -81,7 +81,6 @@ func (a *app) drawProfileList() {
 
 	btnFont := ink.OpenFont(ink.DefaultFontBold, a.layout.fpx(44), true)
 	defer btnFont.Close()
-	btnFont.SetActive(ink.Black)
 
 	smallFont := ink.OpenFont(ink.DefaultFont, a.layout.fpx(26), true)
 	defer smallFont.Close()
@@ -129,7 +128,6 @@ func (a *app) drawProfileList() {
 	addRect := image.Rect(a.layout.margin, addY1, a.layout.screen.X-a.layout.margin, addY2)
 	ink.DrawRect(addRect, ink.Black)
 	ink.DrawRect(addRect.Inset(2), ink.Black)
-	btnFont.SetActive(ink.Black)
 	drawCenteredText(btnFont, addRect, "Add new server", a.layout.fpx(44))
 
 	a.profileList.mu.Lock()
@@ -326,7 +324,6 @@ func (a *app) drawProfileDetail() {
 
 	btnFont := ink.OpenFont(ink.DefaultFontBold, a.layout.fpx(44), true)
 	defer btnFont.Close()
-	btnFont.SetActive(ink.Black)
 
 	a.profileDetail.mu.Lock()
 	name := a.profileDetail.name

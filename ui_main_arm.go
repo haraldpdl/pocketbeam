@@ -145,7 +145,6 @@ func (a *app) drawMain() {
 	// primary.
 	ink.DrawRect(a.layout.syncButton, ink.Black)
 	ink.DrawRect(a.layout.syncButton.Inset(2), ink.Black)
-	btnFont.SetActive(ink.Black)
 	btnLabel := "Sync Now"
 	if a.syncActive() {
 		btnLabel = "Stop"
@@ -161,7 +160,6 @@ func (a *app) drawMain() {
 	ink.DrawRect(a.layout.networkButton, ink.Black)
 	ink.DrawRect(a.layout.settingsButton, ink.Black)
 	ink.DrawRect(a.layout.quitButton, ink.Black)
-	btnFont.SetActive(ink.Black)
 	drawCenteredText(btnFont, a.layout.networkButton, "Network", a.layout.fpx(44))
 	drawCenteredText(btnFont, a.layout.settingsButton, "Settings", a.layout.fpx(44))
 	drawCenteredText(btnFont, a.layout.quitButton, "Quit", a.layout.fpx(44))
