@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path"
 	"strings"
@@ -26,8 +27,11 @@ import (
 // nothing extra on the wire.
 type WebDAVSource struct {
 	host string
-	auth gowebdav.Authorizer
-	Root string // absolute path on the server, e.g. "/Books/Fiction"
+	// secure is true when host is an https:// URL, which makes every
+	// plaintext request from this source a downgrade (see guardedTransport).
+	secure bool
+	auth   gowebdav.Authorizer
+	Root   string // absolute path on the server, e.g. "/Books/Fiction"
 }
 
 // webdavTransport is the one connection pool for every WebDAV client.
@@ -94,9 +98,10 @@ func classifyWebDAVError(err error) error {
 // use ProbeWebDAV up front to validate credentials.
 func NewWebDAVSource(host, user, pass, rootPath string) *WebDAVSource {
 	return &WebDAVSource{
-		host: host,
-		auth: gowebdav.NewAutoAuth(user, pass),
-		Root: normaliseRoot(rootPath),
+		host:   host,
+		secure: isHTTPSURL(host),
+		auth:   gowebdav.NewAutoAuth(user, pass),
+		Root:   normaliseRoot(rootPath),
 	}
 }
 
@@ -107,18 +112,40 @@ func NewWebDAVSource(host, user, pass, rootPath string) *WebDAVSource {
 func (s *WebDAVSource) client(ctx context.Context) *gowebdav.Client {
 	c := gowebdav.NewAuthClient(s.host, s.auth)
 	c.SetHeader("User-Agent", "pocketbeam/"+version)
-	c.SetTransport(ctxTransport{ctx: ctx, base: webdavTransport})
+	c.SetTransport(guardedTransport{ctx: ctx, base: webdavTransport, secure: s.secure})
 	return c
 }
 
-// ctxTransport rebinds every request to ctx before handing it to base.
-type ctxTransport struct {
-	ctx  context.Context
-	base http.RoundTripper
+// guardedTransport rebinds every request to ctx before handing it to
+// base, and refuses to send one in the clear when the source is https.
+//
+// The clear-text check is the transport's job here because gowebdav
+// builds its own http.Client and exposes no hook for its CheckRedirect,
+// which is where newHTTPClient puts rejectSchemeDowngrade for OPDS and
+// the updater. It needs no redirect history: every request a client
+// makes starts at the source host, so an http:// request from an https
+// source is by definition a downgraded hop, and Go replays the
+// Authorization header across a same-host redirect, which would put the
+// WebDAV password on the wire in clear.
+type guardedTransport struct {
+	ctx    context.Context
+	base   http.RoundTripper
+	secure bool
 }
 
-func (t ctxTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+func (t guardedTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	if t.secure && req.URL.Scheme != "https" {
+		return nil, fmt.Errorf("%w (%s)", errSchemeDowngrade, redactURL(req.URL))
+	}
 	return t.base.RoundTrip(req.WithContext(t.ctx))
+}
+
+// isHTTPSURL reports whether raw is an https:// URL. An unparsable or
+// schemeless value is not https, and gowebdav rejects it later with its
+// own error.
+func isHTTPSURL(raw string) bool {
+	u, err := url.Parse(raw)
+	return err == nil && u.Scheme == "https"
 }
 
 func (s *WebDAVSource) List(ctx context.Context) ([]Book, error) {

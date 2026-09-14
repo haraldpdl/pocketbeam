@@ -438,3 +438,110 @@ func TestClassifyWebDAVError(t *testing.T) {
 		})
 	}
 }
+
+// stubRoundTripper records whether a request reached the wire.
+type stubRoundTripper struct{ calls int }
+
+func (s *stubRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	s.calls++
+	return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader("")), Request: req}, nil
+}
+
+// gowebdav hides its http.Client, so the https-to-http guard sits in the
+// transport instead of a CheckRedirect. It has to block the request
+// before it is dialled, not merely report it afterwards.
+func TestGuardedTransport_BlocksPlaintextFromHTTPSSource(t *testing.T) {
+	cases := []struct {
+		name     string
+		secure   bool
+		url      string
+		wantSent bool
+	}{
+		{"https source stays on https", true, "https://dav.example/Books/", true},
+		{"https source downgraded to http", true, "http://dav.example/Books/", false},
+		{"http source stays on http", false, "http://dav.example/Books/", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			base := &stubRoundTripper{}
+			rt := guardedTransport{ctx: context.Background(), base: base, secure: tc.secure}
+			req, err := http.NewRequest("PROPFIND", tc.url, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			resp, err := rt.RoundTrip(req)
+			if resp != nil {
+				resp.Body.Close()
+			}
+			if tc.wantSent {
+				if err != nil {
+					t.Fatalf("RoundTrip = %v, want nil", err)
+				}
+			} else if !errors.Is(err, errSchemeDowngrade) {
+				t.Fatalf("RoundTrip = %v, want a scheme-downgrade error", err)
+			}
+			if sent := base.calls == 1; sent != tc.wantSent {
+				t.Errorf("request sent = %v, want %v", sent, tc.wantSent)
+			}
+		})
+	}
+
+	// Credentials pasted into the URL must not surface in the error.
+	base := &stubRoundTripper{}
+	rt := guardedTransport{ctx: context.Background(), base: base, secure: true}
+	req, err := http.NewRequest("PROPFIND", "http://alice:hunter2@dav.example/Books/", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = rt.RoundTrip(req)
+	if err == nil || strings.Contains(err.Error(), "hunter2") {
+		t.Errorf("got %v, want a downgrade error without the password", err)
+	}
+}
+
+// The probe sends the WebDAV password as Basic auth and Go replays the
+// Authorization header across a same-host redirect, so a server (or proxy)
+// that bounces the probe to http:// must get nothing.
+func TestProbeWebDAV_RefusesSchemeDowngrade(t *testing.T) {
+	var plaintextHits atomic.Int32
+	plain := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		plaintextHits.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer plain.Close()
+
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, plain.URL+r.URL.Path, http.StatusFound)
+	}))
+	defer srv.Close()
+
+	// The shared pool has no root for the test server's certificate;
+	// httptest built a transport that trusts it.
+	restore := webdavTransport
+	webdavTransport = srv.Client().Transport.(*http.Transport)
+	t.Cleanup(func() { webdavTransport = restore })
+
+	err := ProbeWebDAV(context.Background(), srv.URL, "alice", "hunter2", "/Books")
+	if err == nil || !strings.Contains(err.Error(), "insecure http address") {
+		t.Fatalf("ProbeWebDAV = %v, want the refused-downgrade message", err)
+	}
+	if got := plaintextHits.Load(); got != 0 {
+		t.Errorf("plaintext server saw %d requests, want 0", got)
+	}
+}
+
+func TestIsHTTPSURL(t *testing.T) {
+	cases := map[string]bool{
+		"https://dav.example":      true,
+		"HTTPS://dav.example":      true,
+		"https://dav.example/dav/": true,
+		"http://dav.example":       false,
+		"dav.example":              false,
+		"://":                      false,
+	}
+	for in, want := range cases {
+		if got := isHTTPSURL(in); got != want {
+			t.Errorf("isHTTPSURL(%q) = %v, want %v", in, got, want)
+		}
+	}
+}

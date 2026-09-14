@@ -130,7 +130,7 @@ func looksLikeOPDS(body []byte) bool {
 
 // classifyTransportError maps a net/http transport error to a concise,
 // user-readable message covering DNS, timeout, TLS, connection refused,
-// and generic network unreachable.
+// a refused https-to-http redirect, and generic network unreachable.
 func classifyTransportError(err error) error {
 	var urlErr *url.Error
 	if errors.As(err, &urlErr) && urlErr.Timeout() {
@@ -139,6 +139,9 @@ func classifyTransportError(err error) error {
 	var dnsErr *net.DNSError
 	if errors.As(err, &dnsErr) {
 		return errors.New("Server name could not be resolved. Check the URL.")
+	}
+	if errors.Is(err, errSchemeDowngrade) {
+		return errors.New("Server redirected to an insecure http address. Refusing to send the password.")
 	}
 	msg := err.Error()
 	switch {

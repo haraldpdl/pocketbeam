@@ -98,6 +98,11 @@ func NewClient(base, user, pass string) (*Client, error) {
 	}, nil
 }
 
+// errSchemeDowngrade marks a refused https-to-http redirect. The probes
+// classify it into a message that names the real cause instead of the
+// generic "could not reach the server" a transport error would get.
+var errSchemeDowngrade = errors.New("refusing redirect from https to http")
+
 // rejectSchemeDowngrade blocks redirects from https:// to http://. A
 // compromised or misconfigured proxy could otherwise strip TLS and expose
 // Basic auth credentials in cleartext.
@@ -107,7 +112,7 @@ func rejectSchemeDowngrade(req *http.Request, via []*http.Request) error {
 	}
 	origin := via[0].URL
 	if origin.Scheme == "https" && req.URL.Scheme == "http" {
-		return fmt.Errorf("refusing redirect from https to http (%s)", redactURL(req.URL))
+		return fmt.Errorf("%w (%s)", errSchemeDowngrade, redactURL(req.URL))
 	}
 	if len(via) >= 10 {
 		return errors.New("too many redirects")
