@@ -364,6 +364,7 @@ func (a *app) runSync() {
 	opts := SyncOptions{
 		DeleteMissing: cfg.DeleteMissing,
 		Scope:         ScopeFor(cfg),
+		Profile:       cfg.Profile,
 	}
 	if cfg.DeleteMissing {
 		opts.Confirm = a.confirmDeletions

@@ -12,17 +12,17 @@ func TestStore_UpsertAndEntriesByUUID(t *testing.T) {
 	s, _ := openTempStore(t)
 	defer s.Close()
 
-	if _, exists := lookup(t, s, "nope"); exists {
+	if _, exists := lookup(t, s, "/lib", "nope"); exists {
 		t.Fatal("lookup(unknown) = exists, want absent")
 	}
 
 	b := makeBook("u1", "Author", "Title", "http://x/1")
 	b.Updated = time.Unix(1_700_000_000, 0)
 	b.Size = 500
-	if err := s.Upsert(b, "/lib/Author/Title.epub", 1234); err != nil {
+	if err := s.Upsert("/lib", b, "/lib/Author/Title.epub", 1234); err != nil {
 		t.Fatalf("Upsert: %v", err)
 	}
-	e, exists := lookup(t, s, "u1")
+	e, exists := lookup(t, s, "/lib", "u1")
 	if !exists {
 		t.Fatal("u1 missing after Upsert")
 	}
@@ -40,13 +40,13 @@ func TestStore_UpsertAndEntriesByUUID(t *testing.T) {
 	// Re-upserting the same UUID updates in place rather than duplicating.
 	b.Title = "Renamed"
 	b.Updated = b.Updated.Add(time.Hour)
-	if err := s.Upsert(b, "/lib/Author/Renamed.epub", 0); err != nil {
+	if err := s.Upsert("/lib", b, "/lib/Author/Renamed.epub", 0); err != nil {
 		t.Fatalf("Upsert(again): %v", err)
 	}
 	if n, _ := s.BookCount("/lib"); n != 1 {
 		t.Errorf("BookCount = %d, want 1 after re-upsert", n)
 	}
-	e, _ = lookup(t, s, "u1")
+	e, _ = lookup(t, s, "/lib", "u1")
 	if !e.Updated.Equal(b.Updated) || e.LocalPath != "/lib/Author/Renamed.epub" {
 		t.Errorf("after update: (%v, %q)", e.Updated, e.LocalPath)
 	}
@@ -57,10 +57,10 @@ func TestStore_UpsertAndEntriesByUUID(t *testing.T) {
 
 	// Neither measured nor advertised: stored as 0 (unknown), never negative.
 	b.Size = -7
-	if err := s.Upsert(b, e.LocalPath, -1); err != nil {
+	if err := s.Upsert("/lib", b, e.LocalPath, -1); err != nil {
 		t.Fatalf("Upsert(negative): %v", err)
 	}
-	if e, _ = lookup(t, s, "u1"); e.Size != 0 {
+	if e, _ = lookup(t, s, "/lib", "u1"); e.Size != 0 {
 		t.Errorf("size = %d, want 0 for unknown", e.Size)
 	}
 }
@@ -70,11 +70,11 @@ func TestStore_AllEntriesAndDelete(t *testing.T) {
 	defer s.Close()
 
 	for _, id := range []string{"a", "b"} {
-		if err := s.Upsert(makeBook(id, "Au", "T"+id, ""), "/lib/"+id, 10); err != nil {
+		if err := s.Upsert("/lib", makeBook(id, "Au", "T"+id, ""), "/lib/"+id, 10); err != nil {
 			t.Fatalf("Upsert(%s): %v", id, err)
 		}
 	}
-	all, err := s.AllEntries()
+	all, err := s.AllEntries("/lib")
 	if err != nil || len(all) != 2 {
 		t.Fatalf("AllEntries = %d entries, err=%v; want 2", len(all), err)
 	}
@@ -83,17 +83,17 @@ func TestStore_AllEntriesAndDelete(t *testing.T) {
 			t.Errorf("entry %+v carries wrong display/path/size fields", e)
 		}
 	}
-	if err := s.Delete("a"); err != nil {
+	if err := s.Delete("/lib", "a"); err != nil {
 		t.Fatalf("Delete: %v", err)
 	}
-	if _, exists := lookup(t, s, "a"); exists {
+	if _, exists := lookup(t, s, "/lib", "a"); exists {
 		t.Error("entry a still present after Delete")
 	}
 	if n, _ := s.BookCount("/lib"); n != 1 {
 		t.Errorf("BookCount = %d, want 1", n)
 	}
 	// Deleting an unknown UUID is a no-op, not an error.
-	if err := s.Delete("missing"); err != nil {
+	if err := s.Delete("/lib", "missing"); err != nil {
 		t.Errorf("Delete(missing) = %v, want nil", err)
 	}
 }
@@ -155,41 +155,94 @@ func TestStore_Meta(t *testing.T) {
 	}
 }
 
-// Installs from before the size column exist in the wild; OpenStore must
-// add the column without touching existing rows, and reopening an
-// already-migrated database must stay idempotent.
-func TestOpenStore_MigratesLegacySchema(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "legacy.db")
+// writeLegacyBooks creates a state DB with the pre-migration schema (no
+// size column, UUID as the whole primary key) holding the given rows,
+// each {uuid, local_path}.
+func writeLegacyBooks(t *testing.T, path string, rows [][2]string) {
+	t.Helper()
 	raw, err := sql.Open("sqlite3", path)
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer raw.Close()
 	if _, err := raw.Exec(`CREATE TABLE books (
 		uuid TEXT PRIMARY KEY, title TEXT NOT NULL, author TEXT NOT NULL,
 		updated INTEGER NOT NULL, local_path TEXT NOT NULL)`); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := raw.Exec(`INSERT INTO books VALUES ('old', 'Old Title', 'Old Author', 42, '/lib/old.epub')`); err != nil {
-		t.Fatal(err)
+	for _, r := range rows {
+		if _, err := raw.Exec(`INSERT INTO books VALUES (?, 'Old Title', 'Old Author', 42, ?)`, r[0], r[1]); err != nil {
+			t.Fatal(err)
+		}
 	}
-	raw.Close()
+}
+
+// Installs from before the size column exist in the wild; OpenStore must
+// add the column without touching existing rows, and reopening an
+// already-migrated database must stay idempotent.
+func TestOpenStore_MigratesLegacySchema(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "legacy.db")
+	const local = "/lib/Old Author/Old Title.epub"
+	writeLegacyBooks(t, path, [][2]string{{"old", local}})
 
 	for pass := 1; pass <= 2; pass++ {
 		s, err := OpenStore(path)
 		if err != nil {
 			t.Fatalf("OpenStore pass %d: %v", pass, err)
 		}
-		e, exists := lookup(t, s, "old")
+		e, exists := lookup(t, s, "/lib", "old")
 		if !exists {
 			t.Fatalf("pass %d: legacy row missing", pass)
 		}
-		if e.Updated.Unix() != 42 || e.LocalPath != "/lib/old.epub" || e.Size != 0 {
-			t.Errorf("pass %d: legacy row = (%d, %q, %d), want (42, /lib/old.epub, 0)", pass, e.Updated.Unix(), e.LocalPath, e.Size)
+		if e.Updated.Unix() != 42 || e.LocalPath != local || e.Size != 0 {
+			t.Errorf("pass %d: legacy row = (%d, %q, %d), want (42, %q, 0)", pass, e.Updated.Unix(), e.LocalPath, e.Size, local)
 		}
 		if _, _, err := s.GetMeta("anything"); err != nil {
 			t.Errorf("pass %d: meta table missing after migration: %v", pass, err)
 		}
 		s.Close()
+	}
+}
+
+// Rows written under the UUID-only key describe whichever library
+// downloaded them last, so the migration has to hand each row to the
+// library its file sits in.
+func TestOpenStore_MigrationKeysRowsByLibrary(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "legacy.db")
+	writeLegacyBooks(t, path, [][2]string{
+		{"home-only", "/Books/home/Author/A.epub"},
+		{"nas-only", "/Books/nas/Author/B.epub"},
+		// The shared identity, pointing at whichever library synced last.
+		{"webdav:/C.epub", "/Books/nas/Author/C.epub"},
+		// Not a <library>/<author>/<file> path: no profile can claim it.
+		{"stray", "/loose.epub"},
+	})
+
+	s, err := OpenStore(path)
+	if err != nil {
+		t.Fatalf("OpenStore: %v", err)
+	}
+	defer s.Close()
+
+	for library, want := range map[string][]string{
+		"/Books/home": {"home-only"},
+		"/Books/nas":  {"nas-only", "webdav:/C.epub"},
+	} {
+		entries, err := s.EntriesByUUID(library)
+		if err != nil {
+			t.Fatalf("EntriesByUUID(%q): %v", library, err)
+		}
+		if len(entries) != len(want) {
+			t.Errorf("%q tracks %d rows, want %d", library, len(entries), len(want))
+		}
+		for _, uuid := range want {
+			if _, ok := entries[uuid]; !ok {
+				t.Errorf("%q lost row %q", library, uuid)
+			}
+		}
+	}
+	if n, err := s.BookCount("/Books/home"); err != nil || n != 1 {
+		t.Errorf("BookCount(/Books/home) = %d (err %v), want 1", n, err)
 	}
 }
 
@@ -221,7 +274,7 @@ func TestOpenStore_WaitsForForeignLock(t *testing.T) {
 	}
 
 	done := make(chan error, 1)
-	go func() { done <- s.Upsert(makeBook("u1", "Au", "T", ""), "/lib/Au/T.epub", 1) }()
+	go func() { done <- s.Upsert("/lib", makeBook("u1", "Au", "T", ""), "/lib/Au/T.epub", 1) }()
 
 	// Without the busy timeout Upsert returns "database is locked" at once;
 	// with it the call is still pending when the lock is released.
@@ -236,7 +289,7 @@ func TestOpenStore_WaitsForForeignLock(t *testing.T) {
 	if err := <-done; err != nil {
 		t.Fatalf("Upsert after lock release: %v", err)
 	}
-	if _, exists := lookup(t, s, "u1"); !exists {
+	if _, exists := lookup(t, s, "/lib", "u1"); !exists {
 		t.Error("u1 missing after the waited write")
 	}
 }
@@ -251,7 +304,7 @@ func TestStore_OtherOwner(t *testing.T) {
 	s, _ := openTempStore(t)
 	defer s.Close()
 
-	if err := s.Upsert(makeBook("u1", "Au", "T", ""), "/lib/Au/T.epub", 1); err != nil {
+	if err := s.Upsert("/lib", makeBook("u1", "Au", "T", ""), "/lib/Au/T.epub", 1); err != nil {
 		t.Fatal(err)
 	}
 	cases := []struct{ path, except, want string }{
@@ -261,7 +314,7 @@ func TestStore_OtherOwner(t *testing.T) {
 		{"/lib/Au/Other.epub", "", ""},
 	}
 	for _, tc := range cases {
-		got, err := s.OtherOwner(tc.path, tc.except)
+		got, err := s.OtherOwner("/lib", tc.path, tc.except)
 		if err != nil {
 			t.Fatalf("OtherOwner(%q, %q): %v", tc.path, tc.except, err)
 		}
@@ -272,13 +325,13 @@ func TestStore_OtherOwner(t *testing.T) {
 
 	// Stores from before filename disambiguation hold several UUIDs at one
 	// path; excluding one must still surface the other.
-	if err := s.Upsert(makeBook("u2", "Au", "T", ""), "/lib/Au/T.epub", 1); err != nil {
+	if err := s.Upsert("/lib", makeBook("u2", "Au", "T", ""), "/lib/Au/T.epub", 1); err != nil {
 		t.Fatal(err)
 	}
-	if got, _ := s.OtherOwner("/lib/Au/T.epub", "u2"); got != "u1" {
+	if got, _ := s.OtherOwner("/lib", "/lib/Au/T.epub", "u2"); got != "u1" {
 		t.Errorf("OtherOwner with two rows, except u2 = %q, want u1", got)
 	}
-	if got, _ := s.OtherOwner("/lib/Au/T.epub", "u1"); got != "u2" {
+	if got, _ := s.OtherOwner("/lib", "/lib/Au/T.epub", "u1"); got != "u2" {
 		t.Errorf("OtherOwner with two rows, except u1 = %q, want u2", got)
 	}
 }
@@ -292,18 +345,15 @@ func TestStore_BookCountScopedToLibrary(t *testing.T) {
 	nas := filepath.Join(dir, "Books", "nas")
 
 	seed := []struct {
-		uuid, path string
+		library, uuid string
 	}{
-		{"a", filepath.Join(home, "Author", "A.epub")},
-		{"b", filepath.Join(home, "Author", "B.epub")},
-		{"c", filepath.Join(nas, "Author", "C.epub")},
-		// sanitize turns FAT-illegal characters into "_", which is a
-		// single-character wildcard in SQL LIKE.
-		{"d", filepath.Join(dir, "Books", "a_b", "Author", "D.epub")},
-		{"e", filepath.Join(dir, "Books", "axb", "Author", "E.epub")},
+		{home, "a"},
+		{home, "b"},
+		{nas, "c"},
 	}
 	for _, e := range seed {
-		if err := s.Upsert(Book{UUID: e.uuid, Title: e.uuid, Author: "Author", Updated: time.Unix(0, 0)}, e.path, 1); err != nil {
+		path := filepath.Join(e.library, "Author", e.uuid+".epub")
+		if err := s.Upsert(e.library, Book{UUID: e.uuid, Title: e.uuid, Author: "Author", Updated: time.Unix(0, 0)}, path, 1); err != nil {
 			t.Fatalf("Upsert: %v", err)
 		}
 	}
@@ -316,7 +366,6 @@ func TestStore_BookCountScopedToLibrary(t *testing.T) {
 		{filepath.Join(dir, "Books", "other"), 0},
 		{home + string(filepath.Separator), 2},   // hand-edited trailing slash
 		{filepath.Join(dir, "Books", "HOME"), 2}, // one folder on FAT
-		{filepath.Join(dir, "Books", "a_b"), 1},  // "_" is a literal here, not a wildcard
 	} {
 		got, err := s.BookCount(tc.library)
 		if err != nil {

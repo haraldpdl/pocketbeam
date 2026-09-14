@@ -165,7 +165,7 @@ func TestSync_RefetchesBookMissingFromDisk(t *testing.T) {
 	if res := Sync(context.Background(), src, store, library, nil, SyncOptions{}); res.Downloaded != 1 {
 		t.Fatalf("seed sync: %+v", res)
 	}
-	e, ok := lookup(t, store, "uuid-a")
+	e, ok := lookup(t, store, library, "uuid-a")
 	if !ok {
 		t.Fatal("book not tracked after seed sync")
 	}
@@ -182,10 +182,9 @@ func TestSync_RefetchesBookMissingFromDisk(t *testing.T) {
 	}
 }
 
-// The state DB is shared by every profile and keyed on UUID alone, so a
-// second profile with its own library finds rows pointing into the first
-// profile's folder. It must download its own copies and leave the other
-// profile's files alone.
+// Two profiles whose servers hand out one identity each track their own
+// copy: the second profile downloads into its own library and leaves the
+// first profile's file alone.
 func TestSync_SecondLibraryGetsItsOwnCopies(t *testing.T) {
 	store, dir := openTempStore(t)
 	defer store.Close()
@@ -193,8 +192,8 @@ func TestSync_SecondLibraryGetsItsOwnCopies(t *testing.T) {
 	second := filepath.Join(dir, "Books", "nas")
 
 	// Two WebDAV servers with the same relative path produce the same
-	// synthetic UUID (see webdav.go), which is how the two profiles
-	// collide in the shared store.
+	// synthetic UUID (see webdav.go), which is how two profiles end up
+	// sharing a book identity in one state DB.
 	src := &fakeSource{books: []Book{makeBook("webdav:/Books/A.epub", "Author", "A", "http://one/a")}}
 	if res := Sync(context.Background(), src, store, first, nil, SyncOptions{}); res.Downloaded != 1 {
 		t.Fatalf("first profile sync: %+v", res)
@@ -216,11 +215,10 @@ func TestSync_SecondLibraryGetsItsOwnCopies(t *testing.T) {
 	}
 }
 
-// A second profile that already downloaded its own copy must reuse it on
-// the next sync instead of fetching the book again. The store row points
-// at whichever profile synced last, so without this the two profiles
-// re-download their whole overlap on every switch, forever.
-func TestSync_ReusesCopyAlreadyInThisLibrary(t *testing.T) {
+// Two profiles that share an identity each keep their own row, so
+// switching back and forth skips both copies instead of re-downloading
+// the overlap on every switch.
+func TestSync_EachLibraryKeepsItsOwnRow(t *testing.T) {
 	store, dir := openTempStore(t)
 	defer store.Close()
 	first := filepath.Join(dir, "Books", "home")
@@ -235,17 +233,22 @@ func TestSync_ReusesCopyAlreadyInThisLibrary(t *testing.T) {
 		t.Fatalf("nas sync: %+v", res)
 	}
 
-	// Back to the first profile: its copy is untouched on disk, only the
-	// store row moved.
+	// Back to the first profile: nothing to fetch, and both rows still
+	// point at their own library's copy.
 	res := Sync(context.Background(), src, store, first, nil, SyncOptions{})
 	if res.Skipped != 1 || res.Downloaded != 0 || res.FirstErr != nil {
 		t.Errorf("home re-sync = %+v, want Skipped 1 / Downloaded 0", res)
 	}
-	homeCopy := filepath.Join(first, "Author", "A.epub")
-	if e, _ := lookup(t, store, "webdav:/Books/A.epub"); e.LocalPath != homeCopy {
-		t.Errorf("row = %q, want it repointed at %q", e.LocalPath, homeCopy)
+	for _, library := range []string{first, second} {
+		want := filepath.Join(library, "Author", "A.epub")
+		if e, ok := lookup(t, store, library, "webdav:/Books/A.epub"); !ok || e.LocalPath != want {
+			t.Errorf("row for %q = (%q, ok=%v), want %q", library, e.LocalPath, ok, want)
+		}
+		if n, err := store.BookCount(library); err != nil || n != 1 {
+			t.Errorf("BookCount(%q) = %d (err %v), want 1", library, n, err)
+		}
 	}
-	// And the plan for that run agrees with what the run did.
+	// And the plan for the second profile agrees with what a run would do.
 	plan, _, err := Plan(context.Background(), src, store, second, SyncOptions{})
 	if err != nil {
 		t.Fatalf("Plan: %v", err)
@@ -255,28 +258,118 @@ func TestSync_ReusesCopyAlreadyInThisLibrary(t *testing.T) {
 	}
 }
 
-// A file of a different size at the target path is some other book (or a
-// truncated download), not this profile's copy, so it is fetched again.
-func TestSync_DoesNotAdoptDifferentlySizedFile(t *testing.T) {
+// A book two profiles share stays deletable from each of them: the
+// profile it disappears from prunes its own copy and leaves the other
+// profile's file and row alone.
+func TestSync_DeleteMissing_SharedIdentityPrunesOnlyThisLibrary(t *testing.T) {
 	store, dir := openTempStore(t)
 	defer store.Close()
-	first := filepath.Join(dir, "Books", "home")
-	second := filepath.Join(dir, "Books", "nas")
+	home := filepath.Join(dir, "Books", "home")
+	nas := filepath.Join(dir, "Books", "nas")
 
 	t0 := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
-	src := &fakeSource{books: []Book{makeBookSized("webdav:/Books/A.epub", "A", 0, t0)}}
-	if res := Sync(context.Background(), src, store, first, nil, SyncOptions{}); res.Downloaded != 1 {
-		t.Fatalf("home sync: %+v", res)
+	const uuid = "webdav:/Books/A.epub"
+	shared := &fakeSource{books: []Book{makeBookSized(uuid, "A", 0, t0)}}
+	for _, library := range []string{home, nas, home} {
+		if res := Sync(context.Background(), shared, store, library, nil, SyncOptions{Scope: "s", Profile: "p"}); res.FirstErr != nil {
+			t.Fatalf("seed sync of %q: %v", library, res.FirstErr)
+		}
 	}
-	stub := filepath.Join(second, "Author", "A.epub")
-	if err := os.MkdirAll(filepath.Dir(stub), 0o755); err != nil {
-		t.Fatal(err)
+
+	// The book is gone from the nas server. Its copy there is the nas
+	// profile's to delete.
+	var asked []LocalBook
+	res := Sync(context.Background(), &fakeSource{books: []Book{makeBookSized("other", "Other", 0, t0)}}, store, nas, nil, SyncOptions{
+		DeleteMissing: true,
+		Scope:         "s",
+		Profile:       "p",
+		Confirm: func(d []LocalBook) bool {
+			asked = append(asked, d...)
+			return true
+		},
+	})
+	if res.Deleted != 1 || len(asked) != 1 || asked[0].UUID != uuid {
+		t.Fatalf("nas sync = %+v, asked about %+v, want the shared book deleted", res, asked)
 	}
-	if err := os.WriteFile(stub, []byte("half"), 0o644); err != nil {
-		t.Fatal(err)
+	if _, err := os.Stat(filepath.Join(nas, "Author", "A.epub")); !os.IsNotExist(err) {
+		t.Errorf("nas copy still on disk: err=%v", err)
 	}
-	if res := Sync(context.Background(), src, store, second, nil, SyncOptions{}); res.Downloaded != 1 {
-		t.Errorf("nas sync = %+v, want the short file replaced by a download", res)
+	if _, err := os.Stat(filepath.Join(home, "Author", "A.epub")); err != nil {
+		t.Errorf("home copy was deleted: %v", err)
+	}
+	if _, ok := lookup(t, store, home, uuid); !ok {
+		t.Error("home row was deleted with the nas one")
+	}
+}
+
+// Profiles remember their own last scope. Alternating between two of them
+// used to overwrite one global memory, so the stored scope differed from
+// the current one on nearly every run and the delete step never ran.
+func TestSync_DeleteMissing_AlternatingProfilesKeepTheirScope(t *testing.T) {
+	store, dir := openTempStore(t)
+	defer store.Close()
+	home := filepath.Join(dir, "Books", "home")
+	nas := filepath.Join(dir, "Books", "nas")
+
+	t0 := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	homeSrc := &fakeSource{books: []Book{
+		makeBookSized("home-a", "A", 0, t0),
+		makeBookSized("home-b", "B", 0, t0),
+	}}
+	nasSrc := &fakeSource{books: []Book{makeBookSized("nas-a", "A", 0, t0)}}
+	homeOpts := SyncOptions{DeleteMissing: true, Scope: "home-scope", Profile: "home", Confirm: func([]LocalBook) bool { return true }}
+	nasOpts := SyncOptions{DeleteMissing: true, Scope: "nas-scope", Profile: "nas", Confirm: func([]LocalBook) bool { return true }}
+
+	// home records its scope, then nas runs in between.
+	if res := Sync(context.Background(), homeSrc, store, home, nil, homeOpts); res.FirstErr != nil {
+		t.Fatalf("home seed: %v", res.FirstErr)
+	}
+	if res := Sync(context.Background(), nasSrc, store, nas, nil, nasOpts); res.FirstErr != nil {
+		t.Fatalf("nas seed: %v", res.FirstErr)
+	}
+
+	// home again, with one book gone from its server: the scope it stored
+	// is still its own, so the delete step runs.
+	homeSrc.books = homeSrc.books[:1]
+	res := Sync(context.Background(), homeSrc, store, home, nil, homeOpts)
+	if res.Deleted != 1 {
+		t.Errorf("Deleted = %d, want 1 after the other profile synced in between", res.Deleted)
+	}
+	if _, ok := lookup(t, store, home, "home-b"); ok {
+		t.Error("home-b still tracked after the delete step")
+	}
+}
+
+// Installs upgrading from the single global last-scope key must not lose
+// the delete step on their first run under per-profile keys.
+func TestSync_DeleteMissing_AdoptsGlobalLastScope(t *testing.T) {
+	store, dir := openTempStore(t)
+	defer store.Close()
+	library := filepath.Join(dir, "lib")
+
+	t0 := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	src := &fakeSource{books: []Book{
+		makeBookSized("a", "A", 0, t0),
+		makeBookSized("b", "B", 0, t0),
+	}}
+	// A version that knew nothing about per-profile keys seeded the store
+	// and wrote the global one.
+	if res := Sync(context.Background(), src, store, library, nil, SyncOptions{Scope: "s"}); res.FirstErr != nil {
+		t.Fatalf("seed: %v", res.FirstErr)
+	}
+	if v, ok, _ := store.GetMeta(metaLastScope); !ok || v != "s" {
+		t.Fatalf("global last-scope key = (%q, %v), want the seed's scope", v, ok)
+	}
+
+	src.books = src.books[:1]
+	res := Sync(context.Background(), src, store, library, nil, SyncOptions{
+		DeleteMissing: true,
+		Scope:         "s",
+		Profile:       "only",
+		Confirm:       func([]LocalBook) bool { return true },
+	})
+	if res.Deleted != 1 {
+		t.Errorf("Deleted = %d, want 1 from the global key fallback", res.Deleted)
 	}
 }
 
@@ -322,7 +415,7 @@ func TestSync_DeleteMissing_LeavesOtherLibraryAlone(t *testing.T) {
 	if _, err := os.Stat(homeCopy); err != nil {
 		t.Errorf("the other profile's file was deleted: %v", err)
 	}
-	if _, exists := lookup(t, store, "uuid-home"); !exists {
+	if _, exists := lookup(t, store, home, "uuid-home"); !exists {
 		t.Error("the other profile's store row was deleted")
 	}
 

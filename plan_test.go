@@ -194,7 +194,7 @@ func TestPlan_CachedSizeOverwrittenByDownload(t *testing.T) {
 	if res := Sync(context.Background(), src, store, library, nil, SyncOptions{Scope: "s"}); res.FirstErr != nil {
 		t.Fatalf("Sync: %v", res.FirstErr)
 	}
-	e, exists := lookup(t, store, "a")
+	e, exists := lookup(t, store, library, "a")
 	if !exists {
 		t.Fatal("book a missing from store after sync")
 	}
@@ -216,11 +216,11 @@ func TestPlan_SharedPathNotReclaimable(t *testing.T) {
 	a := makeBookSized("a", "Same Title", 100, t0)
 	b := makeBookSized("b", "Same Title", 100, t0)
 	for _, bk := range []Book{a, b} {
-		if err := store.Upsert(bk, shared, 100); err != nil {
+		if err := store.Upsert(library, bk, shared, 100); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if err := store.SetMeta(metaLastScope, "s1"); err != nil {
+	if err := store.SetMeta(lastScopeKey(""), "s1"); err != nil {
 		t.Fatal(err)
 	}
 

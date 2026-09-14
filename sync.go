@@ -62,6 +62,12 @@ type SyncOptions struct {
 	// prune the device.
 	Scope string
 
+	// Profile names the profile being synced. The last-sync scope is
+	// remembered per profile: profiles sync different hosts and filters,
+	// so one shared memory of "the previous scope" would read as a scope
+	// change on every switch and disable the delete step for good.
+	Profile string
+
 	// Confirm is invoked before any deletion happens. If nil, the delete
 	// step is skipped even when DeleteMissing is true.
 	Confirm Confirm
@@ -86,7 +92,32 @@ type SyncResult struct {
 
 // metaLastScope is the key under which Sync persists the Scope of the
 // most recent run, used to skip the delete step when scope changes.
+// Versions before per-profile scopes wrote this key itself; each profile
+// now gets its own (see lastScopeKey).
 const metaLastScope = "last_scope"
+
+// lastScopeKey names the meta row holding the scope of the given
+// profile's most recent sync.
+func lastScopeKey(profile string) string {
+	if profile == "" {
+		return metaLastScope
+	}
+	return metaLastScope + ":" + profile
+}
+
+// lastScope returns the scope this profile synced last, or "" when it has
+// never synced. A profile with no key of its own falls back to the global
+// key older versions wrote, so an upgraded install still reaches the
+// delete step on its first run. That value names the profile that wrote
+// it (see ScopeFor), so it can only match that same profile.
+func lastScope(store *Store, profile string) string {
+	v, ok, _ := store.GetMeta(lastScopeKey(profile))
+	if ok || profile == "" {
+		return v
+	}
+	v, _, _ = store.GetMeta(metaLastScope)
+	return v
+}
 
 // Sync reconciles the remote catalog with the local library and store.
 // The source carries any backend-specific scoping (OPDS filter, WebDAV
@@ -105,7 +136,7 @@ func Sync(ctx context.Context, src Source, store *Store, library string, progres
 			return res
 		}
 	}
-	local, err := store.EntriesByUUID()
+	local, err := store.EntriesByUUID(library)
 	if err != nil {
 		res.FirstErr = fmt.Errorf("list local entries: %w", err)
 		return res
@@ -120,24 +151,9 @@ func Sync(ctx context.Context, src Source, store *Store, library string, progres
 			progress(i+1, total, b)
 		}
 		old, exists := local[b.UUID]
-		if exists && !b.Updated.After(old.Updated) {
-			if have := localCopyFor(store, library, b, old); have != "" {
-				if have != old.LocalPath {
-					// The row pointed into another profile's folder while
-					// this library already held the same download. Repoint
-					// it, otherwise the two profiles re-fetch their whole
-					// overlap every time the user switches between them.
-					if err := store.Upsert(b, have, old.Size); err != nil {
-						res.Failed++
-						if res.FirstErr == nil {
-							res.FirstErr = fmt.Errorf("store %q: %w", b.Title, err)
-						}
-						continue
-					}
-				}
-				res.Skipped++
-				continue
-			}
+		if exists && !b.Updated.After(old.Updated) && hasLocalCopy(old.LocalPath) {
+			res.Skipped++
+			continue
 		}
 		path, err := targetPath(store, library, b)
 		if err != nil {
@@ -163,18 +179,16 @@ func Sync(ctx context.Context, src Source, store *Store, library string, progres
 		// lands at a new path; tidy up the old file so we don't accumulate
 		// duplicates on the device. Stores written before filenames were
 		// disambiguated can map another book to the old path, in which case
-		// the file is that book's only copy and must stay. A recorded path
-		// outside this library belongs to another profile's folder, and
-		// that copy is the only one that profile has.
-		if exists && old.LocalPath != path && underDir(library, old.LocalPath) {
-			if other, _ := store.OtherOwner(old.LocalPath, b.UUID); other == "" {
+		// the file is that book's only copy and must stay.
+		if exists && old.LocalPath != path {
+			if other, _ := store.OtherOwner(library, old.LocalPath, b.UUID); other == "" {
 				if err := os.Remove(old.LocalPath); err == nil {
 					// Best-effort: also remove the old author directory if it's now empty.
 					_ = os.Remove(filepath.Dir(old.LocalPath))
 				}
 			}
 		}
-		if err := store.Upsert(b, path, actualSize); err != nil {
+		if err := store.Upsert(library, b, path, actualSize); err != nil {
 			res.Failed++
 			if res.FirstErr == nil {
 				res.FirstErr = fmt.Errorf("store %q: %w", b.Title, err)
@@ -193,12 +207,12 @@ func Sync(ctx context.Context, src Source, store *Store, library string, progres
 	// Record this run's scope even when we didn't delete, so the next
 	// sync with the same scope can proceed with deletion.
 	if opts.Scope != "" {
-		_ = store.SetMeta(metaLastScope, opts.Scope)
+		_ = store.SetMeta(lastScopeKey(opts.Profile), opts.Scope)
 	}
 	return res
 }
 
-// computeMissing returns the set of local entries inside library that are
+// computeMissing returns the set of library's local entries that are
 // absent from the current remote listing, applying the empty-remote and
 // scope-change guards. A nil
 // return with nil error means a guard tripped: the caller should treat it
@@ -214,15 +228,14 @@ func computeMissing(store *Store, library string, remote []Book, opts SyncOption
 	}
 	// Scope-change guard: if the user narrowed/widened what they sync,
 	// the diff against the previous scope's books would mass-delete.
-	lastScope, _, _ := store.GetMeta(metaLastScope)
-	if lastScope != opts.Scope {
+	if lastScope(store, opts.Profile) != opts.Scope {
 		return nil, nil
 	}
 	present := make(map[string]struct{}, len(remote))
 	for _, b := range remote {
 		present[b.UUID] = struct{}{}
 	}
-	entries, err := store.AllEntries()
+	entries, err := store.AllEntries(library)
 	if err != nil {
 		return nil, err
 	}
@@ -231,11 +244,10 @@ func computeMissing(store *Store, library string, remote []Book, opts SyncOption
 		if _, ok := present[e.UUID]; ok {
 			continue
 		}
-		// The store is shared by every profile and keyed on UUID alone, so
-		// it also holds rows pointing into other profiles' folders. This
-		// listing is one server's; it says nothing about a book another
-		// profile downloaded, and deleting it would remove a file from a
-		// library this run is not syncing.
+		// The rows are already this library's, so this only rejects a path
+		// the app never wrote there (a row migrated from the UUID-keyed
+		// schema, a hand-edited state DB). Deletion is irreversible, so it
+		// stays bounded to the library being synced.
 		if !underDir(library, e.LocalPath) {
 			continue
 		}
@@ -271,7 +283,7 @@ func reconcileDeletions(store *Store, library string, remote []Book, opts SyncOp
 		// Stores written before filenames were disambiguated can map
 		// another book to this path; then the file is that book's only
 		// copy and only the row goes.
-		other, err := store.OtherOwner(m.LocalPath, m.UUID)
+		other, err := store.OtherOwner(library, m.LocalPath, m.UUID)
 		if err != nil {
 			if res.FirstErr == nil {
 				res.FirstErr = fmt.Errorf("delete %q: %w", m.Title, err)
@@ -288,7 +300,7 @@ func reconcileDeletions(store *Store, library string, remote []Book, opts SyncOp
 			// Prune the author directory if it's now empty; ignore errors.
 			_ = os.Remove(filepath.Dir(m.LocalPath))
 		}
-		if err := store.Delete(m.UUID); err != nil {
+		if err := store.Delete(library, m.UUID); err != nil {
 			if res.FirstErr == nil {
 				res.FirstErr = fmt.Errorf("forget %q: %w", m.Title, err)
 			}
@@ -371,13 +383,13 @@ func Plan(ctx context.Context, src Source, store *Store, library string, opts Sy
 			return plan, nil, fmt.Errorf("list remote: %w", err)
 		}
 	}
-	local, err := store.EntriesByUUID()
+	local, err := store.EntriesByUUID(library)
 	if err != nil {
 		return plan, books, fmt.Errorf("list local entries: %w", err)
 	}
 	for _, b := range books {
 		old, exists := local[b.UUID]
-		if exists && !b.Updated.After(old.Updated) && localCopyFor(store, library, b, old) != "" {
+		if exists && !b.Updated.After(old.Updated) && hasLocalCopy(old.LocalPath) {
 			plan.Unchanged++
 			continue
 		}
@@ -411,7 +423,7 @@ func Plan(ctx context.Context, src Source, store *Store, library string, opts Sy
 		for _, m := range missing {
 			// A file shared with another tracked book stays on disk, so
 			// its bytes are not reclaimable (see reconcileDeletions).
-			if other, err := store.OtherOwner(m.LocalPath, m.UUID); err != nil {
+			if other, err := store.OtherOwner(library, m.LocalPath, m.UUID); err != nil {
 				return plan, books, err
 			} else if other == "" {
 				plan.ReclaimableBytes += m.Size
@@ -439,51 +451,17 @@ func availableBytes(path string) int64 {
 	return int64(st.Bavail) * int64(st.Bsize)
 }
 
-// localCopyFor returns the path inside library that already holds b's
-// recorded download, or "" when this run has to fetch the book. The
-// recorded path wins when it is inside this library. Otherwise it belongs
-// to another profile's folder (the state DB is shared and keyed on UUID
-// alone, and two servers can hand out one identity), and the path this
-// library would download to is checked instead: a file of the recorded
-// size is the copy this profile already has, and fetching it again would
-// repeat on every switch between the two profiles. The size is the only
-// cheap evidence that the file is this book, so a legacy row that never
-// recorded one downloads.
-func localCopyFor(store *Store, library string, b Book, old LocalBook) string {
-	if hasLocalCopy(library, old.LocalPath) {
-		return old.LocalPath
-	}
-	if old.Size <= 0 {
-		return ""
-	}
-	path, err := targetPath(store, library, b)
-	if err != nil {
-		return ""
-	}
-	st, err := os.Stat(path)
-	if err != nil || st.Size() != old.Size {
-		return ""
-	}
-	return path
-}
-
-// hasLocalCopy reports whether a book's recorded download is still usable
-// for a sync into library: the file has to sit inside that library and
-// still be on disk. The state DB is shared by every profile (state_db is
-// a global key) and keyed on UUID alone, so a row can point into another
-// profile's folder (WebDAV UUIDs are "webdav:<path>", identical for the
-// same relative path on two servers) or at a file the user deleted.
-// Skipping on the row alone would report books as skipped into an empty
-// library.
-func hasLocalCopy(library, path string) bool {
-	if !underDir(library, path) {
-		return false
-	}
+// hasLocalCopy reports whether a row's recorded download is still on
+// disk. The row is already scoped to the library being synced, but the
+// user can delete books from the device behind the app's back; skipping
+// on the row alone would report books as skipped into an empty library.
+func hasLocalCopy(path string) bool {
 	_, err := os.Stat(path)
 	return err == nil
 }
 
-// pathKey normalises a filesystem path for comparison. Case is folded
+// pathKey normalises a filesystem path for comparison, and is what the
+// store writes into its library column (see libraryKey). Case is folded
 // because the device library sits on a FAT volume, where "Books/Home" and
 // "Books/home" are one directory (see Store.OtherOwner), and the path is
 // cleaned because config values are hand-editable: "Books/home/" names the
@@ -521,7 +499,7 @@ func targetPath(store *Store, library string, b Book) (string, error) {
 	dir := filepath.Join(library, sanitize(b.Author))
 	title := sanitize(b.Title)
 	path := filepath.Join(dir, title+ext)
-	owner, err := store.OtherOwner(path, b.UUID)
+	owner, err := store.OtherOwner(library, path, b.UUID)
 	if err != nil {
 		return "", err
 	}
