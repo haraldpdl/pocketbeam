@@ -72,7 +72,7 @@ Connect over USB and delete `applications/pocketbeam.app`. To remove its setting
 
 ## Usage
 
-The screens are pictured in the install guide above: the wizard and the sync screen, before and during a sync, in [Start it for the first time](#3-start-it-for-the-first-time); the sync screen with an update waiting and Settings in [Updates](#4-updates). The two pickers are below. Every image in this README is rendered from the app's own drawing code (`make screenshots`), so they stay in step with it.
+The screens are pictured in the install guide above: the wizard and the sync screen, before and during a sync, in [Start it for the first time](#3-start-it-for-the-first-time); the sync screen with an update waiting and Settings in [Updates](#4-updates). The two pickers, and the screens a sync raises on its own, are below. Every image in this README is rendered from the app's own drawing code (`make screenshots`), so they stay in step with it.
 
 The main screen has four actions:
 
@@ -89,6 +89,12 @@ The main screen has four actions:
 <img src="docs/screenshots/feed-picker.png" alt="The OPDS feed picker part-way down a catalog: the breadcrumb Calibre-Web / Categories, a Back to Calibre-Web row, the subsections with their book counts, a Page 1 of 2 indicator with a Next button, and Add this level above Done (1 selected)" width="300"> <img src="docs/screenshots/dir-picker.png" alt="The WebDAV directory picker inside a share: the path /Books/Fiction, a Back to Books row, the folders one level down, and a Sync this folder button" width="300">
 
 The two pickers, each part-way down a tree: the OPDS feed picker with one level already added to the selection, and the WebDAV directory picker listing the folders in a share. Tapping a row descends, the row at the top goes back up one level, and the button at the bottom saves what is on screen.
+
+A sync raises three screens of its own, in the order they can appear:
+
+<img src="docs/screenshots/space-warning.png" alt="The pre-flight space warning: 145 books and 1.8 GB needed against 612 MB free on the device, notes about books of unknown size and space delete-missing would reclaim, and Download / Cancel buttons" width="240"> <img src="docs/screenshots/delete-confirm.png" alt="The delete-missing prompt: 8 books are no longer on the server, the first five listed by author and title with the rest counted, and Keep / Delete buttons" width="240"> <img src="docs/screenshots/library-refresh.png" alt="The library-refresh dialog shown after a sync that changed the library: Refreshing library, Indexing new books on the device, and a note that it closes on its own" width="240">
+
+The space warning comes before any download and only when the run would not fit; the delete-missing prompt comes after the downloads and only with the toggle on; the refresh dialog appears whenever the sync changed the library, and closes itself when the PocketBook scanner is done.
 
 Books land under `/mnt/ext1/Books/<profile name>/<Author>/<Title>.<ext>` (`Books/default` on a fresh install, since the first profile is not named on screen) and show up in the device's library after the next library refresh. If a second, different book resolves to the same author and title (another edition, or a same-named file in another WebDAV folder), its filename gets a short `[xxxxxxxx]` tag so the two never share one file.
 

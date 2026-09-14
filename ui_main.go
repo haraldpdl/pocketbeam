@@ -1,13 +1,15 @@
-// Drawing for the main sync screen. It paints from a plain snapshot of
-// the app state, so it renders the same on the device and into an image
-// on a build machine; the event handling and the sync runner it drives
-// live in ui_main_arm.go.
+// Drawing for the main sync screen and for the library-refresh dialog
+// the sync hands over to. Both paint from a plain snapshot of the app
+// state, so they render the same on the device and into an image on a
+// build machine; the event handling, the sync runner and the spinner
+// that drives the dialog live in ui_main_arm.go.
 
 package main
 
 import (
 	"fmt"
 	"image"
+	"strings"
 	"time"
 )
 
@@ -182,4 +184,37 @@ func formatElapsed(d time.Duration) string {
 		return fmt.Sprintf("%d:%02d", s/60, s%60)
 	}
 	return fmt.Sprintf("%d:%02d:%02d", s/3600, (s%3600)/60, s%60)
+}
+
+// libraryRefreshView is the one thing the refresh dialog animates: how
+// many trailing dots the "Indexing" line currently carries.
+type libraryRefreshView struct {
+	dots int
+}
+
+// drawLibraryRefresh paints the centred informational dialog shown after
+// a sync that changed the library. The actual work happens in
+// runLibraryScanner; scanner.app takes foreground focus as soon as it
+// starts, so this draw pass is what the user sees in the ~instant
+// between sync completion and the scanner UI appearing. It also serves
+// as the backdrop the user returns to when scanner exits, right before
+// the goroutine flips back to the main screen.
+func drawLibraryRefresh(c Canvas, l layout, v libraryRefreshView) {
+	c.SetFont(l.font(c, 54, true), black)
+	c.Text(image.Point{X: l.margin, Y: l.sy(300)}, "Refreshing library")
+
+	drawLibraryRefreshLine(c, l, v)
+
+	c.SetFont(l.font(c, 32, false), black)
+	c.Text(image.Point{X: l.margin, Y: l.sy(450)}, "This closes on its own.")
+}
+
+// drawLibraryRefreshLine paints just the animated line, in the strip the
+// layout reserves for it. Split out because the spinner repaints that
+// strip alone between full passes, and the two have to agree on the
+// wording and the position down to the pixel.
+func drawLibraryRefreshLine(c Canvas, l layout, v libraryRefreshView) {
+	c.SetFont(l.font(c, 32, false), black)
+	c.Text(image.Point{X: l.margin, Y: l.libRefreshLine.Min.Y},
+		"Indexing new books on the device"+strings.Repeat(".", v.dots))
 }

@@ -49,6 +49,9 @@ func screenshots() []screenshot {
 		{"settings", func(c Canvas, l layout) { drawSettings(c, l, settingsFixtureView()) }},
 		{"feed-picker", func(c Canvas, l layout) { drawPicker(c, l, feedPickerFixtureView()) }},
 		{"dir-picker", func(c Canvas, l layout) { drawPicker(c, l, dirPickerFixtureView()) }},
+		{"delete-confirm", func(c Canvas, l layout) { drawDeleteConfirm(c, l, deleteConfirmFixtureView()) }},
+		{"space-warning", func(c Canvas, l layout) { drawSpaceWarn(c, l, spaceWarnFixtureView()) }},
+		{"library-refresh", func(c Canvas, l layout) { drawLibraryRefresh(c, l, libraryRefreshView{dots: 2}) }},
 	}
 }
 
@@ -190,4 +193,34 @@ func writeScreenshots(dir string) error {
 		fmt.Println("wrote", path)
 	}
 	return nil
+}
+
+// deleteConfirmFixtureView is the delete-missing prompt with more books
+// waiting than it lists, the state that shows both what the prompt names
+// and how it counts the rest.
+func deleteConfirmFixtureView() deleteConfirmView {
+	return deleteConfirmViewOf([]LocalBook{
+		{Author: "Ursula K. Le Guin", Title: "The Dispossessed"},
+		{Author: "Octavia E. Butler", Title: "Parable of the Sower"},
+		{Author: "Stanisław Lem", Title: "Solaris"},
+		{Author: "Ann Leckie", Title: "Ancillary Justice"},
+		{Author: "Arkady Martine", Title: "A Memory Called Empire"},
+		{Author: "Becky Chambers", Title: "The Long Way to a Small, Angry Planet"},
+		{Author: "Adrian Tchaikovsky", Title: "Children of Time"},
+		{Author: "N. K. Jemisin", Title: "The Fifth Season"},
+	})
+}
+
+// spaceWarnFixtureView is the pre-flight warning for a first sync of a
+// large library onto a device that is nearly full, with delete-missing
+// able to win some of the shortfall back.
+func spaceWarnFixtureView() spaceWarnView {
+	return spaceWarnViewOf(SyncPlan{
+		NewBooks:         make([]Book, 142),
+		UpdatedBooks:     make([]Book, 3),
+		DownloadBytes:    1_840_000_000,
+		FreeBytes:        612_000_000,
+		ReclaimableBytes: 240_000_000,
+		UnknownSizes:     4,
+	})
 }

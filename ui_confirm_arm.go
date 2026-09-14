@@ -1,12 +1,10 @@
 // Blocking confirmations the sync goroutine raises: the pre-flight
 // space warning and the delete-missing prompt. Both park their answer on
-// a channel the sync goroutine waits on.
+// a channel the sync goroutine waits on; the drawing is in ui_confirm.go.
 
 package main
 
 import (
-	"fmt"
-	"image"
 	"sync"
 
 	ink "github.com/dennwc/inkview"
@@ -16,11 +14,9 @@ import (
 // is up and routes the user's answer back to the sync goroutine over ch.
 // ch is non-nil only while a prompt is pending.
 type spaceWarnState struct {
-	mu      sync.Mutex
-	plan    SyncPlan
-	ch      chan bool
-	yesRect image.Rectangle
-	noRect  image.Rectangle
+	mu   sync.Mutex
+	plan SyncPlan
+	ch   chan bool
 }
 
 // deleteConfirmState holds the deletion set awaiting user confirmation
@@ -30,8 +26,6 @@ type deleteConfirmState struct {
 	mu      sync.Mutex
 	pending []LocalBook
 	ch      chan bool
-	yesRect image.Rectangle
-	noRect  image.Rectangle
 }
 
 // confirmSpace parks the plan on the UI, flips to the oversize-confirm
@@ -63,98 +57,12 @@ func (a *app) answerSpace(ok bool) {
 	ink.Repaint()
 }
 
-// formatBytes renders b as a short human-readable size. Binary units
-// (KiB/MiB/GiB) are skipped in favour of base-10 because free-space
-// estimates are already approximate and base-10 matches how every
-// PocketBook file dialog phrases sizes.
-func formatBytes(b int64) string {
-	if b < 0 {
-		b = 0
-	}
-	const (
-		kb = 1000
-		mb = 1000 * kb
-		gb = 1000 * mb
-	)
-	switch {
-	case b >= gb:
-		return fmt.Sprintf("%.1f GB", float64(b)/float64(gb))
-	case b >= mb:
-		return fmt.Sprintf("%.0f MB", float64(b)/float64(mb))
-	case b >= kb:
-		return fmt.Sprintf("%.0f KB", float64(b)/float64(kb))
-	default:
-		return fmt.Sprintf("%d B", b)
-	}
-}
-
-func (a *app) drawSpaceWarn(c Canvas) {
-	title := a.layout.font(c, 64, true)
-	c.SetFont(title, black)
-
-	body := a.layout.font(c, 32, false)
-	c.SetFont(body, black)
-
-	btnFont := a.layout.font(c, 44, true)
-
+// spaceWarnView snapshots the parked plan for the draw, so the drawing
+// itself touches no shared state and can run off-device.
+func (a *app) spaceWarnView() spaceWarnView {
 	a.spaceWarn.mu.Lock()
-	plan := a.spaceWarn.plan
-	a.spaceWarn.mu.Unlock()
-
-	c.SetFont(title, black)
-	c.Text(image.Point{X: a.layout.margin, Y: a.layout.sy(140)}, "Not enough space")
-	c.SetFont(body, darkGray)
-	c.Text(image.Point{X: a.layout.margin, Y: a.layout.sy(200)},
-		"This sync needs more room than the device has.")
-	a.layout.drawHairline(c, a.layout.margin, a.layout.screen.X-a.layout.margin, a.layout.sy(240))
-
-	hero := a.layout.font(c, 40, true)
-	c.SetFont(hero, black)
-	newCount := len(plan.NewBooks) + len(plan.UpdatedBooks)
-	c.Text(image.Point{X: a.layout.margin, Y: a.layout.sy(310)},
-		fmt.Sprintf("%d books · %s needed", newCount, formatBytes(plan.DownloadBytes)))
-	c.SetFont(body, darkGray)
-	c.Text(image.Point{X: a.layout.margin, Y: a.layout.sy(365)},
-		fmt.Sprintf("%s free on device", formatBytes(plan.FreeBytes)))
-
-	y := a.layout.sy(440)
-	if plan.UnknownSizes > 0 {
-		c.Text(image.Point{X: a.layout.margin, Y: y},
-			fmt.Sprintf("%d books had unknown size; total is a lower bound.", plan.UnknownSizes))
-		y += a.layout.sy(50)
-	}
-	if plan.ReclaimableBytes > 0 {
-		c.Text(image.Point{X: a.layout.margin, Y: y},
-			fmt.Sprintf("Up to %s freed after delete-missing.",
-				formatBytes(plan.ReclaimableBytes)))
-		y += a.layout.sy(50)
-	}
-	y += a.layout.sy(30)
-	c.SetFont(body, black)
-	c.Text(image.Point{X: a.layout.margin, Y: y},
-		"Download anyway? Partial syncs are safe — the device")
-	c.Text(image.Point{X: a.layout.margin, Y: y + a.layout.sy(45)},
-		"just stops when the disk fills up.")
-
-	btnH := a.layout.sy(100)
-	btnY2 := a.layout.backButton.Max.Y
-	btnY1 := btnY2 - btnH
-	contentW := a.layout.screen.X - 2*a.layout.margin
-	half := (contentW - a.layout.sx(40)) / 2
-	yesRect := image.Rect(a.layout.margin, btnY1, a.layout.margin+half, btnY2)
-	noRect := image.Rect(a.layout.screen.X-a.layout.margin-half, btnY1, a.layout.screen.X-a.layout.margin, btnY2)
-
-	c.Rect(yesRect, black)
-	c.Rect(yesRect.Inset(2), black)
-	drawCenteredText(c, btnFont, yesRect, "Download")
-
-	c.Rect(noRect, black)
-	drawCenteredText(c, btnFont, noRect, "Cancel")
-
-	a.spaceWarn.mu.Lock()
-	a.spaceWarn.yesRect = yesRect
-	a.spaceWarn.noRect = noRect
-	a.spaceWarn.mu.Unlock()
+	defer a.spaceWarn.mu.Unlock()
+	return spaceWarnViewOf(a.spaceWarn.plan)
 }
 
 func (a *app) spaceWarnKey(e ink.KeyEvent) bool {
@@ -170,15 +78,11 @@ func (a *app) spaceWarnKey(e ink.KeyEvent) bool {
 }
 
 func (a *app) spaceWarnPointer(e ink.PointerEvent) bool {
-	a.spaceWarn.mu.Lock()
-	yes := a.spaceWarn.yesRect
-	no := a.spaceWarn.noRect
-	a.spaceWarn.mu.Unlock()
-	if e.Point.In(yes) {
+	switch {
+	case e.Point.In(a.layout.confirmLeftButton):
 		a.answerSpace(true)
 		return true
-	}
-	if e.Point.In(no) {
+	case e.Point.In(a.layout.confirmRightButton):
 		a.answerSpace(false)
 		return true
 	}
@@ -219,66 +123,11 @@ func (a *app) answerDelete(ok bool) {
 	ink.Repaint()
 }
 
-func (a *app) drawDeleteConfirm(c Canvas) {
-	title := a.layout.font(c, 64, true)
-	c.SetFont(title, black)
-
-	body := a.layout.font(c, 32, false)
-	c.SetFont(body, black)
-
-	btnFont := a.layout.font(c, 44, true)
-
+// deleteConfirmView phrases the parked deletion set for the draw.
+func (a *app) deleteConfirmView() deleteConfirmView {
 	a.delConfirm.mu.Lock()
-	pending := append([]LocalBook(nil), a.delConfirm.pending...)
-	a.delConfirm.mu.Unlock()
-
-	c.SetFont(title, black)
-	c.Text(image.Point{X: a.layout.margin, Y: a.layout.sy(140)}, "Confirm deletion")
-	c.SetFont(body, darkGray)
-	c.Text(image.Point{X: a.layout.margin, Y: a.layout.sy(200)},
-		fmt.Sprintf("%d books are no longer on the server.", len(pending)))
-	a.layout.drawHairline(c, a.layout.margin, a.layout.screen.X-a.layout.margin, a.layout.sy(240))
-
-	c.SetFont(body, black)
-	c.Text(image.Point{X: a.layout.margin, Y: a.layout.sy(310)},
-		"Delete them from this device?")
-
-	// Preview up to 5 titles, indented and muted.
-	const preview = 5
-	c.SetFont(body, darkGray)
-	y := a.layout.sy(380)
-	for i, b := range pending {
-		if i == preview {
-			c.Text(image.Point{X: a.layout.margin + a.layout.sx(40), Y: y},
-				fmt.Sprintf("… and %d more", len(pending)-preview))
-			break
-		}
-		label := b.Author + " — " + b.Title
-		c.Text(image.Point{X: a.layout.margin + a.layout.sx(40), Y: y}, truncate(label, 60))
-		y += a.layout.sy(50)
-	}
-
-	// Primary: Delete; Secondary: Keep. Keep lives on the left as the
-	// safer option (Back key maps to it too).
-	btnH := a.layout.sy(100)
-	btnY2 := a.layout.backButton.Max.Y
-	btnY1 := btnY2 - btnH
-	contentW := a.layout.screen.X - 2*a.layout.margin
-	half := (contentW - a.layout.sx(40)) / 2
-	noRect := image.Rect(a.layout.margin, btnY1, a.layout.margin+half, btnY2)
-	yesRect := image.Rect(a.layout.screen.X-a.layout.margin-half, btnY1, a.layout.screen.X-a.layout.margin, btnY2)
-
-	c.Rect(yesRect, black)
-	c.Rect(yesRect.Inset(2), black)
-	drawCenteredText(c, btnFont, yesRect, "Delete")
-
-	c.Rect(noRect, black)
-	drawCenteredText(c, btnFont, noRect, "Keep")
-
-	a.delConfirm.mu.Lock()
-	a.delConfirm.yesRect = yesRect
-	a.delConfirm.noRect = noRect
-	a.delConfirm.mu.Unlock()
+	defer a.delConfirm.mu.Unlock()
+	return deleteConfirmViewOf(a.delConfirm.pending)
 }
 
 func (a *app) deleteConfirmKey(e ink.KeyEvent) bool {
@@ -294,16 +143,12 @@ func (a *app) deleteConfirmKey(e ink.KeyEvent) bool {
 }
 
 func (a *app) deleteConfirmPointer(e ink.PointerEvent) bool {
-	a.delConfirm.mu.Lock()
-	yes := a.delConfirm.yesRect
-	no := a.delConfirm.noRect
-	a.delConfirm.mu.Unlock()
-	if e.Point.In(yes) {
-		a.answerDelete(true)
-		return true
-	}
-	if e.Point.In(no) {
+	switch {
+	case e.Point.In(a.layout.confirmLeftButton):
 		a.answerDelete(false)
+		return true
+	case e.Point.In(a.layout.confirmRightButton):
+		a.answerDelete(true)
 		return true
 	}
 	return false

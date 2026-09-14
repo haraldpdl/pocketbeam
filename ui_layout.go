@@ -48,6 +48,18 @@ type layout struct {
 	wizardOPDSRow   image.Rectangle
 	wizardWebDAVRow image.Rectangle
 
+	// confirmation dialogs: the two footer buttons the delete prompt and
+	// the space warning end in. Named by side, not by answer, because
+	// which side carries the primary action differs per dialog (the
+	// delete prompt keeps the safe answer on the left).
+	confirmLeftButton  image.Rectangle
+	confirmRightButton image.Rectangle
+
+	// library-refresh dialog: the strip holding the animated "Indexing"
+	// line, repainted on its own by the spinner while the rest of the
+	// dialog stays put.
+	libRefreshLine image.Rectangle
+
 	// pickers (OPDS feed, WebDAV directory): the band the paginated row
 	// list is drawn in, the fixed up-row above it, and the action
 	// buttons below it. Fixed geometry like the settings rows, so the
@@ -143,6 +155,18 @@ func computeLayout(sz image.Point) layout {
 	wizardOPDS := image.Rect(sideMargin, sc(360), sideMargin+contentW, sc(500))
 	wizardWebDAV := image.Rect(sideMargin, sc(500), sideMargin+contentW, sc(640))
 
+	// Confirmation dialogs: two buttons filling the bottom row's band,
+	// split down the middle with the same gap the main screen's buttons
+	// leave between them.
+	confirmHalf := (contentW - sc(40)) / 2
+	confirmLeft := image.Rect(sideMargin, btnY1, sideMargin+confirmHalf, btnY2)
+	confirmRight := image.Rect(w-sideMargin-confirmHalf, btnY1, w-sideMargin, btnY2)
+
+	// Library-refresh dialog: the animated line sits under the title,
+	// and its strip is a full text line tall so repainting it clears the
+	// dots the previous tick left behind.
+	libRefreshLine := image.Rect(sideMargin, sc(400), w-sideMargin, sc(444))
+
 	// Pickers: the action button sits just above the Back button, the
 	// row list fills what is left between the header (below topSafe) and
 	// it. The two stacked buttons share that band with a small gap, so
@@ -161,32 +185,35 @@ func computeLayout(sz image.Point) layout {
 	pickerUp := image.Rect(sideMargin, pickerTop, sideMargin+contentW, pickerTop+sc(listRowPx)-sc(20))
 
 	return layout{
-		screen:           sz,
-		margin:           sideMargin,
-		scale:            scale,
-		syncButton:       syncBtn,
-		networkButton:    networkBtn,
-		settingsButton:   settingsBtn,
-		quitButton:       quitBtn,
-		progressArea:     progArea,
-		progressBar:      progBar,
-		serverRow:        serverRow,
-		profileRow:       profileRow,
-		filterRow:        filterRow,
-		deleteRow:        deleteRow,
-		updateRow:        updateRow,
-		wizardOPDSRow:    wizardOPDS,
-		wizardWebDAVRow:  wizardWebDAV,
-		serverLabelY:     serverLabelY,
-		libraryLabelY:    libraryLabelY,
-		aboutLabelY:      aboutLabelY,
-		backButton:       networkBtn,
-		pickerAreaTop:    pickerTop,
-		pickerAreaBottom: pickerBottom,
-		pickerUpRow:      pickerUp,
-		pickerSelectRow:  pickerSelect,
-		pickerAddRow:     pickerAdd,
-		pickerDoneRow:    pickerDone,
+		screen:             sz,
+		margin:             sideMargin,
+		scale:              scale,
+		syncButton:         syncBtn,
+		networkButton:      networkBtn,
+		settingsButton:     settingsBtn,
+		quitButton:         quitBtn,
+		progressArea:       progArea,
+		progressBar:        progBar,
+		serverRow:          serverRow,
+		profileRow:         profileRow,
+		filterRow:          filterRow,
+		deleteRow:          deleteRow,
+		updateRow:          updateRow,
+		wizardOPDSRow:      wizardOPDS,
+		wizardWebDAVRow:    wizardWebDAV,
+		confirmLeftButton:  confirmLeft,
+		confirmRightButton: confirmRight,
+		libRefreshLine:     libRefreshLine,
+		serverLabelY:       serverLabelY,
+		libraryLabelY:      libraryLabelY,
+		aboutLabelY:        aboutLabelY,
+		backButton:         networkBtn,
+		pickerAreaTop:      pickerTop,
+		pickerAreaBottom:   pickerBottom,
+		pickerUpRow:        pickerUp,
+		pickerSelectRow:    pickerSelect,
+		pickerAddRow:       pickerAdd,
+		pickerDoneRow:      pickerDone,
 	}
 }
 

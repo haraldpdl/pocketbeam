@@ -245,9 +245,9 @@ func (a *app) drawCurrentScreen(c Canvas) {
 			a.showHourglassAt(c, p)
 		}
 	case screenDeleteConfirm:
-		a.drawDeleteConfirm(c)
+		drawDeleteConfirm(c, a.layout, a.deleteConfirmView())
 	case screenSpaceWarn:
-		a.drawSpaceWarn(c)
+		drawSpaceWarn(c, a.layout, a.spaceWarnView())
 	case screenProfileList:
 		a.drawProfileList(c)
 	case screenProfileDetail:
@@ -255,7 +255,7 @@ func (a *app) drawCurrentScreen(c Canvas) {
 	case screenUpdate:
 		a.drawUpdate(c)
 	case screenLibraryRefresh:
-		a.drawLibraryRefresh(c)
+		drawLibraryRefresh(c, a.layout, a.libRefreshView())
 	}
 	c.FullUpdate()
 }

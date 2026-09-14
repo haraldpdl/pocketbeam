@@ -7,11 +7,9 @@ package main
 import (
 	"context"
 	"fmt"
-	"image"
 	"log"
 	"os"
 	"os/exec"
-	"strings"
 	"sync"
 	"time"
 
@@ -40,7 +38,6 @@ type libRefreshState struct {
 	mu   sync.Mutex
 	dots int
 	stop chan struct{}
-	rect image.Rectangle
 }
 
 // syncState holds live progress from a running sync. Written by the progress
@@ -442,53 +439,23 @@ func (a *app) progressTicker(done <-chan struct{}) {
 
 // ---------- Library-refresh dialog ----------
 
-// drawLibraryRefresh paints a centred informational dialog shown after a
-// sync that changed the library. The actual work happens in
-// runLibraryScanner; scanner.app takes foreground focus as soon as it
-// starts, so this draw pass is what the user sees in the ~instant between
-// sync completion and the scanner UI appearing. It also serves as the
-// backdrop the user returns to when scanner exits, right before the
-// goroutine flips back to screenMain.
-func (a *app) drawLibraryRefresh(c Canvas) {
-	title := a.layout.font(c, 54, true)
-	c.SetFont(title, black)
-
-	body := a.layout.font(c, 32, false)
-	c.SetFont(body, black)
-
-	c.SetFont(title, black)
-	c.Text(image.Point{X: a.layout.margin, Y: a.layout.sy(300)}, "Refreshing library")
-	c.SetFont(body, black)
-
+// libRefreshView snapshots the dot count for the draw in ui_main.go.
+func (a *app) libRefreshView() libraryRefreshView {
 	a.libRefresh.mu.Lock()
-	dots := a.libRefresh.dots
-	rect := image.Rect(a.layout.margin, a.layout.sy(380), a.layout.screen.X-a.layout.margin, a.layout.sy(430))
-	a.libRefresh.rect = rect
-	a.libRefresh.mu.Unlock()
-
-	c.Text(image.Point{X: a.layout.margin, Y: a.layout.sy(400)}, "Indexing new books on the device"+strings.Repeat(".", dots))
-	c.Text(image.Point{X: a.layout.margin, Y: a.layout.sy(450)}, "This closes on its own.")
+	defer a.libRefresh.mu.Unlock()
+	return libraryRefreshView{dots: a.libRefresh.dots}
 }
 
-// refreshLibRefreshDots redraws just the "Indexing..." body line with the
+// refreshLibRefreshDots redraws just the "Indexing..." line with the
 // current dot count and pushes a partial e-ink update. Called from the
 // spinner ticker goroutine.
 func (a *app) refreshLibRefreshDots() {
 	c := deviceCanvas
 	a.DrawIfOn(screenLibraryRefresh, func() {
-		a.libRefresh.mu.Lock()
-		dots := a.libRefresh.dots
-		rect := a.libRefresh.rect
-		a.libRefresh.mu.Unlock()
-		if rect.Empty() {
-			return
-		}
-
-		body := a.layout.font(c, 32, false)
-		c.SetFont(body, black)
-		c.Fill(rect, white)
-		c.Text(image.Point{X: a.layout.margin, Y: a.layout.sy(400)}, "Indexing new books on the device"+strings.Repeat(".", dots))
-		c.PartialUpdate(rect)
+		line := a.layout.libRefreshLine
+		c.Fill(line, white)
+		drawLibraryRefreshLine(c, a.layout, a.libRefreshView())
+		c.PartialUpdate(line)
 	})
 }
 
