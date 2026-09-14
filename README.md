@@ -23,7 +23,7 @@ Go to the [latest release](https://github.com/haraldpdl/pocketbeam/releases/late
 
 Releases up to and including `v0.5.0` predate the zip and carry only `pocketbeam.app.gz`. Unpack that one with `gunzip pocketbeam.app.gz` on Linux and macOS, or with [7-Zip](https://www.7-zip.org/) on Windows; it yields the same single `pocketbeam.app` file.
 
-The release also carries `pocketbeam.app.gz` (the copy the app's own updater downloads) and `SHA256SUMS`, if you want to verify the download (on Linux: `sha256sum -c SHA256SUMS --ignore-missing`).
+The release also carries `pocketbeam.app.gz` (the copy the app's own updater downloads) and `SHA256SUMS`, which covers both downloads, if you want to verify them (on Linux, in the download folder: `sha256sum -c SHA256SUMS`). The digest of the unpacked `pocketbeam.app` itself is in the release notes, since GitHub will not host that file under its own name.
 
 ### 2. Copy it to the device
 
@@ -235,7 +235,7 @@ make screenshots   # regenerates docs/screenshots/*.png
 
 ### Releases
 
-Releases are cut by pushing a `vX.Y.Z` tag on `main`. The release workflow builds the ARM binary in the SDK container and publishes a GitHub Release with `pocketbeam-app.zip` (for sideloading by hand), `pocketbeam.app.gz` (what the in-app updater fetches) and `SHA256SUMS`, which lists the raw binary as well. The release notes carry the raw binary's `sha256:` digest, which is what the updater verifies after decompressing. Devices pick the new version up through the release endpoint they poll.
+Releases are cut by pushing a `vX.Y.Z` tag on `main`. The release workflow builds the ARM binary in the SDK container and publishes a GitHub Release with `pocketbeam-app.zip` (for sideloading by hand), `pocketbeam.app.gz` (what the in-app updater fetches) and `SHA256SUMS`, which lists those two assets so that `sha256sum -c` over a downloaded release exits clean. The raw binary is not a release asset (GitHub refuses a `.app` extension), so its `sha256:` digest goes into the release notes; that is the one the updater verifies after decompressing. Packaging and the notes are written by `.github/scripts/package-release.sh`, which `make test` covers. Devices pick the new version up through the release endpoint they poll.
 
 ## License
 

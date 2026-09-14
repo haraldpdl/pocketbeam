@@ -22,49 +22,23 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with: { name: dist, path: dist }
       - name: Package
         # Packaging runs here rather than in the build job because the SDK
         # container ships no zip; this runner has both zip and sha256sum.
-        # The zip is for people sideloading over USB (GitHub refuses a bare
-        # .app asset, and .gz is awkward on Windows and phones), the gzip is
-        # what the on-device updater fetches. The zip is deliberately not
-        # named pocketbeam.app.zip: Windows Explorer extracts into a folder
-        # named after the archive, which would hide pocketbeam.app inside a
-        # folder of the same name and read as "already copied".
+        # The script is what `make test` covers.
         run: |
-          set -eu
-          cd dist
-          gzip -9 -k -n pocketbeam.app
-          zip -q -X pocketbeam-app.zip pocketbeam.app
-          sha256sum pocketbeam.app pocketbeam.app.gz pocketbeam-app.zip > SHA256SUMS
-          cat SHA256SUMS
-      - name: Release notes
-        run: |
-          set -eu
-          # The digest the device verifies is the one of the decompressed
-          # binary, so pick that line by name instead of by position.
-          RAW=$(awk '$2 ~ /^\*?pocketbeam\.app$/ { print $1 }' dist/SHA256SUMS)
-          test -n "$RAW"
-          {
-            echo "pocketbeam ${GITHUB_REF_NAME}"
-            echo
-            echo "sha256: ${RAW}"
-            echo
-            # A newer release reads an older sync state file, not the
-            # other way round, so a rollback needs it out of the way.
-            echo "Going back to an older version? Delete"
-            echo "system/config/pocketbeam.db over USB first; the next sync"
-            echo "re-tracks the books already on the device."
-          } > dist/notes.md
-          cat dist/notes.md
+          .github/scripts/package-release.sh dist "${GITHUB_REF_NAME}"
+          cat dist/SHA256SUMS dist/notes.md
       - name: GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           # GitHub refuses release assets with a .app extension, so the raw
-          # binary ships zipped; SHA256SUMS lists all three files.
+          # binary ships zipped and gzipped; SHA256SUMS covers those two,
+          # and the raw binary's digest is in the notes.
           gh release create "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" \
             --title "${GITHUB_REF_NAME}" --notes-file dist/notes.md \
             dist/pocketbeam-app.zip dist/pocketbeam.app.gz dist/SHA256SUMS
