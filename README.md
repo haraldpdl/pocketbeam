@@ -33,6 +33,8 @@ Connect the reader to the computer with the USB cable and confirm the USB connec
 
 On the reader, open Applications and tap `@pocketbeam`. Sideloaded apps are listed with a leading `@` and a generic icon; that is how the PocketBook firmware presents them (KOReader shows up as `@koreader` the same way).
 
+<img src="docs/screenshots/first-run.png" alt="The pocketbeam setup wizard at step 1 of 3, asking for the server URL, with the entered address shown below the prompt" width="300">
+
 The setup wizard asks, in order:
 
 1. **Server type**: Calibre-Web / OPDS, or WebDAV / Nextcloud.
@@ -62,9 +64,9 @@ Connect over USB and delete `applications/pocketbeam.app`. To remove its setting
 
 ## Usage
 
-<img src="docs/screenshots/main.png" alt="The pocketbeam main screen: server and filter in the header, last-sync summary, an update badge, Sync Now, and the Network / Settings / Quit row" width="300"> <img src="docs/screenshots/main-syncing.png" alt="The same screen during a sync: the button reads Stop and the progress strip shows the book counter, elapsed time, a progress bar and the current title" width="300">
+<img src="docs/screenshots/main.png" alt="The pocketbeam main screen: server and filter in the header, last-sync summary, an update badge, Sync Now, and the Network / Settings / Quit row" width="300"> <img src="docs/screenshots/main-syncing.png" alt="The same screen during a sync: the button reads Stop and the progress strip shows the book counter, elapsed time, a progress bar and the current title" width="300"> <img src="docs/screenshots/settings.png" alt="The Settings list: SERVER with the server URL and the active profile, LIBRARY with the sync filter and the delete-missing toggle, ABOUT with the waiting update, and a Back button" width="300">
 
-The main screen between syncs and during one. Both images are rendered from the app's own drawing code (`make screenshots`), so they stay in step with it.
+The main screen between syncs and during one, and the Settings list. Every image in this README is rendered from the app's own drawing code (`make screenshots`), so they stay in step with it.
 
 The main screen has four actions:
 

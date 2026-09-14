@@ -224,11 +224,16 @@ func (a *app) drawCurrentScreen(c Canvas) {
 	c.Clear()
 	switch a.Screen() {
 	case screenFirstRun:
-		a.drawWizard(c)
+		// One snapshot for the whole pass: the probe goroutine can move
+		// the wizard on mid-draw, and a step drawn with the next step's
+		// error would be worse than a pass that is one repaint behind.
+		if p, busy := drawWizard(c, a.layout, a.Wizard()); busy {
+			a.showHourglassAt(c, p)
+		}
 	case screenMain:
 		drawMain(c, a.layout, a.mainView())
 	case screenSettings:
-		a.drawSettings(c)
+		drawSettings(c, a.layout, a.settingsView())
 	case screenShelfPicker:
 		a.drawShelfPicker(c)
 	case screenDirPicker:

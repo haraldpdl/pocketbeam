@@ -2,7 +2,6 @@ package main
 
 import (
 	"errors"
-	"image"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -179,8 +178,6 @@ func TestWizardSnapshotCarriesEveryField(t *testing.T) {
 		err:        errors.New("previous attempt"),
 		addProfile: true,
 		returnTo:   screenProfileList,
-		opdsBtn:    image.Rect(1, 2, 3, 4),
-		webdavBtn:  image.Rect(5, 6, 7, 8),
 	}
 	s.UpdateWizard(func(w *wizardState) { *w = want })
 

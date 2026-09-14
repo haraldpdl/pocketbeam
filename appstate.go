@@ -8,7 +8,6 @@
 package main
 
 import (
-	"image"
 	"sync"
 )
 
@@ -64,10 +63,6 @@ type wizardState struct {
 	// wizard owns the app because no profile is set up yet, so there is
 	// nothing to go back to.
 	returnTo screen
-	// Tap targets for the backend-choice step, captured during draw so the
-	// pointer handler knows where the two buttons live.
-	opdsBtn   image.Rectangle
-	webdavBtn image.Rectangle
 }
 
 // mainStats is the last-sync summary and library size the main screen

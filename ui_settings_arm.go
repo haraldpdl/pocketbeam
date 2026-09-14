@@ -1,81 +1,23 @@
-// Settings screen: the row list that reaches every other screen.
+// Settings screen: what each row answers when it is tapped, and the
+// snapshot the shared drawing in ui_settings.go paints from.
 
 package main
 
 import (
-	"image"
-
 	ink "github.com/dennwc/inkview"
 )
 
-// deleteMissingTitle names the delete-missing row; deleteMissingSubtitle
-// is its value line. Both the full draw and the in-place refresh that
-// follows a tap on the row go through these.
-const deleteMissingTitle = "Delete missing"
-
-func deleteMissingSubtitle(on bool) string {
-	if on {
-		return "Remove books deleted on server"
-	}
-	return "Keep books removed on server"
-}
-
-func (a *app) drawSettings(c Canvas) {
-	title := a.layout.font(c, 64, true)
-	rowTitleFont := a.layout.font(c, 36, true)
-	rowSubFont := a.layout.font(c, 28, false)
-	sectionFont := a.layout.font(c, 24, true)
-	btnFont := a.layout.font(c, 44, true)
-
-	cfg := a.Config()
-
-	// Header
-	c.SetFont(title, black)
-	c.Text(image.Point{X: a.layout.margin, Y: a.layout.sy(140)}, "Settings")
-
-	// SERVER section
-	a.layout.drawSectionLabel(c, sectionFont, "SERVER", a.layout.serverLabelY)
-	a.layout.drawListRow(c, rowTitleFont, rowSubFont, a.layout.serverRow,
-		"Server", truncate(cfg.Host, 40), true)
-	a.layout.drawListRow(c, rowTitleFont, rowSubFont, a.layout.profileRow,
-		"Profile", cfg.Profile, true)
-	a.layout.drawHairline(c, a.layout.profileRow.Min.X, a.layout.profileRow.Max.X, a.layout.profileRow.Max.Y)
-
-	// LIBRARY section
-	a.layout.drawSectionLabel(c, sectionFont, "LIBRARY", a.layout.libraryLabelY)
-	filterTitle := "Sync filter"
-	var filterValue string
-	if cfg.Backend == BackendWebDAV {
-		filterTitle = "Sync folder"
-		filterValue = cfg.Path
-		if filterValue == "" {
-			filterValue = "/"
-		}
-	} else {
-		filterValue = cfg.FilterLabel()
-	}
-	a.layout.drawListRow(c, rowTitleFont, rowSubFont, a.layout.filterRow,
-		filterTitle, filterValue, true)
-
-	a.layout.drawToggleRow(c, rowTitleFont, rowSubFont, a.layout.deleteRow,
-		deleteMissingTitle, deleteMissingSubtitle(cfg.DeleteMissing), cfg.DeleteMissing)
-
-	// ABOUT section
-	a.layout.drawSectionLabel(c, sectionFont, "ABOUT", a.layout.aboutLabelY)
-	updateTitle := "Check for updates"
-	updateSub := "Current version " + version
+// settingsView collects everything the settings rows show into one
+// snapshot, so the drawing itself touches no shared state and can run
+// off-device.
+func (a *app) settingsView() settingsView {
+	var updateVer string
 	a.update.mu.Lock()
-	if a.update.available && a.update.release.Version != "" {
-		updateTitle = "Install update " + a.update.release.Version
+	if a.update.available {
+		updateVer = a.update.release.Version
 	}
 	a.update.mu.Unlock()
-	a.layout.drawListRow(c, rowTitleFont, rowSubFont, a.layout.updateRow,
-		updateTitle, updateSub, true)
-	a.layout.drawHairline(c, a.layout.updateRow.Min.X, a.layout.updateRow.Max.X, a.layout.updateRow.Max.Y)
-
-	// Back button in the bottom-left, matching other screens.
-	c.Rect(a.layout.backButton, black)
-	drawCenteredText(c, btnFont, a.layout.backButton, "Back")
+	return settingsViewOf(a.Config(), updateVer)
 }
 
 func (a *app) settingsKey(e ink.KeyEvent) bool {

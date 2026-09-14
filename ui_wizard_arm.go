@@ -1,136 +1,17 @@
 // First-run wizard: profile name, backend choice, URL / user / password
 // entry, and the connection probe that writes the first config. The
-// wizard's state lives in appState (the probe runs on its own goroutine).
+// wizard's state lives in appState (the probe runs on its own goroutine);
+// the drawing is in ui_wizard.go.
 
 package main
 
 import (
 	"context"
 	"fmt"
-	"image"
 	"path/filepath"
 
 	ink "github.com/dennwc/inkview"
 )
-
-func (a *app) drawWizard(c Canvas) {
-	title := a.layout.font(c, 54, true)
-	c.SetFont(title, black)
-
-	body := a.layout.font(c, 32, false)
-	c.SetFont(body, black)
-
-	// One snapshot for the whole pass: the probe goroutine can move the
-	// wizard on mid-draw, and a step drawn with the next step's error
-	// would be worse than a pass that is one repaint behind.
-	wiz := a.Wizard()
-
-	switch wiz.step {
-	case stepWelcome:
-		c.SetFont(title, black)
-		c.Text(image.Point{X: a.layout.margin, Y: a.layout.sy(200)}, "pocketbeam")
-		c.SetFont(body, darkGray)
-		c.Text(image.Point{X: a.layout.margin, Y: a.layout.sy(260)}, "Wireless sync from a book server.")
-		a.layout.drawHairline(c, a.layout.margin, a.layout.screen.X-a.layout.margin, a.layout.sy(300))
-
-		c.SetFont(body, black)
-		c.Text(image.Point{X: a.layout.margin, Y: a.layout.sy(370)}, "Supported servers")
-		c.SetFont(body, darkGray)
-		c.Text(image.Point{X: a.layout.margin, Y: a.layout.sy(430)}, "· Calibre-Web and any OPDS catalog")
-		c.Text(image.Point{X: a.layout.margin, Y: a.layout.sy(480)}, "· Nextcloud, Synology, ownCloud, WebDAV")
-
-		c.SetFont(body, black)
-		c.Text(image.Point{X: a.layout.margin, Y: a.layout.sy(620)}, "Press OK or tap to begin.")
-
-	case stepProfileName:
-		c.SetFont(title, black)
-		c.Text(image.Point{X: a.layout.margin, Y: a.layout.sy(200)}, "Name this profile")
-		c.SetFont(body, darkGray)
-		c.Text(image.Point{X: a.layout.margin, Y: a.layout.sy(260)}, "Short identifier for this server (no spaces).")
-		a.layout.drawHairline(c, a.layout.margin, a.layout.screen.X-a.layout.margin, a.layout.sy(300))
-		c.SetFont(body, black)
-		c.Text(image.Point{X: a.layout.margin, Y: a.layout.sy(370)}, "Tap or press OK to re-open the keyboard.")
-		if wiz.err != nil {
-			c.Text(image.Point{X: a.layout.margin, Y: a.layout.sy(430)}, truncate(wiz.err.Error(), 60))
-		}
-		if wiz.name != "" {
-			c.SetFont(body, darkGray)
-			c.Text(image.Point{X: a.layout.margin, Y: a.layout.sy(480)}, "Name: "+wiz.name)
-		}
-
-	case stepBackend:
-		c.SetFont(title, black)
-		c.Text(image.Point{X: a.layout.margin, Y: a.layout.sy(200)}, "Choose server type")
-		c.SetFont(body, darkGray)
-		c.Text(image.Point{X: a.layout.margin, Y: a.layout.sy(260)}, "Tap the option that matches your server.")
-
-		rowTitleFont := a.layout.font(c, 36, true)
-		rowSubFont := a.layout.font(c, 28, false)
-
-		w := a.layout.screen.X
-		btnW := w - 2*a.layout.margin
-		opdsBtn := image.Rect(a.layout.margin, a.layout.sy(360), a.layout.margin+btnW, a.layout.sy(500))
-		webdavBtn := image.Rect(a.layout.margin, a.layout.sy(500), a.layout.margin+btnW, a.layout.sy(640))
-		a.UpdateWizard(func(w *wizardState) {
-			w.opdsBtn, w.webdavBtn = opdsBtn, webdavBtn
-		})
-
-		a.layout.drawListRow(c, rowTitleFont, rowSubFont, opdsBtn,
-			"Calibre-Web / OPDS", "Calibre-Web, COPS, and other OPDS catalogs", true)
-		a.layout.drawListRow(c, rowTitleFont, rowSubFont, webdavBtn,
-			"WebDAV / Nextcloud", "Nextcloud, Synology, ownCloud, generic WebDAV", true)
-		a.layout.drawHairline(c, webdavBtn.Min.X, webdavBtn.Max.X, webdavBtn.Max.Y)
-
-	case stepURL, stepUser, stepPass:
-		c.SetFont(title, black)
-		c.Text(image.Point{X: a.layout.margin, Y: a.layout.sy(200)}, "pocketbeam setup")
-		c.SetFont(body, darkGray)
-		var step, what string
-		switch wiz.step {
-		case stepURL:
-			step, what = "Step 1 of 3", "Server URL"
-		case stepUser:
-			step, what = "Step 2 of 3", "Username"
-		case stepPass:
-			step, what = "Step 3 of 3", "Password"
-		}
-		c.Text(image.Point{X: a.layout.margin, Y: a.layout.sy(260)}, step+"  ·  "+what)
-		a.layout.drawHairline(c, a.layout.margin, a.layout.screen.X-a.layout.margin, a.layout.sy(300))
-		c.SetFont(body, black)
-		c.Text(image.Point{X: a.layout.margin, Y: a.layout.sy(370)}, "Tap or press OK to open the keyboard.")
-		c.SetFont(body, darkGray)
-		y := a.layout.sy(490)
-		if wiz.url != "" {
-			c.Text(image.Point{X: a.layout.margin, Y: y}, "Server: "+truncate(wiz.url, 48))
-			y += a.layout.sy(50)
-		}
-		if wiz.user != "" {
-			c.Text(image.Point{X: a.layout.margin, Y: y}, "User: "+truncate(wiz.user, 48))
-		}
-
-	case stepTesting:
-		c.SetFont(title, black)
-		c.Text(image.Point{X: a.layout.margin, Y: a.layout.sy(300)}, "Testing connection")
-		c.SetFont(body, darkGray)
-		c.Text(image.Point{X: a.layout.margin, Y: a.layout.sy(370)}, truncate(wiz.url, 55))
-		a.showHourglassAt(c, image.Point{X: a.layout.margin, Y: a.layout.sy(480)})
-
-	case stepError:
-		c.SetFont(title, black)
-		c.Text(image.Point{X: a.layout.margin, Y: a.layout.sy(200)}, "Connection failed")
-		c.SetFont(body, darkGray)
-		c.Text(image.Point{X: a.layout.margin, Y: a.layout.sy(260)}, "Check that the server URL and credentials are correct.")
-		a.layout.drawHairline(c, a.layout.margin, a.layout.screen.X-a.layout.margin, a.layout.sy(300))
-		msg := "Unknown error"
-		if wiz.err != nil {
-			msg = wiz.err.Error()
-		}
-		c.SetFont(body, black)
-		c.Text(image.Point{X: a.layout.margin, Y: a.layout.sy(370)}, truncate(msg, 60))
-		c.SetFont(body, darkGray)
-		c.Text(image.Point{X: a.layout.margin, Y: a.layout.sy(620)}, "Press OK or tap to try again.")
-	}
-}
 
 func (a *app) wizardKey(e ink.KeyEvent) bool {
 	switch a.Wizard().step {
@@ -178,11 +59,11 @@ func (a *app) wizardPointer(e ink.PointerEvent) bool {
 		ink.Repaint()
 		return true
 	case stepBackend:
-		if e.Point.In(wiz.opdsBtn) {
+		if e.Point.In(a.layout.wizardOPDSRow) {
 			a.pickBackend(BackendOPDS)
 			return true
 		}
-		if e.Point.In(wiz.webdavBtn) {
+		if e.Point.In(a.layout.wizardWebDAVRow) {
 			a.pickBackend(BackendWebDAV)
 			return true
 		}

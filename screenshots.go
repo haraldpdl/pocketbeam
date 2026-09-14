@@ -40,6 +40,8 @@ func screenshots() []screenshot {
 	return []screenshot{
 		{"main", func(c Canvas, l layout) { drawMain(c, l, mainIdleView()) }},
 		{"main-syncing", func(c Canvas, l layout) { drawMain(c, l, mainSyncingView()) }},
+		{"first-run", func(c Canvas, l layout) { drawWizard(c, l, wizardURLView()) }},
+		{"settings", func(c Canvas, l layout) { drawSettings(c, l, settingsFixtureView()) }},
 	}
 }
 
@@ -78,6 +80,29 @@ func mainSyncingView() mainView {
 		author:  "Ursula K. Le Guin",
 		elapsed: 42 * time.Second,
 	}
+	return v
+}
+
+// wizardURLView is the first-run wizard at the server-URL step with an
+// address already entered, the step that shows what setting pocketbeam
+// up asks for.
+func wizardURLView() wizardState {
+	return wizardState{step: stepURL, url: "https://library.example.com:8083"}
+}
+
+// settingsFixtureView is the settings list of a configured OPDS profile,
+// with an update waiting so the About row shows the install it offers.
+func settingsFixtureView() settingsView {
+	v := settingsViewOf(&Config{
+		Host:          "https://library.example.com:8083",
+		Profile:       "default",
+		FilterHrefs:   []string{"/opds/shelf/2"},
+		FilterNames:   []string{"Science Fiction"},
+		DeleteMissing: true,
+	}, "v0.6.0")
+	// A rendered image has to come out the same on every machine, and
+	// version is whatever the renderer was built with.
+	v.currentVer = "v0.5.0"
 	return v
 }
 

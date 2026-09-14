@@ -42,6 +42,12 @@ type layout struct {
 	aboutLabelY   int
 	backButton    image.Rectangle
 
+	// first-run wizard: the two backend-choice rows. Fixed geometry like
+	// the settings rows, so the pointer handler reads them from here
+	// rather than the draw having to publish where it put them.
+	wizardOPDSRow   image.Rectangle
+	wizardWebDAVRow image.Rectangle
+
 	// shelf picker: per-row tap rects computed dynamically in draw.
 	pickerAreaTop    int
 	pickerAreaBottom int
@@ -98,22 +104,33 @@ func computeLayout(sz image.Point) layout {
 	rowsH := (settingsBottom - settingsTop) - settingsSectionCount*sectionLabelH
 	settingsRowH := rowsH / settingsRowCount
 
+	// A section label is positioned by the top of its glyph box, like
+	// every string, and the band it sits in ends where the section's
+	// first row draws its hairline. Centring the box in the band keeps
+	// the letters clear of that line instead of sitting on it.
+	labelY := func(bandTop int) int { return bandTop + (sectionLabelH-sc(sectionLabelPx))/2 }
+
 	sy := settingsTop
-	serverLabelY := sy + sc(44)
+	serverLabelY := labelY(sy)
 	sy += sectionLabelH
 	serverRow := image.Rect(sideMargin, sy, sideMargin+contentW, sy+settingsRowH)
 	sy += settingsRowH
 	profileRow := image.Rect(sideMargin, sy, sideMargin+contentW, sy+settingsRowH)
 	sy += settingsRowH
-	libraryLabelY := sy + sc(44)
+	libraryLabelY := labelY(sy)
 	sy += sectionLabelH
 	filterRow := image.Rect(sideMargin, sy, sideMargin+contentW, sy+settingsRowH)
 	sy += settingsRowH
 	deleteRow := image.Rect(sideMargin, sy, sideMargin+contentW, sy+settingsRowH)
 	sy += settingsRowH
-	aboutLabelY := sy + sc(44)
+	aboutLabelY := labelY(sy)
 	sy += sectionLabelH
 	updateRow := image.Rect(sideMargin, sy, sideMargin+contentW, sy+settingsRowH)
+
+	// First-run wizard, backend step: two stacked full-width rows below
+	// the header, sharing the row idiom the settings list uses.
+	wizardOPDS := image.Rect(sideMargin, sc(360), sideMargin+contentW, sc(500))
+	wizardWebDAV := image.Rect(sideMargin, sc(500), sideMargin+contentW, sc(640))
 
 	// Shelf picker: rows live between the header (below topSafe) and the
 	// Back button (same position as bottom btnY1).
@@ -135,6 +152,8 @@ func computeLayout(sz image.Point) layout {
 		filterRow:        filterRow,
 		deleteRow:        deleteRow,
 		updateRow:        updateRow,
+		wizardOPDSRow:    wizardOPDS,
+		wizardWebDAVRow:  wizardWebDAV,
 		serverLabelY:     serverLabelY,
 		libraryLabelY:    libraryLabelY,
 		aboutLabelY:      aboutLabelY,
