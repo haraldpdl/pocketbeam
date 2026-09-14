@@ -51,6 +51,12 @@ jobs:
             echo "pocketbeam ${GITHUB_REF_NAME}"
             echo
             echo "sha256: ${RAW}"
+            echo
+            # A newer release reads an older sync state file, not the
+            # other way round, so a rollback needs it out of the way.
+            echo "Going back to an older version? Delete"
+            echo "system/config/pocketbeam.db over USB first; the next sync"
+            echo "re-tracks the books already on the device."
           } > dist/notes.md
           cat dist/notes.md
       - name: GitHub release

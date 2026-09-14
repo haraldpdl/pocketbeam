@@ -51,6 +51,7 @@ func main() {
 		DeleteMissing: cfg.DeleteMissing,
 		Scope:         ScopeFor(cfg),
 		Profile:       cfg.Profile,
+		LibraryShared: LibraryShared(*cfgPath, cfg.Profile, cfg.Library),
 	}
 	if cfg.DeleteMissing {
 		opts.Confirm = cliConfirm(*yes)

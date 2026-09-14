@@ -38,6 +38,14 @@ const busyTimeout = 5 * time.Second
 // for the same relative path anywhere). A row per identity would describe
 // whichever library downloaded it last, leaving the other library's copy
 // untracked.
+//
+// The `profile` column records which profile downloaded the copy. It is
+// not part of the key: the library folder is per profile for anything
+// this version sets up, so the column only matters where it is not.
+// Installs created before per-profile folders put every OPDS profile in
+// Books/CWA and every WebDAV one in Books/WebDAV, so one library value
+// can cover several profiles; the column is what keeps one of them from
+// deleting another's books (see computeMissing).
 type Store struct {
 	db *sql.DB
 }
@@ -47,6 +55,7 @@ type Store struct {
 const booksColumns = `(
 	library    TEXT NOT NULL,
 	uuid       TEXT NOT NULL,
+	profile    TEXT NOT NULL DEFAULT '',
 	title      TEXT NOT NULL,
 	author     TEXT NOT NULL,
 	updated    INTEGER NOT NULL,
@@ -84,8 +93,11 @@ func OpenStore(path string) (*Store, error) {
 
 // migrateBooks brings a books table written by an older install up to the
 // current schema: the `size` column (added with the pre-flight space
-// estimate) and the (library, uuid) key that replaced the UUID-only one.
-// Both steps are no-ops on a table this version created.
+// estimate), the (library, uuid) key that replaced the UUID-only one, and
+// the `profile` column that names the downloader. Every step is a no-op
+// on a table this version created. The rebuild already produces the
+// current column set, so the ALTER only covers a table that has the key
+// but predates the column.
 func migrateBooks(db *sql.DB) error {
 	cols, err := tableColumns(db, "books")
 	if err != nil {
@@ -96,10 +108,15 @@ func migrateBooks(db *sql.DB) error {
 			return err
 		}
 	}
-	if cols["library"] {
-		return nil
+	if !cols["library"] {
+		return splitBooksPerLibrary(db)
 	}
-	return splitBooksPerLibrary(db)
+	if !cols["profile"] {
+		if _, err := db.Exec(`ALTER TABLE books ADD COLUMN profile TEXT NOT NULL DEFAULT ''`); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // tableColumns returns the column names of table as a set.
@@ -124,7 +141,14 @@ func tableColumns(db *sql.DB, table string) (map[string]bool, error) {
 // (library, uuid) schema. Changing a primary key means rebuilding the
 // table, so the rows are copied into a new one and it takes the old name.
 // local_path is the only record a shared row carries of where its file
-// is, so the library is derived from it (see libraryOf).
+// is, so the library is derived from it (see libraryOf). The rows carry
+// no profile: nothing recorded which one downloaded them, and a sync
+// claims them one by one (see Store.Claim).
+//
+// The copy runs off one prepared statement because it happens on the
+// first launch after the upgrade, inside OpenStore, on the InkView event
+// loop: re-parsing the INSERT once per book would stall a device holding
+// a few thousand of them behind a frozen screen.
 func splitBooksPerLibrary(db *sql.DB) error {
 	tx, err := db.Begin()
 	if err != nil {
@@ -160,12 +184,20 @@ func splitBooksPerLibrary(db *sql.DB) error {
 	if _, err := tx.Exec(`CREATE TABLE books_migrated ` + booksColumns); err != nil {
 		return err
 	}
+	insert, err := tx.Prepare(`INSERT INTO books_migrated (library, uuid, title, author, updated, local_path, size)
+		VALUES (?, ?, ?, ?, ?, ?, ?)`)
+	if err != nil {
+		return err
+	}
 	for _, r := range legacy {
-		if _, err := tx.Exec(`INSERT INTO books_migrated (library, uuid, title, author, updated, local_path, size)
-			VALUES (?, ?, ?, ?, ?, ?, ?)`,
-			libraryOf(r.localPath), r.uuid, r.title, r.author, r.updated, r.localPath, r.size); err != nil {
+		if _, err := insert.Exec(libraryOf(r.localPath), r.uuid, r.title, r.author, r.updated, r.localPath, r.size); err != nil {
+			insert.Close()
 			return err
 		}
+	}
+	// The DROP below needs the statement's handle on books_migrated gone.
+	if err := insert.Close(); err != nil {
+		return err
 	}
 	if _, err := tx.Exec(`DROP TABLE books`); err != nil {
 		return err
@@ -236,12 +268,13 @@ func (s *Store) LastSync() (SyncSummary, bool, error) {
 
 func (s *Store) Close() error { return s.db.Close() }
 
-// Upsert records a successful download. actualSize is the byte count read
-// off the wire during this download; it takes precedence over b.Size
-// (which is the server-advertised value and may not match). A non-positive
-// actualSize falls back to b.Size so callers can use Upsert from contexts
-// that don't measure the transfer.
-func (s *Store) Upsert(library string, b Book, localPath string, actualSize int64) error {
+// Upsert records a successful download by profile. actualSize is the byte
+// count read off the wire during this download; it takes precedence over
+// b.Size (which is the server-advertised value and may not match). A
+// non-positive actualSize falls back to b.Size so callers can use Upsert
+// from contexts that don't measure the transfer. Downloading over an
+// existing row hands it to profile: whoever fetched the file owns it.
+func (s *Store) Upsert(library, profile string, b Book, localPath string, actualSize int64) error {
 	size := actualSize
 	if size <= 0 {
 		size = b.Size
@@ -249,15 +282,29 @@ func (s *Store) Upsert(library string, b Book, localPath string, actualSize int6
 	if size < 0 {
 		size = 0
 	}
-	_, err := s.db.Exec(`INSERT INTO books (library, uuid, title, author, updated, local_path, size)
-		VALUES (?, ?, ?, ?, ?, ?, ?)
+	_, err := s.db.Exec(`INSERT INTO books (library, uuid, profile, title, author, updated, local_path, size)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(library, uuid) DO UPDATE SET
+			profile = excluded.profile,
 			title = excluded.title,
 			author = excluded.author,
 			updated = excluded.updated,
 			local_path = excluded.local_path,
 			size = excluded.size`,
-		libraryKey(library), b.UUID, b.Title, b.Author, b.Updated.Unix(), localPath, size)
+		libraryKey(library), b.UUID, profile, b.Title, b.Author, b.Updated.Unix(), localPath, size)
+	return err
+}
+
+// Claim names profile as the owner of a row that has none. Rows migrated
+// from the UUID-keyed schema record no profile, because the schema that
+// wrote them had nowhere to put one; a sync whose remote listing still
+// carries the row's UUID is evidence the copy is that profile's, so it
+// takes ownership. A row that already names a profile is left alone: the
+// first profile to claim it keeps it, otherwise two profiles sharing a
+// library folder would take turns owning (and so deleting) one file.
+func (s *Store) Claim(library, uuid, profile string) error {
+	_, err := s.db.Exec(`UPDATE books SET profile = ? WHERE library = ? AND uuid = ? AND profile = ''`,
+		profile, libraryKey(library), uuid)
 	return err
 }
 
@@ -281,14 +328,17 @@ func (s *Store) OtherOwner(library, path, except string) (string, error) {
 	return uuid, nil
 }
 
-// LocalBook is the local view of a previously-synced book: identity,
-// human display fields, the remote timestamp at download time, the path
-// on disk, and the cached byte size (0 if unknown: legacy rows from before
-// the size column, or a server that never advertised length). Used by the
-// sync diff, the delete-missing path, the confirmation prompt, and the
-// pre-flight space check.
+// LocalBook is the local view of a previously-synced book: identity, the
+// profile that downloaded it ("" for a row migrated from the UUID-keyed
+// schema, which recorded none), human display fields, the remote
+// timestamp at download time, the path on disk, and the cached byte size
+// (0 if unknown: legacy rows from before the size column, or a server
+// that never advertised length). Used by the sync diff, the
+// delete-missing path, the confirmation prompt, and the pre-flight space
+// check.
 type LocalBook struct {
 	UUID      string
+	Profile   string
 	Title     string
 	Author    string
 	Updated   time.Time
@@ -299,7 +349,7 @@ type LocalBook struct {
 // AllEntries returns every book tracked for library. Used to compute
 // which local entries are missing from the current remote listing.
 func (s *Store) AllEntries(library string) ([]LocalBook, error) {
-	rows, err := s.db.Query(`SELECT uuid, title, author, updated, local_path, size FROM books WHERE library = ?`, libraryKey(library))
+	rows, err := s.db.Query(`SELECT uuid, profile, title, author, updated, local_path, size FROM books WHERE library = ?`, libraryKey(library))
 	if err != nil {
 		return nil, err
 	}
@@ -308,7 +358,7 @@ func (s *Store) AllEntries(library string) ([]LocalBook, error) {
 	for rows.Next() {
 		var b LocalBook
 		var ts int64
-		if err := rows.Scan(&b.UUID, &b.Title, &b.Author, &ts, &b.LocalPath, &b.Size); err != nil {
+		if err := rows.Scan(&b.UUID, &b.Profile, &b.Title, &b.Author, &ts, &b.LocalPath, &b.Size); err != nil {
 			return nil, err
 		}
 		b.Updated = time.Unix(ts, 0)

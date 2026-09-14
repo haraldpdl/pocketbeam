@@ -365,6 +365,7 @@ func (a *app) runSync() {
 		DeleteMissing: cfg.DeleteMissing,
 		Scope:         ScopeFor(cfg),
 		Profile:       cfg.Profile,
+		LibraryShared: LibraryShared(a.cfgPath, cfg.Profile, cfg.Library),
 	}
 	if cfg.DeleteMissing {
 		opts.Confirm = a.confirmDeletions

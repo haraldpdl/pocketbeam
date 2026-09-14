@@ -455,3 +455,145 @@ func TestPlan_CountsBookOutsideLibraryAsDownload(t *testing.T) {
 		t.Error("DownloadBytes = 0, want the book's size")
 	}
 }
+
+// seedFile writes a stand-in book file, creating its directory.
+func seedFile(t *testing.T, path string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("pretend-ebook"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// Every released version derived the library folder from the backend, so
+// an install upgrading from one has all its OPDS profiles in Books/CWA.
+// The migration keys those rows under that one folder and knows no
+// profile for any of them, so a diff that only bounds deletion by the
+// folder proposes the other profile's whole library. The book has to be
+// this profile's before it can be deleted here.
+func TestSync_DeleteMissing_SharedLegacyFolderKeepsOtherProfilesBooks(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "state.db")
+	library := filepath.Join(dir, "Books", "CWA")
+
+	homeA := filepath.Join(library, "Author", "Home A.epub")
+	homeB := filepath.Join(library, "Author", "Home B.epub")
+	nasA := filepath.Join(library, "Author", "Nas A.epub")
+	writeLegacyBooks(t, dbPath, [][2]string{
+		{"home-a", homeA},
+		{"home-b", homeB},
+		{"nas-a", nasA},
+	})
+	for _, p := range []string{homeA, homeB, nasA} {
+		seedFile(t, p)
+	}
+
+	store, err := OpenStore(dbPath)
+	if err != nil {
+		t.Fatalf("OpenStore: %v", err)
+	}
+	defer store.Close()
+	// The pre-upgrade version wrote one global last-scope key, and home
+	// is the profile that wrote it last, so the scope guard opens on
+	// home's very first run under the new schema.
+	if err := store.SetMeta(metaLastScope, "home-scope"); err != nil {
+		t.Fatal(err)
+	}
+
+	t0 := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	homeSrc := &fakeSource{books: []Book{
+		makeBookSized("home-a", "Home A", 0, t0),
+		makeBookSized("home-b", "Home B", 0, t0),
+	}}
+	var asked []LocalBook
+	homeOpts := SyncOptions{
+		DeleteMissing: true,
+		Scope:         "home-scope",
+		Profile:       "home",
+		LibraryShared: true,
+		Confirm: func(d []LocalBook) bool {
+			asked = append(asked, d...)
+			return true
+		},
+	}
+
+	res := Sync(context.Background(), homeSrc, store, library, nil, homeOpts)
+	if res.Deleted != 0 || len(asked) != 0 {
+		t.Errorf("home sync = %+v, asked about %+v; the nas book is not home's to delete", res, asked)
+	}
+	if _, err := os.Stat(nasA); err != nil {
+		t.Errorf("the other profile's file was deleted: %v", err)
+	}
+	if _, ok := lookup(t, store, library, "nas-a"); !ok {
+		t.Error("the other profile's row was deleted")
+	}
+
+	// The books home's server still lists are home's from that run on, so
+	// one going missing is still deleted from the shared folder.
+	homeSrc.books = homeSrc.books[:1]
+	res = Sync(context.Background(), homeSrc, store, library, nil, homeOpts)
+	if res.Deleted != 1 || len(asked) != 1 || asked[0].UUID != "home-b" {
+		t.Fatalf("second home sync = %+v, asked about %+v; want only home-b deleted", res, asked)
+	}
+	if _, err := os.Stat(homeB); !os.IsNotExist(err) {
+		t.Errorf("home-b still on disk: err=%v", err)
+	}
+	if _, err := os.Stat(nasA); err != nil {
+		t.Errorf("the other profile's file was deleted on the second run: %v", err)
+	}
+
+	// nas claims its own book by syncing it, and home still cannot touch
+	// it once it disappears from the nas server.
+	nasSrc := &fakeSource{books: []Book{makeBookSized("nas-a", "Nas A", 0, t0)}}
+	nasOpts := SyncOptions{Scope: "nas-scope", Profile: "nas", LibraryShared: true}
+	if res := Sync(context.Background(), nasSrc, store, library, nil, nasOpts); res.FirstErr != nil {
+		t.Fatalf("nas sync: %v", res.FirstErr)
+	}
+	e, ok := lookup(t, store, library, "nas-a")
+	if !ok || e.Profile != "nas" {
+		t.Errorf("nas-a row = (%q, ok=%v), want it claimed by nas", e.Profile, ok)
+	}
+	asked = nil
+	if res := Sync(context.Background(), homeSrc, store, library, nil, homeOpts); res.Deleted != 0 || len(asked) != 0 {
+		t.Errorf("home sync after the claim = %+v, asked about %+v, want nothing", res, asked)
+	}
+	if _, err := os.Stat(nasA); err != nil {
+		t.Errorf("the claimed file was deleted by the other profile: %v", err)
+	}
+}
+
+// A renamed book's old file is tidied up after the new one lands, which
+// is as irreversible as the delete step and carries the same bound: a
+// recorded path outside the library (a hand-edited state DB, a row a
+// future tool writes) names a file this run has no claim on.
+func TestSync_RenameLeavesFileOutsideLibraryAlone(t *testing.T) {
+	store, dir := openTempStore(t)
+	defer store.Close()
+	library := filepath.Join(dir, "Books", "home")
+	outside := filepath.Join(dir, "elsewhere", "Author", "Old.epub")
+	seedFile(t, outside)
+
+	t0 := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	if err := store.Upsert(library, "home", makeBookSized("u1", "Old", 0, t0), outside, 13); err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+
+	// A newer edition under a new title: the download lands inside the
+	// library and the old path is offered for cleanup.
+	src := &fakeSource{books: []Book{makeBookSized("u1", "New", 0, t0.Add(time.Hour))}}
+	res := Sync(context.Background(), src, store, library, nil, SyncOptions{Profile: "home"})
+	if res.Downloaded != 1 || res.FirstErr != nil {
+		t.Fatalf("sync = %+v, want the renamed book downloaded", res)
+	}
+	if _, err := os.Stat(filepath.Join(library, "Author", "New.epub")); err != nil {
+		t.Fatalf("new copy missing: %v", err)
+	}
+	if _, err := os.Stat(outside); err != nil {
+		t.Errorf("file outside the library was deleted: %v", err)
+	}
+	if _, err := os.Stat(filepath.Dir(outside)); err != nil {
+		t.Errorf("directory outside the library was removed: %v", err)
+	}
+}

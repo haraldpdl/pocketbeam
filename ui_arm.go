@@ -89,6 +89,15 @@ func (a *app) showHourglassAt(p image.Point) {
 	ink.ShowHourglassAt(p)
 }
 
+// showHourglass raises InkView's busy icon in the middle of the screen,
+// for a wait that starts before a screen (and so a layout to place the
+// icon against) exists. Taken down by the same draw pass as
+// showHourglassAt.
+func (a *app) showHourglass() {
+	a.hourglass = true
+	ink.ShowHourglass()
+}
+
 // hideHourglass takes the busy icon down if one is up. InkView restores
 // the pixels it saved when the icon went up, so this must run before the
 // screen is redrawn, and must not run when nothing was shown.
@@ -167,6 +176,12 @@ func (a *app) Init() error {
 
 	if cfg, err := LoadConfig(a.cfgPath); err == nil {
 		if client, err := NewClient(cfg.Host, cfg.User, cfg.Pass); err == nil {
+			// Opening the store upgrades a state DB written by an older
+			// install, which rewrites every tracked book. That is a
+			// one-off, but on a device holding a large library it is long
+			// enough that an unmarked screen reads as a hung app; the
+			// first draw takes the icon down again.
+			a.showHourglass()
 			if store, err := OpenStore(cfg.StateDB); err == nil {
 				a.SetSession(cfg, client, store)
 				a.refreshMainStats()

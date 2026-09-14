@@ -247,6 +247,9 @@ func (a *app) reloadActiveConfig() {
 		log.Printf("reload config: %v", err)
 		return
 	}
+	// The first open after an upgrade rewrites every tracked book; both
+	// callers repaint afterwards, which takes the icon down again.
+	a.showHourglass()
 	store, err := OpenStore(cfg.StateDB)
 	if err != nil {
 		log.Printf("open store: %v", err)

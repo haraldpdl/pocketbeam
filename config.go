@@ -55,24 +55,45 @@ func libraryFolderName(profile string) string {
 // nothing to collide with.
 func libraryPathFor(cfgPath, booksDir, profile string) string {
 	base := filepath.Join(booksDir, libraryFolderName(profile))
-	taken := map[string]bool{}
-	if doc, err := parseDoc(cfgPath); err == nil {
-		for name, rows := range doc.sections {
-			if name == profile {
-				continue
-			}
-			for _, row := range rows {
-				if row.key == "library" && row.value != "" {
-					taken[pathKey(row.value)] = true
-				}
-			}
-		}
-	}
+	taken := otherProfileLibraries(cfgPath, profile)
 	path := base
 	for n := 2; taken[pathKey(path)]; n++ {
 		path = fmt.Sprintf("%s-%d", base, n)
 	}
 	return path
+}
+
+// otherProfileLibraries returns the library folders every profile but
+// profile downloads into, as the pathKey values a folder is compared by.
+// An unreadable config file holds no folders.
+func otherProfileLibraries(cfgPath, profile string) map[string]bool {
+	taken := map[string]bool{}
+	doc, err := parseDoc(cfgPath)
+	if err != nil {
+		return taken
+	}
+	for name, rows := range doc.sections {
+		if name == profile {
+			continue
+		}
+		for _, row := range rows {
+			if row.key == "library" && row.value != "" {
+				taken[pathKey(row.value)] = true
+			}
+		}
+	}
+	return taken
+}
+
+// LibraryShared reports whether a profile other than profile downloads
+// into library. Profiles created by this version each get a folder of
+// their own, but installs set up by an earlier one put every OPDS
+// profile in Books/CWA and every WebDAV one in Books/WebDAV, and the
+// folder is hand-editable besides. A shared folder holds books this
+// profile must not delete, which is what SyncOptions.LibraryShared
+// tells the sync.
+func LibraryShared(cfgPath, profile, library string) bool {
+	return otherProfileLibraries(cfgPath, profile)[pathKey(library)]
 }
 
 // profileNameTaken reports whether the config file already holds a

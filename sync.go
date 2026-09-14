@@ -62,11 +62,22 @@ type SyncOptions struct {
 	// prune the device.
 	Scope string
 
-	// Profile names the profile being synced. The last-sync scope is
-	// remembered per profile: profiles sync different hosts and filters,
-	// so one shared memory of "the previous scope" would read as a scope
-	// change on every switch and disable the delete step for good.
+	// Profile names the profile being synced. It is remembered per
+	// downloaded book, so the delete step only ever proposes books this
+	// profile fetched, and it keys the last-sync scope: profiles sync
+	// different hosts and filters, so one shared memory of "the previous
+	// scope" would read as a scope change on every switch and disable the
+	// delete step for good.
 	Profile string
+
+	// LibraryShared marks that another profile in the config file
+	// downloads into this same folder. Profiles created by this version
+	// get a folder of their own, but installs set up before that put
+	// every OPDS profile in Books/CWA and every WebDAV one in
+	// Books/WebDAV. While a folder is shared, a book whose row names no
+	// profile (migrated from the UUID-keyed schema) may be any of them,
+	// so it is never deleted until one of them claims it.
+	LibraryShared bool
 
 	// Confirm is invoked before any deletion happens. If nil, the delete
 	// step is skipped even when DeleteMissing is true.
@@ -109,7 +120,9 @@ func lastScopeKey(profile string) string {
 // never synced. A profile with no key of its own falls back to the global
 // key older versions wrote, so an upgraded install still reaches the
 // delete step on its first run. That value names the profile that wrote
-// it (see ScopeFor), so it can only match that same profile.
+// it (see ScopeFor), so it can only match that same profile; what the
+// delete step may then touch is bounded by the rows' own profile (see
+// ownedBy), not by this key.
 func lastScope(store *Store, profile string) string {
 	v, ok, _ := store.GetMeta(lastScopeKey(profile))
 	if ok || profile == "" {
@@ -151,6 +164,15 @@ func Sync(ctx context.Context, src Source, store *Store, library string, progres
 			progress(i+1, total, b)
 		}
 		old, exists := local[b.UUID]
+		if exists && old.Profile == "" && opts.Profile != "" {
+			// A row migrated from the UUID-keyed schema names no profile,
+			// so nothing may delete it. This profile's server still lists
+			// the book, which is the evidence that the copy is this
+			// profile's; claim it so the delete step can reach it later.
+			// A failure only leaves the row unclaimed, which is the safe
+			// state, so the sync carries on.
+			_ = store.Claim(library, b.UUID, opts.Profile)
+		}
 		if exists && !b.Updated.After(old.Updated) && hasLocalCopy(old.LocalPath) {
 			res.Skipped++
 			continue
@@ -179,8 +201,11 @@ func Sync(ctx context.Context, src Source, store *Store, library string, progres
 		// lands at a new path; tidy up the old file so we don't accumulate
 		// duplicates on the device. Stores written before filenames were
 		// disambiguated can map another book to the old path, in which case
-		// the file is that book's only copy and must stay.
-		if exists && old.LocalPath != path {
+		// the file is that book's only copy and must stay. The removal is
+		// bounded to this library for the same reason the delete step is
+		// (see computeMissing): a row whose path the app never wrote there
+		// is not ours to act on, and neither deletion can be undone.
+		if exists && old.LocalPath != path && underDir(library, old.LocalPath) {
 			if other, _ := store.OtherOwner(library, old.LocalPath, b.UUID); other == "" {
 				if err := os.Remove(old.LocalPath); err == nil {
 					// Best-effort: also remove the old author directory if it's now empty.
@@ -188,7 +213,7 @@ func Sync(ctx context.Context, src Source, store *Store, library string, progres
 				}
 			}
 		}
-		if err := store.Upsert(library, b, path, actualSize); err != nil {
+		if err := store.Upsert(library, opts.Profile, b, path, actualSize); err != nil {
 			res.Failed++
 			if res.FirstErr == nil {
 				res.FirstErr = fmt.Errorf("store %q: %w", b.Title, err)
@@ -212,9 +237,9 @@ func Sync(ctx context.Context, src Source, store *Store, library string, progres
 	return res
 }
 
-// computeMissing returns the set of library's local entries that are
-// absent from the current remote listing, applying the empty-remote and
-// scope-change guards. A nil
+// computeMissing returns the set of library's local entries that this
+// profile downloaded and that are absent from the current remote
+// listing, applying the empty-remote and scope-change guards. A nil
 // return with nil error means a guard tripped: the caller should treat it
 // as "no deletions candidate" rather than surface an error. This is the
 // shared source of truth for reconcileDeletions and Plan so the pre-flight
@@ -244,6 +269,9 @@ func computeMissing(store *Store, library string, remote []Book, opts SyncOption
 		if _, ok := present[e.UUID]; ok {
 			continue
 		}
+		if !ownedBy(e, opts) {
+			continue
+		}
 		// The rows are already this library's, so this only rejects a path
 		// the app never wrote there (a row migrated from the UUID-keyed
 		// schema, a hand-edited state DB). Deletion is irreversible, so it
@@ -254,6 +282,20 @@ func computeMissing(store *Store, library string, remote []Book, opts SyncOption
 		missing = append(missing, e)
 	}
 	return missing, nil
+}
+
+// ownedBy reports whether e is the running profile's book to delete.
+// Rows carry the profile that downloaded them, so a library folder two
+// profiles share (every install created before per-profile folders: see
+// SyncOptions.LibraryShared) no longer lets one of them prune the
+// other's books. A row that names no profile predates the column; it
+// belongs to this profile unless another one downloads into the same
+// folder, in which case it stays until a sync claims it.
+func ownedBy(e LocalBook, opts SyncOptions) bool {
+	if e.Profile == opts.Profile {
+		return true
+	}
+	return e.Profile == "" && !opts.LibraryShared
 }
 
 // reconcileDeletions computes the set of tracked books that are absent

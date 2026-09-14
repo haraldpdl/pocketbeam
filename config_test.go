@@ -509,3 +509,38 @@ func TestProfileAfterProbeFirstRun(t *testing.T) {
 		t.Errorf("StateDB/CheckUpdates = %q / %v, want /state.db / true", got.StateDB, got.CheckUpdates)
 	}
 }
+
+// Before per-profile folders, every OPDS profile the wizard created
+// pointed at Books/CWA, so an upgraded install has two profiles in one
+// folder. The sync has to know, because the books in there are not all
+// the running profile's to delete.
+func TestLibraryShared(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "pocketbeam.cfg")
+	cfg := "active = home\nstate_db = /db.sqlite\n\n" +
+		"[home]\nhost = http://one.lan\nlibrary = /mnt/ext1/Books/CWA\n\n" +
+		"[work]\nhost = http://two.lan\nlibrary = /mnt/ext1/Books/cwa/\n\n" +
+		"[nas]\nbackend = webdav\nhost = http://three.lan\nlibrary = /mnt/ext1/Books/nas\n"
+	if err := os.WriteFile(path, []byte(cfg), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	for _, tc := range []struct {
+		profile, library string
+		want             bool
+	}{
+		// Case and a trailing slash name one folder on the device's storage.
+		{"home", "/mnt/ext1/Books/CWA", true},
+		{"work", "/mnt/ext1/Books/cwa/", true},
+		{"nas", "/mnt/ext1/Books/nas", false},
+		// A folder only this profile uses, and one nobody does.
+		{"home", "/mnt/ext1/Books/elsewhere", false},
+	} {
+		if got := LibraryShared(path, tc.profile, tc.library); got != tc.want {
+			t.Errorf("LibraryShared(%q, %q) = %v, want %v", tc.profile, tc.library, got, tc.want)
+		}
+	}
+	// No config file to read means no other profile to collide with.
+	if LibraryShared(filepath.Join(dir, "missing.cfg"), "home", "/mnt/ext1/Books/CWA") {
+		t.Error("LibraryShared on a missing config file = true, want false")
+	}
+}

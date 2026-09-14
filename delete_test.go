@@ -424,7 +424,7 @@ func TestSync_LegacySharedPath_UpdateKeepsOtherBooksFile(t *testing.T) {
 	// the deliberate bump below reads as an update.
 	for i, b := range src.books {
 		src.books[i].Updated = b.Updated.Truncate(time.Second)
-		if err := store.Upsert(library, src.books[i], shared, 6); err != nil {
+		if err := store.Upsert(library, "", src.books[i], shared, 6); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -470,7 +470,7 @@ func TestSync_LegacySharedPath_DeleteKeepsOtherBooksFile(t *testing.T) {
 	}
 	for i, b := range books {
 		books[i].Updated = b.Updated.Truncate(time.Second)
-		if err := store.Upsert(library, books[i], shared, 6); err != nil {
+		if err := store.Upsert(library, "", books[i], shared, 6); err != nil {
 			t.Fatal(err)
 		}
 	}
