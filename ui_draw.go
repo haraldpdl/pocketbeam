@@ -140,65 +140,94 @@ type listFonts struct {
 // pagedListRects is what a pointer handler needs once a paginated list
 // has been drawn: rows[i] is list item offset+i, pageSize is the step
 // the Prev/Next buttons move by, and prev/next are empty when that
-// direction has nowhere to go.
+// direction has nowhere to go. navY and navShown are the paint pass's
+// share: where the page bar goes and whether there is one.
 type pagedListRects struct {
 	offset   int
 	pageSize int
 	rows     []image.Rectangle
 	prev     image.Rectangle
 	next     image.Rectangle
+	navY     int
+	navShown bool
 }
 
-// drawPagedList paints one page of full-width rows between top and
-// bottom, followed by a "< Prev | Page N of M · K items | Next >" bar
-// when the list overflows a page. Shared by the OPDS feed picker, the
-// WebDAV directory picker and the profile list so all three page
-// identically.
-func (l layout) drawPagedList(c Canvas, f listFonts, top, bottom int, rows []listRow, offset int) pagedListRects {
+// listNavH is the height of the page-navigation bar under a paginated
+// list. Both the placement and the paint pass centre against it.
+func (l layout) listNavH() int { return l.sy(60) }
+
+// layoutPagedList places one page of full-width rows between top and
+// bottom, plus the Prev / Next buttons when the list overflows a page.
+// Geometry only: a pointer handler calls it to find the same rects the
+// draw painted, without a draw having to publish them.
+func (l layout) layoutPagedList(top, bottom, total, offset int) pagedListRects {
 	rowH := l.rowH()
-	navH := l.sy(60)
-	gap := l.sy(20)
-	p := layoutListPage(top, bottom, rowH, navH, gap, len(rows), offset)
+	navH := l.listNavH()
+	p := layoutListPage(top, bottom, rowH, navH, l.sy(20), total, offset)
 
 	out := pagedListRects{
 		offset:   p.offset,
 		pageSize: p.pageSize,
 		rows:     make([]image.Rectangle, 0, p.end-p.offset),
+		navY:     p.navY,
+		navShown: p.navShown,
 	}
 	for i := p.offset; i < p.end; i++ {
 		y1 := top + (i-p.offset)*rowH
-		r := image.Rect(l.margin, y1, l.screen.X-l.margin, y1+rowH)
-		out.rows = append(out.rows, r)
-		l.drawListRow(c, f.rowTitle, f.rowSub, r, rows[i].title, rows[i].subtitle, true)
-	}
-	if n := len(out.rows); n > 0 {
-		last := out.rows[n-1]
-		l.drawHairline(c, last.Min.X, last.Max.X, last.Max.Y)
+		out.rows = append(out.rows, image.Rect(l.margin, y1, l.screen.X-l.margin, y1+rowH))
 	}
 	if !p.navShown {
 		return out
 	}
-
 	navY2 := p.navY + navH
 	navW := (l.screen.X - 2*l.margin) / 4
 	if p.offset > 0 {
 		out.prev = image.Rect(l.margin, p.navY, l.margin+navW, navY2)
-		c.Rect(out.prev, black)
-		drawCenteredText(c, f.button, out.prev, "< Prev")
 	}
-	if p.end < len(rows) {
+	if p.end < total {
 		out.next = image.Rect(l.screen.X-l.margin-navW, p.navY, l.screen.X-l.margin, navY2)
-		c.Rect(out.next, black)
-		drawCenteredText(c, f.button, out.next, "Next >")
+	}
+	return out
+}
+
+// paintPagedList paints the rows g places, followed by a
+// "< Prev | Page N of M · K items | Next >" bar when the list overflows
+// a page. Shared by the OPDS feed picker, the WebDAV directory picker
+// and the profile list so all three page identically.
+func (l layout) paintPagedList(c Canvas, f listFonts, g pagedListRects, rows []listRow) {
+	for i, r := range g.rows {
+		l.drawListRow(c, f.rowTitle, f.rowSub, r, rows[g.offset+i].title, rows[g.offset+i].subtitle, true)
+	}
+	if n := len(g.rows); n > 0 {
+		last := g.rows[n-1]
+		l.drawHairline(c, last.Min.X, last.Max.X, last.Max.Y)
+	}
+	if !g.navShown {
+		return
+	}
+	if !g.prev.Empty() {
+		c.Rect(g.prev, black)
+		drawCenteredText(c, f.button, g.prev, "< Prev")
+	}
+	if !g.next.Empty() {
+		c.Rect(g.next, black)
+		drawCenteredText(c, f.button, g.next, "Next >")
 	}
 	label := fmt.Sprintf("Page %d of %d  ·  %d items",
-		p.offset/p.pageSize+1, (len(rows)+p.pageSize-1)/p.pageSize, len(rows))
+		g.offset/g.pageSize+1, (len(rows)+g.pageSize-1)/g.pageSize, len(rows))
 	// drawListRow and drawCenteredText both leave their own face active,
 	// so the muted label face is activated rather than assumed.
 	c.SetFont(f.label, darkGray)
 	c.Text(image.Point{
 		X: (l.screen.X - c.TextWidth(label)) / 2,
-		Y: p.navY + (navH-f.label.Height())/2,
+		Y: g.navY + (l.listNavH()-f.label.Height())/2,
 	}, label)
-	return out
+}
+
+// drawPagedList places and paints one page in a single call, for callers
+// that have no separate hit-testing pass.
+func (l layout) drawPagedList(c Canvas, f listFonts, top, bottom int, rows []listRow, offset int) pagedListRects {
+	g := l.layoutPagedList(top, bottom, len(rows), offset)
+	l.paintPagedList(c, f, g, rows)
+	return g
 }

@@ -47,6 +47,8 @@ func screenshots() []screenshot {
 		{"main-syncing", func(c Canvas, l layout) { drawMain(c, l, mainSyncingView()) }},
 		{"first-run", func(c Canvas, l layout) { drawWizard(c, l, wizardURLView()) }},
 		{"settings", func(c Canvas, l layout) { drawSettings(c, l, settingsFixtureView()) }},
+		{"feed-picker", func(c Canvas, l layout) { drawPicker(c, l, feedPickerFixtureView()) }},
+		{"dir-picker", func(c Canvas, l layout) { drawPicker(c, l, dirPickerFixtureView()) }},
 	}
 }
 
@@ -124,6 +126,39 @@ func settingsFixtureView() settingsView {
 	// version is whatever the renderer was built with.
 	v.currentVer = "v0.5.0"
 	return v
+}
+
+// feedPickerFixtureView is the OPDS feed picker part-way down a catalog:
+// a breadcrumb of where the user is, more subsections than fit on one
+// page so the page indicator shows, and one level already picked so the
+// Add / Done pair is on screen instead of the single-button state.
+func feedPickerFixtureView() pickerView {
+	subs := []FilterOption{
+		{Name: "Fantasy", Href: "/opds/category/1", Count: 128, CountKnown: true},
+		{Name: "Science Fiction", Href: "/opds/category/2", Count: 214, CountKnown: true},
+		{Name: "Crime", Href: "/opds/category/3", Count: 61, CountKnown: true},
+		{Name: "History", Href: "/opds/category/4", Count: 47, CountKnown: true},
+		{Name: "Biography", Href: "/opds/category/5", Count: 33, CountKnown: true},
+		{Name: "Travel", Href: "/opds/category/6", Count: 18, CountKnown: true},
+		{Name: "Cookery", Href: "/opds/category/7", Count: 12, CountKnown: true},
+		{Name: "Poetry", Href: "/opds/category/8", Count: 9, CountKnown: true},
+		{Name: "Reference", Href: "/opds/category/9", Count: 5, CountKnown: true},
+	}
+	return feedPickerViewOf(feedPickerSnapshot{
+		titles:   []string{"Calibre-Web", "Categories"},
+		href:     "/opds/category",
+		level:    OPDSLevel{FeedTitle: "Categories", Subsections: subs},
+		selected: []FilterOption{{Name: "Science Fiction", Href: "/opds/category/2"}},
+	})
+}
+
+// dirPickerFixtureView is the WebDAV directory picker inside a share,
+// listing the folders one level down.
+func dirPickerFixtureView() pickerView {
+	return dirPickerViewOf(dirPickerSnapshot{
+		path: "/Books/Fiction",
+		dirs: []string{"Anthologies", "Novellas", "Series", "Standalone"},
+	})
 }
 
 // renderScreenshot paints s into a fresh image.

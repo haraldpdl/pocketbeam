@@ -6,8 +6,6 @@ package main
 import (
 	"context"
 	"errors"
-	"fmt"
-	"image"
 	"sync"
 
 	ink "github.com/dennwc/inkview"
@@ -22,18 +20,18 @@ type feedPickerFrame struct {
 
 // feedPickerState holds the current OPDS feed the user is browsing. The
 // navigation stack lets the user walk back up to any ancestor. offset is
-// the first-row-index in the current page; prevPageRect / nextPageRect
-// are the navigation buttons for long lists that don't fit on screen.
+// the first-row index of the page on screen; where that page's rows land
+// is geometry, derived from the layout when the screen is drawn and
+// again when a tap is hit-tested.
 type feedPickerState struct {
-	mu       sync.Mutex
-	loading  bool
-	href     string
-	title    string
-	stack    []feedPickerFrame
-	level    OPDSLevel
-	err      error
-	offset   int
-	pageSize int // rows per page; written during draw so paging stays consistent when the last page is short
+	mu      sync.Mutex
+	loading bool
+	href    string
+	title   string
+	stack   []feedPickerFrame
+	level   OPDSLevel
+	err     error
+	offset  int
 	// reqID identifies the level fetch currently being awaited. The
 	// up-row is tappable while a fetch is in flight, so a slow response
 	// can land after the user has already drilled elsewhere; a fetch
@@ -43,12 +41,6 @@ type feedPickerState struct {
 	// pickerFetch cancels the superseded fetch so a stale request stops
 	// working instead of merely having its result dropped.
 	pickerFetch
-	rowRects     []image.Rectangle // per visible subsection row
-	selectRect   image.Rectangle   // primary action ("Done" or "Add this level" depending on state)
-	doneRect     image.Rectangle   // "Done" button when the selection set is non-empty
-	upRect       image.Rectangle   // ".. (up)" button, empty when at root
-	prevPageRect image.Rectangle   // "< Prev page" button, empty when at first page
-	nextPageRect image.Rectangle   // "Next page >" button, empty when at last page
 	// Selected is the accumulating set of filters chosen during this
 	// picker session; seeded from cfg.FilterHrefs on open, written back
 	// to the config when the user taps Done.
@@ -81,7 +73,6 @@ func (a *app) openShelfPicker() {
 	a.picker.loading = true
 	a.picker.level = OPDSLevel{}
 	a.picker.err = nil
-	a.picker.rowRects = nil
 	a.picker.offset = 0
 	a.picker.selected = seeded
 	a.picker.reqID++
@@ -105,7 +96,6 @@ func (a *app) drillInto(href, title string) {
 	a.picker.loading = true
 	a.picker.level = OPDSLevel{}
 	a.picker.err = nil
-	a.picker.rowRects = nil
 	a.picker.offset = 0
 	a.picker.reqID++
 	req := a.picker.reqID
@@ -116,15 +106,15 @@ func (a *app) drillInto(href, title string) {
 }
 
 // shelfPickerPage scrolls the list by one page. Called from the Prev /
-// Next page buttons; the offset is clamped against the list length on
-// the next draw.
+// Next page buttons with the geometry the tap was hit-tested against.
 //
-// The step is pageSize (written during draw) rather than len(rowRects),
-// because the last page can be shorter than a full window: stepping by
-// the partial count would land on a non-page-aligned offset.
-func (a *app) shelfPickerPage(direction int) {
+// The step is that page's size rather than the rows on screen, because
+// the last page can be shorter than a full window: stepping by the
+// partial count would land on a non-page-aligned offset. It steps from
+// the clamped offset, so an overshoot cannot accumulate.
+func (a *app) shelfPickerPage(list pagedListRects, direction int) {
 	a.picker.mu.Lock()
-	a.picker.offset = pageStep(a.picker.offset, a.picker.pageSize, direction)
+	a.picker.offset = pageStep(list.offset, list.pageSize, direction)
 	a.picker.mu.Unlock()
 	ink.Repaint()
 }
@@ -144,7 +134,6 @@ func (a *app) drillUp() {
 	a.picker.loading = true
 	a.picker.level = OPDSLevel{}
 	a.picker.err = nil
-	a.picker.rowRects = nil
 	a.picker.offset = 0
 	a.picker.reqID++
 	req := a.picker.reqID
@@ -193,185 +182,32 @@ func (a *app) fetchFeedLevel(ctx context.Context, cancel context.CancelFunc, hre
 	ink.Repaint()
 }
 
-func (a *app) drawShelfPicker(c Canvas) {
-	title := a.layout.font(c, 64, true)
-	c.SetFont(title, black)
-	c.Text(image.Point{X: a.layout.margin, Y: a.layout.sy(140)}, "Select filter")
-
-	body := a.layout.font(c, 32, false)
-	rowTitleFont := a.layout.font(c, 36, true)
-	rowSubFont := a.layout.font(c, 28, false)
-	smallFont := a.layout.font(c, 26, false)
-	btnFont := a.layout.font(c, 44, true)
-
+// feedPickerSnapshot reads the picker state as one consistent set of
+// values under the lock, so neither the draw nor a tap works from a
+// half-updated level.
+func (a *app) feedPickerSnapshot() feedPickerSnapshot {
 	a.picker.mu.Lock()
-	loading := a.picker.loading
-	lvl := a.picker.level
-	pickerErr := a.picker.err
-	stackLen := len(a.picker.stack)
-	curTitle := a.picker.title
-	offset := a.picker.offset
-	a.picker.mu.Unlock()
-
-	// Breadcrumb path: every ancestor title joined by " / ", current
-	// level last. Collapses middle segments when the full path is too
-	// wide for the header.
-	a.picker.mu.Lock()
-	stackTitles := make([]string, 0, stackLen)
+	defer a.picker.mu.Unlock()
+	titles := make([]string, 0, len(a.picker.stack)+1)
 	for _, f := range a.picker.stack {
-		stackTitles = append(stackTitles, f.Title)
+		titles = append(titles, f.Title)
 	}
-	a.picker.mu.Unlock()
-	crumb := breadcrumbPath(append(stackTitles, curTitle), 55)
-	c.SetFont(smallFont, darkGray)
-	c.Text(image.Point{X: a.layout.margin, Y: a.layout.sy(210)}, crumb)
-	a.layout.drawHairline(c, a.layout.margin, a.layout.screen.X-a.layout.margin, a.layout.sy(240))
-
-	// Reserve space at bottom for "Sync this level" + Back.
-	selectBtnH := a.layout.sy(100)
-	areaTop := a.layout.pickerAreaTop
-	areaBottom := a.layout.pickerAreaBottom - selectBtnH - a.layout.sy(40)
-
-	var list pagedListRects
-	var upRect image.Rectangle
-
-	// Up-row: fixed above the paginated window so the user can go up from
-	// any page. Rendered as a full-width list row with a left-aligned
-	// "< Back" label so it shares the app-wide row idiom; still visually
-	// distinct from the subsection chevron rows because its chevron
-	// points the other way.
-	//
-	// Drawn on every pass, including while loading and after a failed
-	// fetch, because it is the only way back to the parent level: the
-	// on-screen Back button and the hardware Back key both leave the
-	// picker for Settings and throw the whole drill-down away. It also
-	// lets the user walk away from a fetch that is still in flight.
-	listTop := areaTop
-	if stackLen > 0 {
-		rowH := a.layout.rowH()
-		upRect = image.Rect(a.layout.margin, listTop, a.layout.screen.X-a.layout.margin, listTop+rowH-a.layout.sy(20))
-		a.layout.drawHairline(c, upRect.Min.X, upRect.Max.X, upRect.Min.Y)
-		c.SetFont(rowTitleFont, black)
-		titleY := upRect.Min.Y + (upRect.Dy()-a.layout.fpx(36))/2
-		c.Text(image.Point{X: upRect.Min.X + a.layout.sx(40), Y: titleY},
-			"< Back to "+truncate(stackTitles[stackLen-1], 32))
-		listTop += rowH
+	titles = append(titles, a.picker.title)
+	return feedPickerSnapshot{
+		titles:   titles,
+		href:     a.picker.href,
+		loading:  a.picker.loading,
+		level:    a.picker.level,
+		err:      a.picker.err,
+		offset:   a.picker.offset,
+		selected: append([]FilterOption(nil), a.picker.selected...),
 	}
-
-	// Status text shares the band with the list, so it starts below the
-	// up-row rather than at a fixed y. The breadcrumb and the up-row both
-	// leave their own face active, so body is activated here.
-	msgY := listTop + a.layout.sy(20)
-	if loading {
-		c.SetFont(body, black)
-		c.Text(image.Point{X: a.layout.margin, Y: msgY}, "Loading...")
-		a.showHourglassAt(c, image.Point{X: a.layout.margin, Y: msgY + a.layout.sy(60)})
-	} else if pickerErr != nil {
-		c.SetFont(body, black)
-		c.Text(image.Point{X: a.layout.margin, Y: msgY}, "Could not load feed:")
-		c.Text(image.Point{X: a.layout.margin, Y: msgY + a.layout.sy(50)}, truncate(pickerErr.Error(), 60))
-	} else {
-		subs := visibleSubsections(lvl)
-
-		rows := make([]listRow, 0, len(subs))
-		for _, sub := range subs {
-			var subtitle string
-			if sub.CountKnown {
-				subtitle = fmt.Sprintf("%d books", sub.Count)
-			}
-			rows = append(rows, listRow{title: sub.Name, subtitle: subtitle})
-		}
-		list = a.layout.drawPagedList(c,
-			listFonts{rowTitle: rowTitleFont, rowSub: rowSubFont, button: btnFont, label: smallFont},
-			listTop, areaBottom, rows, offset)
-	}
-
-	// Written on every pass, so a load or an error clears the row and
-	// page targets of the level the user came from instead of leaving
-	// invisible ones behind. upRect is the exception: it is drawn on
-	// every pass, so it is always live.
-	a.picker.mu.Lock()
-	a.picker.offset = list.offset
-	a.picker.pageSize = list.pageSize
-	a.picker.rowRects = list.rows
-	a.picker.prevPageRect = list.prev
-	a.picker.nextPageRect = list.next
-	a.picker.upRect = upRect
-	a.picker.mu.Unlock()
-
-	// Primary action button(s). With no selection the user sees a single
-	// "Sync this level" (sync-all at root) that saves and closes. Once a
-	// selection is in progress we show two stacked buttons: the top one
-	// is "Add" / "Remove" for the current feed, and the bottom one is
-	// "Done (N selected)" that persists and closes.
-	a.picker.mu.Lock()
-	selected := append([]FilterOption(nil), a.picker.selected...)
-	curHref := a.picker.href
-	a.picker.mu.Unlock()
-
-	alreadyIn := pickerContains(selected, curHref)
-	selectY2 := a.layout.backButton.Min.Y - a.layout.sy(40)
-	selectY1 := selectY2 - selectBtnH
-	selectRect := image.Rect(a.layout.margin, selectY1, a.layout.screen.X-a.layout.margin, selectY2)
-	var doneRect image.Rectangle
-	if len(selected) == 0 {
-		c.Rect(selectRect, black)
-		c.Rect(selectRect.Inset(2), black)
-		label := "Sync this level"
-		if stackLen == 0 {
-			label = "Sync everything"
-		} else if !loading && pickerErr == nil {
-			count, approx := levelBookCount(lvl)
-			switch {
-			case count > 0 && approx:
-				label = fmt.Sprintf("Sync this level (~%d books)", count)
-			case count > 0:
-				label = fmt.Sprintf("Sync this level (%d books)", count)
-			}
-		}
-		drawCenteredText(c, btnFont, selectRect, truncate(label, 40))
-	} else {
-		// Two buttons stacked: Add/Remove on top, Done below.
-		half := (selectBtnH - 20) / 2
-		addRect := image.Rect(selectRect.Min.X, selectY1, selectRect.Max.X, selectY1+half+20)
-		doneRect = image.Rect(selectRect.Min.X, selectY1+half+30, selectRect.Max.X, selectY2)
-		c.Rect(addRect, black)
-		addLabel := "Add this level"
-		if alreadyIn {
-			addLabel = "Remove this level"
-		}
-		// At root with no filter picked yet, adding the root feed is
-		// identical to "sync all"; offering the button there makes no
-		// sense, so hide it by using an empty rect.
-		if stackLen == 0 {
-			addRect = image.Rectangle{}
-			c.Fill(image.Rect(selectRect.Min.X, selectY1, selectRect.Max.X, selectY1+half+20), white)
-		} else {
-			drawCenteredText(c, btnFont, addRect, truncate(addLabel, 40))
-		}
-		c.Rect(doneRect, black)
-		c.Rect(doneRect.Inset(2), black)
-		drawCenteredText(c, btnFont, doneRect, fmt.Sprintf("Done (%d selected)", len(selected)))
-		selectRect = addRect
-	}
-	a.picker.mu.Lock()
-	a.picker.selectRect = selectRect
-	a.picker.doneRect = doneRect
-	a.picker.mu.Unlock()
-
-	c.Rect(a.layout.backButton, black)
-	drawCenteredText(c, btnFont, a.layout.backButton, "Back")
 }
 
-// pickerContains reports whether sel already includes an option with the
-// given href. Used to label the Add/Remove toggle.
-func pickerContains(sel []FilterOption, href string) bool {
-	for _, o := range sel {
-		if o.Href == href {
-			return true
-		}
-	}
-	return false
+// feedPickerView is the snapshot resolved into the screen the shared
+// picker draw paints.
+func (a *app) feedPickerView() pickerView {
+	return feedPickerViewOf(a.feedPickerSnapshot())
 }
 
 func (a *app) shelfPickerKey(e ink.KeyEvent) bool {
@@ -399,57 +235,46 @@ func (a *app) shelfPickerPointer(e ink.PointerEvent) bool {
 		ink.Repaint()
 		return true
 	}
-	a.picker.mu.Lock()
-	rects := a.picker.rowRects
-	// Same visibility rule as drawShelfPicker, so row indices line up
-	// with what the user sees.
-	subs := visibleSubsections(a.picker.level)
-	selectRect := a.picker.selectRect
-	doneRect := a.picker.doneRect
-	offset := a.picker.offset
-	prev := a.picker.prevPageRect
-	next := a.picker.nextPageRect
-	upRect := a.picker.upRect
-	hasSelection := len(a.picker.selected) > 0
-	a.picker.mu.Unlock()
+	// The tap is hit-tested against the geometry of the state as it is
+	// now, which is the screen the user tapped unless a fetch landed in
+	// between - and then the rows they see are the new level's too.
+	snap := a.feedPickerSnapshot()
+	g := a.layout.pickerGeometry(feedPickerViewOf(snap))
 
-	// ".. (up)" is a fixed top row and always accessible, including
-	// from page 2+ where it sits above the paginated window.
-	if !upRect.Empty() && e.Point.In(upRect) {
+	// The up-row is a fixed row above the paginated window, so it is
+	// reachable from page 2+ as well.
+	if !g.up.Empty() && e.Point.In(g.up) {
 		a.drillUp()
 		return true
 	}
-	if !selectRect.Empty() && e.Point.In(selectRect) {
-		if hasSelection {
+	if !g.primary.Empty() && e.Point.In(g.primary) {
+		if len(snap.selected) > 0 {
 			a.toggleCurrentInSelection()
 		} else {
 			a.pickerConfirmCurrent()
 		}
 		return true
 	}
-	if !doneRect.Empty() && e.Point.In(doneRect) {
+	if !g.done.Empty() && e.Point.In(g.done) {
 		a.pickerFinishMulti()
 		return true
 	}
-	if !prev.Empty() && e.Point.In(prev) {
-		a.shelfPickerPage(-1)
+	if !g.list.prev.Empty() && e.Point.In(g.list.prev) {
+		a.shelfPickerPage(g.list, -1)
 		return true
 	}
-	if !next.Empty() && e.Point.In(next) {
-		a.shelfPickerPage(+1)
+	if !g.list.next.Empty() && e.Point.In(g.list.next) {
+		a.shelfPickerPage(g.list, +1)
 		return true
 	}
 
-	// rects[i] corresponds to subs[offset+i] directly now that ".."
-	// lives outside the paginated window.
-	for i, r := range rects {
-		if !e.Point.In(r) {
-			continue
-		}
-		abs := offset + i
-		if abs >= 0 && abs < len(subs) {
-			s := subs[abs]
-			a.drillInto(s.Href, s.Name)
+	// The view's rows are the visible subsections in order, so row i on
+	// screen is subs[offset+i].
+	subs := visibleSubsections(snap.level)
+	for i, r := range g.list.rows {
+		if e.Point.In(r) {
+			sub := subs[g.list.offset+i]
+			a.drillInto(sub.Href, sub.Name)
 			return true
 		}
 	}

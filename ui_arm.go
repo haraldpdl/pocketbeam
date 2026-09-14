@@ -235,9 +235,15 @@ func (a *app) drawCurrentScreen(c Canvas) {
 	case screenSettings:
 		drawSettings(c, a.layout, a.settingsView())
 	case screenShelfPicker:
-		a.drawShelfPicker(c)
+		// Both pickers draw the same screen and raise the busy icon the
+		// same way while a level is loading; only the view differs.
+		if p, busy := drawPicker(c, a.layout, a.feedPickerView()); busy {
+			a.showHourglassAt(c, p)
+		}
 	case screenDirPicker:
-		a.drawDirPicker(c)
+		if p, busy := drawPicker(c, a.layout, a.dirPickerView()); busy {
+			a.showHourglassAt(c, p)
+		}
 	case screenDeleteConfirm:
 		a.drawDeleteConfirm(c)
 	case screenSpaceWarn:

@@ -72,7 +72,7 @@ Connect over USB and delete `applications/pocketbeam.app`. To remove its setting
 
 ## Usage
 
-The screens are pictured in the install guide above: the wizard and the sync screen, before and during a sync, in [Start it for the first time](#3-start-it-for-the-first-time); the sync screen with an update waiting and Settings in [Updates](#4-updates). Every image in this README is rendered from the app's own drawing code (`make screenshots`), so they stay in step with it.
+The screens are pictured in the install guide above: the wizard and the sync screen, before and during a sync, in [Start it for the first time](#3-start-it-for-the-first-time); the sync screen with an update waiting and Settings in [Updates](#4-updates). The two pickers are below. Every image in this README is rendered from the app's own drawing code (`make screenshots`), so they stay in step with it.
 
 The main screen has four actions:
 
@@ -85,6 +85,10 @@ The main screen has four actions:
     - **Delete missing**: opt-in toggle. When on, every sync ends with a confirmation prompt listing books no longer on the server; tap Delete or Keep. Changing what a profile syncs (server, filters, folder) skips the prompt for one run, so widening or narrowing a selection never proposes the books you just excluded; each profile remembers what it last synced on its own, so switching between profiles does not skip it.
     - **Check for updates**: shows the running version and checks the release endpoint on demand; see [Updates and privacy](#updates-and-privacy).
 - **Quit**: back to the Applications menu.
+
+<img src="docs/screenshots/feed-picker.png" alt="The OPDS feed picker part-way down a catalog: the breadcrumb Calibre-Web / Categories, a Back to Calibre-Web row, the subsections with their book counts, a Page 1 of 2 indicator with a Next button, and Add this level above Done (1 selected)" width="300"> <img src="docs/screenshots/dir-picker.png" alt="The WebDAV directory picker inside a share: the path /Books/Fiction, a Back to Books row, the folders one level down, and a Sync this folder button" width="300">
+
+The two pickers, each part-way down a tree: the OPDS feed picker with one level already added to the selection, and the WebDAV directory picker listing the folders in a share. Tapping a row descends, the row at the top goes back up one level, and the button at the bottom saves what is on screen.
 
 Books land under `/mnt/ext1/Books/<profile name>/<Author>/<Title>.<ext>` (`Books/default` on a fresh install, since the first profile is not named on screen) and show up in the device's library after the next library refresh. If a second, different book resolves to the same author and title (another edition, or a same-named file in another WebDAV folder), its filename gets a short `[xxxxxxxx]` tag so the two never share one file.
 

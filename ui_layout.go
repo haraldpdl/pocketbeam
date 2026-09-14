@@ -48,9 +48,20 @@ type layout struct {
 	wizardOPDSRow   image.Rectangle
 	wizardWebDAVRow image.Rectangle
 
-	// shelf picker: per-row tap rects computed dynamically in draw.
+	// pickers (OPDS feed, WebDAV directory): the band the paginated row
+	// list is drawn in, the fixed up-row above it, and the action
+	// buttons below it. Fixed geometry like the settings rows, so the
+	// pointer handler reads where the draw put things instead of the
+	// draw writing rects back into picker state.
 	pickerAreaTop    int
 	pickerAreaBottom int
+	pickerUpRow      image.Rectangle
+	// pickerSelectRow is the single full-height action button; when the
+	// feed picker has a selection going it splits into pickerAddRow
+	// (add/remove the current level) above pickerDoneRow (save the set).
+	pickerSelectRow image.Rectangle
+	pickerAddRow    image.Rectangle
+	pickerDoneRow   image.Rectangle
 }
 
 // computeLayout lays out the UI relative to the given screen size. Positions
@@ -132,10 +143,22 @@ func computeLayout(sz image.Point) layout {
 	wizardOPDS := image.Rect(sideMargin, sc(360), sideMargin+contentW, sc(500))
 	wizardWebDAV := image.Rect(sideMargin, sc(500), sideMargin+contentW, sc(640))
 
-	// Shelf picker: rows live between the header (below topSafe) and the
-	// Back button (same position as bottom btnY1).
+	// Pickers: the action button sits just above the Back button, the
+	// row list fills what is left between the header (below topSafe) and
+	// it. The two stacked buttons share that band with a small gap, so
+	// the bottom one keeps the primary position either way.
 	pickerTop := topSafe + sc(220)
-	pickerBottom := btnY1 - sc(40)
+	selectBtnH := sc(100)
+	selectY2 := btnY1 - sc(40)
+	selectY1 := selectY2 - selectBtnH
+	pickerSelect := image.Rect(sideMargin, selectY1, sideMargin+contentW, selectY2)
+	splitH := (selectBtnH - sc(20)) / 2
+	pickerAdd := image.Rect(sideMargin, selectY1, sideMargin+contentW, selectY1+splitH)
+	pickerDone := image.Rect(sideMargin, selectY2-splitH, sideMargin+contentW, selectY2)
+	pickerBottom := selectY1 - sc(40)
+	// The up-row is one list row minus a small gap, so the paginated rows
+	// below it start on the row grid.
+	pickerUp := image.Rect(sideMargin, pickerTop, sideMargin+contentW, pickerTop+sc(listRowPx)-sc(20))
 
 	return layout{
 		screen:           sz,
@@ -160,6 +183,10 @@ func computeLayout(sz image.Point) layout {
 		backButton:       networkBtn,
 		pickerAreaTop:    pickerTop,
 		pickerAreaBottom: pickerBottom,
+		pickerUpRow:      pickerUp,
+		pickerSelectRow:  pickerSelect,
+		pickerAddRow:     pickerAdd,
+		pickerDoneRow:    pickerDone,
 	}
 }
 
@@ -217,11 +244,15 @@ func (s layout) togglePill(row image.Rectangle) image.Rectangle {
 	return image.Rect(x2-w, cy-h/2, x2, cy+h/2)
 }
 
+// listRowPx is the height of one full-width list row on the reference
+// device. computeLayout and rowH both scale it, so a picker's fixed
+// up-row lines up with the paginated rows below it.
+const listRowPx = 110
+
 // rowH is the height of one full-width list row. Every stacked-row
-// screen goes through this so a picker's fixed up-row lines up with the
-// paginated rows below it.
+// screen goes through this.
 func (s layout) rowH() int {
-	return s.sy(110)
+	return s.sy(listRowPx)
 }
 
 // sx scales an X coordinate the same way. Used for sub-indents (e.g.,
