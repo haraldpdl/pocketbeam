@@ -70,9 +70,6 @@ type app struct {
 	libRefresh    libRefreshState
 	netStop       func()
 	layout        layout
-	// fonts holds every face the screens draw with, opened once; see
-	// fontCache in ui_draw_arm.go.
-	fonts fontCache
 	// taps gates the pointer stream for every screen; see taps.go.
 	taps tapGate
 	// hourglass tracks whether InkView is currently showing the busy
@@ -81,32 +78,31 @@ type app struct {
 	hourglass bool
 }
 
-// showHourglassAt raises InkView's busy icon at p. Draw takes it down
-// again on the next pass, so a screen that is still busy re-raises it
-// every time it draws.
-func (a *app) showHourglassAt(p image.Point) {
+// showHourglassAt raises the busy icon at p. Draw takes it down again on
+// the next pass, so a screen that is still busy re-raises it every time
+// it draws.
+func (a *app) showHourglassAt(c Canvas, p image.Point) {
 	a.hourglass = true
-	ink.ShowHourglassAt(p)
+	c.ShowHourglassAt(p)
 }
 
-// showHourglass raises InkView's busy icon in the middle of the screen,
-// for a wait that starts before a screen (and so a layout to place the
-// icon against) exists. Taken down by the same draw pass as
-// showHourglassAt.
-func (a *app) showHourglass() {
+// showHourglass raises the busy icon in the middle of the screen, for a
+// wait that starts before a screen (and so a layout to place the icon
+// against) exists. Taken down by the same draw pass as showHourglassAt.
+func (a *app) showHourglass(c Canvas) {
 	a.hourglass = true
-	ink.ShowHourglass()
+	c.ShowHourglass()
 }
 
-// hideHourglass takes the busy icon down if one is up. InkView restores
+// hideHourglass takes the busy icon down if one is up. The panel restores
 // the pixels it saved when the icon went up, so this must run before the
 // screen is redrawn, and must not run when nothing was shown.
-func (a *app) hideHourglass() {
+func (a *app) hideHourglass(c Canvas) {
 	if !a.hourglass {
 		return
 	}
 	a.hourglass = false
-	ink.HideHourglass()
+	c.HideHourglass()
 }
 
 // acceptTap reports whether a pointer event should fire a tap handler.
@@ -181,7 +177,7 @@ func (a *app) Init() error {
 			// one-off, but on a device holding a large library it is long
 			// enough that an unmarked screen reads as a hung app; the
 			// first draw takes the icon down again.
-			a.showHourglass()
+			a.showHourglass(deviceCanvas)
 			if store, err := OpenStore(cfg.StateDB); err == nil {
 				a.SetSession(cfg, client, store)
 				a.refreshMainStats()
@@ -199,8 +195,8 @@ func (a *app) Init() error {
 }
 
 func (a *app) Close() error {
-	// Cached faces are deliberately not closed here; see fontCache in
-	// ui_draw_arm.go.
+	// Cached faces are deliberately not closed here; see faceCache in
+	// canvas.go.
 	if store := a.Store(); store != nil {
 		_ = store.Close()
 	}
@@ -217,40 +213,40 @@ func (a *app) Close() error {
 // draw interleaves with it and paints in the wrong face or over a
 // freshly cleared screen.
 func (a *app) Draw() {
-	a.DrawFull(a.drawCurrentScreen)
+	a.DrawFull(func() { a.drawCurrentScreen(deviceCanvas) })
 }
 
-func (a *app) drawCurrentScreen() {
+func (a *app) drawCurrentScreen(c Canvas) {
 	// Every repaint starts without the busy icon; a screen that is still
 	// loading raises it again below. This is what takes the hourglass
 	// down when a picker fetch fails or the user leaves mid-load.
-	a.hideHourglass()
-	ink.ClearScreen()
+	a.hideHourglass(c)
+	c.Clear()
 	switch a.Screen() {
 	case screenFirstRun:
-		a.drawWizard()
+		a.drawWizard(c)
 	case screenMain:
-		a.drawMain()
+		drawMain(c, a.layout, a.mainView())
 	case screenSettings:
-		a.drawSettings()
+		a.drawSettings(c)
 	case screenShelfPicker:
-		a.drawShelfPicker()
+		a.drawShelfPicker(c)
 	case screenDirPicker:
-		a.drawDirPicker()
+		a.drawDirPicker(c)
 	case screenDeleteConfirm:
-		a.drawDeleteConfirm()
+		a.drawDeleteConfirm(c)
 	case screenSpaceWarn:
-		a.drawSpaceWarn()
+		a.drawSpaceWarn(c)
 	case screenProfileList:
-		a.drawProfileList()
+		a.drawProfileList(c)
 	case screenProfileDetail:
-		a.drawProfileDetail()
+		a.drawProfileDetail(c)
 	case screenUpdate:
-		a.drawUpdate()
+		a.drawUpdate(c)
 	case screenLibraryRefresh:
-		a.drawLibraryRefresh()
+		a.drawLibraryRefresh(c)
 	}
-	ink.FullUpdate()
+	c.FullUpdate()
 }
 
 func (a *app) Key(e ink.KeyEvent) bool {

@@ -20,29 +20,29 @@ func deleteMissingSubtitle(on bool) string {
 	return "Keep books removed on server"
 }
 
-func (a *app) drawSettings() {
-	title := a.font(ink.DefaultFontBold, 64)
-	rowTitleFont := a.font(ink.DefaultFontBold, 36)
-	rowSubFont := a.font(ink.DefaultFont, 28)
-	sectionFont := a.font(ink.DefaultFontBold, 24)
-	btnFont := a.font(ink.DefaultFontBold, 44)
+func (a *app) drawSettings(c Canvas) {
+	title := a.layout.font(c, 64, true)
+	rowTitleFont := a.layout.font(c, 36, true)
+	rowSubFont := a.layout.font(c, 28, false)
+	sectionFont := a.layout.font(c, 24, true)
+	btnFont := a.layout.font(c, 44, true)
 
 	cfg := a.Config()
 
 	// Header
-	title.SetActive(ink.Black)
-	ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(140)}, "Settings")
+	c.SetFont(title, black)
+	c.Text(image.Point{X: a.layout.margin, Y: a.layout.sy(140)}, "Settings")
 
 	// SERVER section
-	a.drawSectionLabel(sectionFont, "SERVER", a.layout.serverLabelY)
-	a.drawListRow(rowTitleFont, rowSubFont, a.layout.serverRow,
+	a.layout.drawSectionLabel(c, sectionFont, "SERVER", a.layout.serverLabelY)
+	a.layout.drawListRow(c, rowTitleFont, rowSubFont, a.layout.serverRow,
 		"Server", truncate(cfg.Host, 40), true)
-	a.drawListRow(rowTitleFont, rowSubFont, a.layout.profileRow,
+	a.layout.drawListRow(c, rowTitleFont, rowSubFont, a.layout.profileRow,
 		"Profile", cfg.Profile, true)
-	a.drawHairline(a.layout.profileRow.Min.X, a.layout.profileRow.Max.X, a.layout.profileRow.Max.Y)
+	a.layout.drawHairline(c, a.layout.profileRow.Min.X, a.layout.profileRow.Max.X, a.layout.profileRow.Max.Y)
 
 	// LIBRARY section
-	a.drawSectionLabel(sectionFont, "LIBRARY", a.layout.libraryLabelY)
+	a.layout.drawSectionLabel(c, sectionFont, "LIBRARY", a.layout.libraryLabelY)
 	filterTitle := "Sync filter"
 	var filterValue string
 	if cfg.Backend == BackendWebDAV {
@@ -54,14 +54,14 @@ func (a *app) drawSettings() {
 	} else {
 		filterValue = cfg.FilterLabel()
 	}
-	a.drawListRow(rowTitleFont, rowSubFont, a.layout.filterRow,
+	a.layout.drawListRow(c, rowTitleFont, rowSubFont, a.layout.filterRow,
 		filterTitle, filterValue, true)
 
-	a.drawToggleRow(rowTitleFont, rowSubFont, a.layout.deleteRow,
+	a.layout.drawToggleRow(c, rowTitleFont, rowSubFont, a.layout.deleteRow,
 		deleteMissingTitle, deleteMissingSubtitle(cfg.DeleteMissing), cfg.DeleteMissing)
 
 	// ABOUT section
-	a.drawSectionLabel(sectionFont, "ABOUT", a.layout.aboutLabelY)
+	a.layout.drawSectionLabel(c, sectionFont, "ABOUT", a.layout.aboutLabelY)
 	updateTitle := "Check for updates"
 	updateSub := "Current version " + version
 	a.update.mu.Lock()
@@ -69,13 +69,13 @@ func (a *app) drawSettings() {
 		updateTitle = "Install update " + a.update.release.Version
 	}
 	a.update.mu.Unlock()
-	a.drawListRow(rowTitleFont, rowSubFont, a.layout.updateRow,
+	a.layout.drawListRow(c, rowTitleFont, rowSubFont, a.layout.updateRow,
 		updateTitle, updateSub, true)
-	a.drawHairline(a.layout.updateRow.Min.X, a.layout.updateRow.Max.X, a.layout.updateRow.Max.Y)
+	a.layout.drawHairline(c, a.layout.updateRow.Min.X, a.layout.updateRow.Max.X, a.layout.updateRow.Max.Y)
 
 	// Back button in the bottom-left, matching other screens.
-	ink.DrawRect(a.layout.backButton, ink.Black)
-	drawCenteredText(btnFont, a.layout.backButton, "Back", a.layout.fpx(44))
+	c.Rect(a.layout.backButton, black)
+	drawCenteredText(c, btnFont, a.layout.backButton, "Back")
 }
 
 func (a *app) settingsKey(e ink.KeyEvent) bool {

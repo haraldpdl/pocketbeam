@@ -88,52 +88,52 @@ func formatBytes(b int64) string {
 	}
 }
 
-func (a *app) drawSpaceWarn() {
-	title := a.font(ink.DefaultFontBold, 64)
-	title.SetActive(ink.Black)
+func (a *app) drawSpaceWarn(c Canvas) {
+	title := a.layout.font(c, 64, true)
+	c.SetFont(title, black)
 
-	body := a.font(ink.DefaultFont, 32)
-	body.SetActive(ink.Black)
+	body := a.layout.font(c, 32, false)
+	c.SetFont(body, black)
 
-	btnFont := a.font(ink.DefaultFontBold, 44)
+	btnFont := a.layout.font(c, 44, true)
 
 	a.spaceWarn.mu.Lock()
 	plan := a.spaceWarn.plan
 	a.spaceWarn.mu.Unlock()
 
-	title.SetActive(ink.Black)
-	ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(140)}, "Not enough space")
-	body.SetActive(ink.DarkGray)
-	ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(200)},
+	c.SetFont(title, black)
+	c.Text(image.Point{X: a.layout.margin, Y: a.layout.sy(140)}, "Not enough space")
+	c.SetFont(body, darkGray)
+	c.Text(image.Point{X: a.layout.margin, Y: a.layout.sy(200)},
 		"This sync needs more room than the device has.")
-	a.drawHairline(a.layout.margin, a.layout.screen.X-a.layout.margin, a.layout.sy(240))
+	a.layout.drawHairline(c, a.layout.margin, a.layout.screen.X-a.layout.margin, a.layout.sy(240))
 
-	hero := a.font(ink.DefaultFontBold, 40)
-	hero.SetActive(ink.Black)
+	hero := a.layout.font(c, 40, true)
+	c.SetFont(hero, black)
 	newCount := len(plan.NewBooks) + len(plan.UpdatedBooks)
-	ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(310)},
+	c.Text(image.Point{X: a.layout.margin, Y: a.layout.sy(310)},
 		fmt.Sprintf("%d books · %s needed", newCount, formatBytes(plan.DownloadBytes)))
-	body.SetActive(ink.DarkGray)
-	ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(365)},
+	c.SetFont(body, darkGray)
+	c.Text(image.Point{X: a.layout.margin, Y: a.layout.sy(365)},
 		fmt.Sprintf("%s free on device", formatBytes(plan.FreeBytes)))
 
 	y := a.layout.sy(440)
 	if plan.UnknownSizes > 0 {
-		ink.DrawString(image.Point{X: a.layout.margin, Y: y},
+		c.Text(image.Point{X: a.layout.margin, Y: y},
 			fmt.Sprintf("%d books had unknown size; total is a lower bound.", plan.UnknownSizes))
 		y += a.layout.sy(50)
 	}
 	if plan.ReclaimableBytes > 0 {
-		ink.DrawString(image.Point{X: a.layout.margin, Y: y},
+		c.Text(image.Point{X: a.layout.margin, Y: y},
 			fmt.Sprintf("Up to %s freed after delete-missing.",
 				formatBytes(plan.ReclaimableBytes)))
 		y += a.layout.sy(50)
 	}
 	y += a.layout.sy(30)
-	body.SetActive(ink.Black)
-	ink.DrawString(image.Point{X: a.layout.margin, Y: y},
+	c.SetFont(body, black)
+	c.Text(image.Point{X: a.layout.margin, Y: y},
 		"Download anyway? Partial syncs are safe — the device")
-	ink.DrawString(image.Point{X: a.layout.margin, Y: y + a.layout.sy(45)},
+	c.Text(image.Point{X: a.layout.margin, Y: y + a.layout.sy(45)},
 		"just stops when the disk fills up.")
 
 	btnH := a.layout.sy(100)
@@ -144,12 +144,12 @@ func (a *app) drawSpaceWarn() {
 	yesRect := image.Rect(a.layout.margin, btnY1, a.layout.margin+half, btnY2)
 	noRect := image.Rect(a.layout.screen.X-a.layout.margin-half, btnY1, a.layout.screen.X-a.layout.margin, btnY2)
 
-	ink.DrawRect(yesRect, ink.Black)
-	ink.DrawRect(yesRect.Inset(2), ink.Black)
-	drawCenteredText(btnFont, yesRect, "Download", a.layout.fpx(44))
+	c.Rect(yesRect, black)
+	c.Rect(yesRect.Inset(2), black)
+	drawCenteredText(c, btnFont, yesRect, "Download")
 
-	ink.DrawRect(noRect, ink.Black)
-	drawCenteredText(btnFont, noRect, "Cancel", a.layout.fpx(44))
+	c.Rect(noRect, black)
+	drawCenteredText(c, btnFont, noRect, "Cancel")
 
 	a.spaceWarn.mu.Lock()
 	a.spaceWarn.yesRect = yesRect
@@ -219,42 +219,42 @@ func (a *app) answerDelete(ok bool) {
 	ink.Repaint()
 }
 
-func (a *app) drawDeleteConfirm() {
-	title := a.font(ink.DefaultFontBold, 64)
-	title.SetActive(ink.Black)
+func (a *app) drawDeleteConfirm(c Canvas) {
+	title := a.layout.font(c, 64, true)
+	c.SetFont(title, black)
 
-	body := a.font(ink.DefaultFont, 32)
-	body.SetActive(ink.Black)
+	body := a.layout.font(c, 32, false)
+	c.SetFont(body, black)
 
-	btnFont := a.font(ink.DefaultFontBold, 44)
+	btnFont := a.layout.font(c, 44, true)
 
 	a.delConfirm.mu.Lock()
 	pending := append([]LocalBook(nil), a.delConfirm.pending...)
 	a.delConfirm.mu.Unlock()
 
-	title.SetActive(ink.Black)
-	ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(140)}, "Confirm deletion")
-	body.SetActive(ink.DarkGray)
-	ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(200)},
+	c.SetFont(title, black)
+	c.Text(image.Point{X: a.layout.margin, Y: a.layout.sy(140)}, "Confirm deletion")
+	c.SetFont(body, darkGray)
+	c.Text(image.Point{X: a.layout.margin, Y: a.layout.sy(200)},
 		fmt.Sprintf("%d books are no longer on the server.", len(pending)))
-	a.drawHairline(a.layout.margin, a.layout.screen.X-a.layout.margin, a.layout.sy(240))
+	a.layout.drawHairline(c, a.layout.margin, a.layout.screen.X-a.layout.margin, a.layout.sy(240))
 
-	body.SetActive(ink.Black)
-	ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(310)},
+	c.SetFont(body, black)
+	c.Text(image.Point{X: a.layout.margin, Y: a.layout.sy(310)},
 		"Delete them from this device?")
 
 	// Preview up to 5 titles, indented and muted.
 	const preview = 5
-	body.SetActive(ink.DarkGray)
+	c.SetFont(body, darkGray)
 	y := a.layout.sy(380)
 	for i, b := range pending {
 		if i == preview {
-			ink.DrawString(image.Point{X: a.layout.margin + a.layout.sx(40), Y: y},
+			c.Text(image.Point{X: a.layout.margin + a.layout.sx(40), Y: y},
 				fmt.Sprintf("… and %d more", len(pending)-preview))
 			break
 		}
 		label := b.Author + " — " + b.Title
-		ink.DrawString(image.Point{X: a.layout.margin + a.layout.sx(40), Y: y}, truncate(label, 60))
+		c.Text(image.Point{X: a.layout.margin + a.layout.sx(40), Y: y}, truncate(label, 60))
 		y += a.layout.sy(50)
 	}
 
@@ -268,12 +268,12 @@ func (a *app) drawDeleteConfirm() {
 	noRect := image.Rect(a.layout.margin, btnY1, a.layout.margin+half, btnY2)
 	yesRect := image.Rect(a.layout.screen.X-a.layout.margin-half, btnY1, a.layout.screen.X-a.layout.margin, btnY2)
 
-	ink.DrawRect(yesRect, ink.Black)
-	ink.DrawRect(yesRect.Inset(2), ink.Black)
-	drawCenteredText(btnFont, yesRect, "Delete", a.layout.fpx(44))
+	c.Rect(yesRect, black)
+	c.Rect(yesRect.Inset(2), black)
+	drawCenteredText(c, btnFont, yesRect, "Delete")
 
-	ink.DrawRect(noRect, ink.Black)
-	drawCenteredText(btnFont, noRect, "Keep", a.layout.fpx(44))
+	c.Rect(noRect, black)
+	drawCenteredText(c, btnFont, noRect, "Keep")
 
 	a.delConfirm.mu.Lock()
 	a.delConfirm.yesRect = yesRect

@@ -193,16 +193,16 @@ func (a *app) fetchFeedLevel(ctx context.Context, cancel context.CancelFunc, hre
 	ink.Repaint()
 }
 
-func (a *app) drawShelfPicker() {
-	title := a.font(ink.DefaultFontBold, 64)
-	title.SetActive(ink.Black)
-	ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(140)}, "Select filter")
+func (a *app) drawShelfPicker(c Canvas) {
+	title := a.layout.font(c, 64, true)
+	c.SetFont(title, black)
+	c.Text(image.Point{X: a.layout.margin, Y: a.layout.sy(140)}, "Select filter")
 
-	body := a.font(ink.DefaultFont, 32)
-	rowTitleFont := a.font(ink.DefaultFontBold, 36)
-	rowSubFont := a.font(ink.DefaultFont, 28)
-	smallFont := a.font(ink.DefaultFont, 26)
-	btnFont := a.font(ink.DefaultFontBold, 44)
+	body := a.layout.font(c, 32, false)
+	rowTitleFont := a.layout.font(c, 36, true)
+	rowSubFont := a.layout.font(c, 28, false)
+	smallFont := a.layout.font(c, 26, false)
+	btnFont := a.layout.font(c, 44, true)
 
 	a.picker.mu.Lock()
 	loading := a.picker.loading
@@ -223,9 +223,9 @@ func (a *app) drawShelfPicker() {
 	}
 	a.picker.mu.Unlock()
 	crumb := breadcrumbPath(append(stackTitles, curTitle), 55)
-	smallFont.SetActive(ink.DarkGray)
-	ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(210)}, crumb)
-	a.drawHairline(a.layout.margin, a.layout.screen.X-a.layout.margin, a.layout.sy(240))
+	c.SetFont(smallFont, darkGray)
+	c.Text(image.Point{X: a.layout.margin, Y: a.layout.sy(210)}, crumb)
+	a.layout.drawHairline(c, a.layout.margin, a.layout.screen.X-a.layout.margin, a.layout.sy(240))
 
 	// Reserve space at bottom for "Sync this level" + Back.
 	selectBtnH := a.layout.sy(100)
@@ -250,10 +250,10 @@ func (a *app) drawShelfPicker() {
 	if stackLen > 0 {
 		rowH := a.layout.rowH()
 		upRect = image.Rect(a.layout.margin, listTop, a.layout.screen.X-a.layout.margin, listTop+rowH-a.layout.sy(20))
-		a.drawHairline(upRect.Min.X, upRect.Max.X, upRect.Min.Y)
-		rowTitleFont.SetActive(ink.Black)
+		a.layout.drawHairline(c, upRect.Min.X, upRect.Max.X, upRect.Min.Y)
+		c.SetFont(rowTitleFont, black)
 		titleY := upRect.Min.Y + (upRect.Dy()-a.layout.fpx(36))/2
-		ink.DrawString(image.Point{X: upRect.Min.X + a.layout.sx(40), Y: titleY},
+		c.Text(image.Point{X: upRect.Min.X + a.layout.sx(40), Y: titleY},
 			"< Back to "+truncate(stackTitles[stackLen-1], 32))
 		listTop += rowH
 	}
@@ -263,13 +263,13 @@ func (a *app) drawShelfPicker() {
 	// leave their own face active, so body is activated here.
 	msgY := listTop + a.layout.sy(20)
 	if loading {
-		body.SetActive(ink.Black)
-		ink.DrawString(image.Point{X: a.layout.margin, Y: msgY}, "Loading...")
-		a.showHourglassAt(image.Point{X: a.layout.margin, Y: msgY + a.layout.sy(60)})
+		c.SetFont(body, black)
+		c.Text(image.Point{X: a.layout.margin, Y: msgY}, "Loading...")
+		a.showHourglassAt(c, image.Point{X: a.layout.margin, Y: msgY + a.layout.sy(60)})
 	} else if pickerErr != nil {
-		body.SetActive(ink.Black)
-		ink.DrawString(image.Point{X: a.layout.margin, Y: msgY}, "Could not load feed:")
-		ink.DrawString(image.Point{X: a.layout.margin, Y: msgY + a.layout.sy(50)}, truncate(pickerErr.Error(), 60))
+		c.SetFont(body, black)
+		c.Text(image.Point{X: a.layout.margin, Y: msgY}, "Could not load feed:")
+		c.Text(image.Point{X: a.layout.margin, Y: msgY + a.layout.sy(50)}, truncate(pickerErr.Error(), 60))
 	} else {
 		subs := visibleSubsections(lvl)
 
@@ -281,7 +281,7 @@ func (a *app) drawShelfPicker() {
 			}
 			rows = append(rows, listRow{title: sub.Name, subtitle: subtitle})
 		}
-		list = a.drawPagedList(
+		list = a.layout.drawPagedList(c,
 			listFonts{rowTitle: rowTitleFont, rowSub: rowSubFont, button: btnFont, label: smallFont},
 			listTop, areaBottom, rows, offset)
 	}
@@ -315,8 +315,8 @@ func (a *app) drawShelfPicker() {
 	selectRect := image.Rect(a.layout.margin, selectY1, a.layout.screen.X-a.layout.margin, selectY2)
 	var doneRect image.Rectangle
 	if len(selected) == 0 {
-		ink.DrawRect(selectRect, ink.Black)
-		ink.DrawRect(selectRect.Inset(2), ink.Black)
+		c.Rect(selectRect, black)
+		c.Rect(selectRect.Inset(2), black)
 		label := "Sync this level"
 		if stackLen == 0 {
 			label = "Sync everything"
@@ -329,13 +329,13 @@ func (a *app) drawShelfPicker() {
 				label = fmt.Sprintf("Sync this level (%d books)", count)
 			}
 		}
-		drawCenteredText(btnFont, selectRect, truncate(label, 40), a.layout.fpx(44))
+		drawCenteredText(c, btnFont, selectRect, truncate(label, 40))
 	} else {
 		// Two buttons stacked: Add/Remove on top, Done below.
 		half := (selectBtnH - 20) / 2
 		addRect := image.Rect(selectRect.Min.X, selectY1, selectRect.Max.X, selectY1+half+20)
 		doneRect = image.Rect(selectRect.Min.X, selectY1+half+30, selectRect.Max.X, selectY2)
-		ink.DrawRect(addRect, ink.Black)
+		c.Rect(addRect, black)
 		addLabel := "Add this level"
 		if alreadyIn {
 			addLabel = "Remove this level"
@@ -345,13 +345,13 @@ func (a *app) drawShelfPicker() {
 		// sense, so hide it by using an empty rect.
 		if stackLen == 0 {
 			addRect = image.Rectangle{}
-			ink.FillArea(image.Rect(selectRect.Min.X, selectY1, selectRect.Max.X, selectY1+half+20), ink.White)
+			c.Fill(image.Rect(selectRect.Min.X, selectY1, selectRect.Max.X, selectY1+half+20), white)
 		} else {
-			drawCenteredText(btnFont, addRect, truncate(addLabel, 40), a.layout.fpx(44))
+			drawCenteredText(c, btnFont, addRect, truncate(addLabel, 40))
 		}
-		ink.DrawRect(doneRect, ink.Black)
-		ink.DrawRect(doneRect.Inset(2), ink.Black)
-		drawCenteredText(btnFont, doneRect, fmt.Sprintf("Done (%d selected)", len(selected)), a.layout.fpx(44))
+		c.Rect(doneRect, black)
+		c.Rect(doneRect.Inset(2), black)
+		drawCenteredText(c, btnFont, doneRect, fmt.Sprintf("Done (%d selected)", len(selected)))
 		selectRect = addRect
 	}
 	a.picker.mu.Lock()
@@ -359,8 +359,8 @@ func (a *app) drawShelfPicker() {
 	a.picker.doneRect = doneRect
 	a.picker.mu.Unlock()
 
-	ink.DrawRect(a.layout.backButton, ink.Black)
-	drawCenteredText(btnFont, a.layout.backButton, "Back", a.layout.fpx(44))
+	c.Rect(a.layout.backButton, black)
+	drawCenteredText(c, btnFont, a.layout.backButton, "Back")
 }
 
 // pickerContains reports whether sel already includes an option with the

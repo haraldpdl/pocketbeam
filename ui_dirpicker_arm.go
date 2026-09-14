@@ -106,15 +106,15 @@ func (a *app) fetchDirEntries(ctx context.Context, cancel context.CancelFunc, p 
 	ink.Repaint()
 }
 
-func (a *app) drawDirPicker() {
-	title := a.font(ink.DefaultFontBold, 64)
-	title.SetActive(ink.Black)
+func (a *app) drawDirPicker(c Canvas) {
+	title := a.layout.font(c, 64, true)
+	c.SetFont(title, black)
 
-	body := a.font(ink.DefaultFont, 32)
-	rowTitleFont := a.font(ink.DefaultFontBold, 36)
-	rowSubFont := a.font(ink.DefaultFont, 28)
-	smallFont := a.font(ink.DefaultFont, 26)
-	btnFont := a.font(ink.DefaultFontBold, 44)
+	body := a.layout.font(c, 32, false)
+	rowTitleFont := a.layout.font(c, 36, true)
+	rowSubFont := a.layout.font(c, 28, false)
+	smallFont := a.layout.font(c, 26, false)
+	btnFont := a.layout.font(c, 44, true)
 
 	a.dirPicker.mu.Lock()
 	loading := a.dirPicker.loading
@@ -124,12 +124,12 @@ func (a *app) drawDirPicker() {
 	offset := a.dirPicker.offset
 	a.dirPicker.mu.Unlock()
 
-	title.SetActive(ink.Black)
-	ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(140)}, "Select folder")
+	c.SetFont(title, black)
+	c.Text(image.Point{X: a.layout.margin, Y: a.layout.sy(140)}, "Select folder")
 
-	smallFont.SetActive(ink.DarkGray)
-	ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(210)}, truncate(path, 60))
-	a.drawHairline(a.layout.margin, a.layout.screen.X-a.layout.margin, a.layout.sy(240))
+	c.SetFont(smallFont, darkGray)
+	c.Text(image.Point{X: a.layout.margin, Y: a.layout.sy(210)}, truncate(path, 60))
+	a.layout.drawHairline(c, a.layout.margin, a.layout.screen.X-a.layout.margin, a.layout.sy(240))
 
 	// Reserve space at the bottom for the "Sync this folder" button.
 	selectBtnH := a.layout.sy(100)
@@ -148,10 +148,10 @@ func (a *app) drawDirPicker() {
 	if path != "/" && path != "" {
 		rowH := a.layout.rowH()
 		upRect = image.Rect(a.layout.margin, listTop, a.layout.screen.X-a.layout.margin, listTop+rowH-a.layout.sy(20))
-		a.drawHairline(upRect.Min.X, upRect.Max.X, upRect.Min.Y)
-		rowTitleFont.SetActive(ink.Black)
+		a.layout.drawHairline(c, upRect.Min.X, upRect.Max.X, upRect.Min.Y)
+		c.SetFont(rowTitleFont, black)
 		titleY := upRect.Min.Y + (upRect.Dy()-a.layout.fpx(36))/2
-		ink.DrawString(image.Point{X: upRect.Min.X + a.layout.sx(40), Y: titleY},
+		c.Text(image.Point{X: upRect.Min.X + a.layout.sx(40), Y: titleY},
 			"< Back to "+truncate(dirParent(path), 32))
 		listTop += rowH
 	}
@@ -160,28 +160,28 @@ func (a *app) drawDirPicker() {
 	// up-row rather than at a fixed y.
 	msgY := listTop + a.layout.sy(20)
 	if loading {
-		body.SetActive(ink.Black)
-		ink.DrawString(image.Point{X: a.layout.margin, Y: msgY}, "Loading...")
-		a.showHourglassAt(image.Point{X: a.layout.margin, Y: msgY + a.layout.sy(60)})
+		c.SetFont(body, black)
+		c.Text(image.Point{X: a.layout.margin, Y: msgY}, "Loading...")
+		a.showHourglassAt(c, image.Point{X: a.layout.margin, Y: msgY + a.layout.sy(60)})
 	} else if pickErr != nil {
-		body.SetActive(ink.Black)
-		ink.DrawString(image.Point{X: a.layout.margin, Y: msgY}, "Could not list folder:")
-		ink.DrawString(image.Point{X: a.layout.margin, Y: msgY + a.layout.sy(50)}, truncate(pickErr.Error(), 60))
+		c.SetFont(body, black)
+		c.Text(image.Point{X: a.layout.margin, Y: msgY}, "Could not list folder:")
+		c.Text(image.Point{X: a.layout.margin, Y: msgY + a.layout.sy(50)}, truncate(pickErr.Error(), 60))
 	} else {
 		rows := make([]listRow, 0, len(dirs))
 		for _, d := range dirs {
 			rows = append(rows, listRow{title: d})
 		}
-		list = a.drawPagedList(
+		list = a.layout.drawPagedList(c,
 			listFonts{rowTitle: rowTitleFont, rowSub: rowSubFont, button: btnFont, label: smallFont},
 			listTop, areaBottom, rows, offset)
 
 		// Select button sits just above the Back button.
 		selectY2 := a.layout.backButton.Min.Y - a.layout.sy(40)
 		selectRect = image.Rect(a.layout.margin, selectY2-selectBtnH, a.layout.screen.X-a.layout.margin, selectY2)
-		ink.DrawRect(selectRect, ink.Black)
-		ink.DrawRect(selectRect.Inset(2), ink.Black)
-		drawCenteredText(btnFont, selectRect, "Sync this folder", a.layout.fpx(44))
+		c.Rect(selectRect, black)
+		c.Rect(selectRect.Inset(2), black)
+		drawCenteredText(c, btnFont, selectRect, "Sync this folder")
 	}
 
 	// Written on every pass, so a load or an error clears the row and
@@ -198,8 +198,8 @@ func (a *app) drawDirPicker() {
 	a.dirPicker.selectRect = selectRect
 	a.dirPicker.mu.Unlock()
 
-	ink.DrawRect(a.layout.backButton, ink.Black)
-	drawCenteredText(btnFont, a.layout.backButton, "Back", a.layout.fpx(44))
+	c.Rect(a.layout.backButton, black)
+	drawCenteredText(c, btnFont, a.layout.backButton, "Back")
 }
 
 // dirParent returns a human-readable label for the parent of an absolute

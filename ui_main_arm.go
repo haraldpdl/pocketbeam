@@ -64,153 +64,42 @@ type syncState struct {
 	cancelled    bool               // true when the user tapped Cancel so the summary can say so
 }
 
-func (a *app) drawMain() {
-	title := a.font(ink.DefaultFontBold, 64)
-	hero := a.font(ink.DefaultFontBold, 48)
-	body := a.font(ink.DefaultFont, 32)
-	small := a.font(ink.DefaultFont, 26)
-	btnFont := a.font(ink.DefaultFontBold, 44)
-
-	cfg := a.Config()
-	stats := a.Stats()
-
-	// Title + host subtitle (host in muted gray so the filter/host context
-	// is present but secondary to the action area).
-	title.SetActive(ink.Black)
-	ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(140)}, "pocketbeam")
-	small.SetActive(ink.DarkGray)
-	subtitle := cfg.Host
-	if cfg.Backend == BackendWebDAV {
-		p := cfg.Path
-		if p == "" {
-			p = "/"
-		}
-		subtitle += "  ·  " + p
-	} else {
-		subtitle += "  ·  " + cfg.FilterLabel()
+// snapshot reads the live progress as one consistent set of values for
+// the screen to draw from, resolving the current book's elapsed time
+// against the clock while the lock is held.
+func (s *syncState) snapshot() syncSnapshot {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := syncSnapshot{
+		active:       s.active,
+		planning:     s.planning,
+		index:        s.index,
+		total:        s.total,
+		title:        s.title,
+		author:       s.author,
+		err:          s.err,
+		unknownSizes: s.unknownSizes,
 	}
-	ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(190)}, truncate(subtitle, 60))
-
-	// Hairline under the header.
-	a.drawHairline(a.layout.margin, a.layout.screen.X-a.layout.margin, a.layout.sy(220))
-
-	// Status hero: emphatic primary line + muted supporting details.
-	statusY := a.layout.sy(300)
-	hero.SetActive(ink.Black)
-	body.SetActive(ink.DarkGray)
-	if stats.hasLastSync {
-		ink.DrawString(image.Point{X: a.layout.margin, Y: statusY},
-			"Last synced "+humanAgo(stats.lastSync.At))
-		ink.DrawString(image.Point{X: a.layout.margin, Y: statusY + a.layout.sy(60)},
-			fmt.Sprintf("%d books in library", stats.bookCount))
-		if stats.lastSync.Failed > 0 {
-			ink.DrawString(image.Point{X: a.layout.margin, Y: statusY + a.layout.sy(110)},
-				fmt.Sprintf("%d failed — will retry next sync", stats.lastSync.Failed))
-		}
-	} else {
-		ink.DrawString(image.Point{X: a.layout.margin, Y: statusY}, "Not yet synced")
-		ink.DrawString(image.Point{X: a.layout.margin, Y: statusY + a.layout.sy(60)},
-			"Tap Sync Now to begin")
+	if !s.bookStart.IsZero() {
+		out.elapsed = time.Since(s.bookStart)
 	}
-
-	// Update badge: dark-gray filled strip sitting above the sync button
-	// when a newer release is waiting. Informational only; the install
-	// lives in Settings → About.
-	a.update.mu.Lock()
-	updateAvail := a.update.available
-	updateVer := a.update.release.Version
-	a.update.mu.Unlock()
-	if updateAvail && updateVer != "" {
-		badge := image.Rect(
-			a.layout.margin,
-			a.layout.syncButton.Min.Y-a.layout.sy(80),
-			a.layout.screen.X-a.layout.margin,
-			a.layout.syncButton.Min.Y-a.layout.sy(20),
-		)
-		ink.FillArea(badge, ink.LightGray)
-		small.SetActive(ink.Black)
-		drawCenteredText(small, badge,
-			"Update "+updateVer+" available in Settings",
-			a.layout.fpx(26))
-	}
-
-	// Primary action: Sync Now (or Stop during an active sync). Kept as
-	// the screen's most prominent element — double border signals
-	// primary.
-	ink.DrawRect(a.layout.syncButton, ink.Black)
-	ink.DrawRect(a.layout.syncButton.Inset(2), ink.Black)
-	btnLabel := "Sync Now"
-	if a.syncActive() {
-		btnLabel = "Stop"
-	}
-	drawCenteredText(btnFont, a.layout.syncButton, btnLabel, a.layout.fpx(44))
-
-	// Live progress area (drawn fully here on idle-to-sync transition; during
-	// the sync it is refreshed in-place via drawMainProgress + PartialUpdate).
-	a.drawMainProgressContent(body)
-
-	// Bottom action row: secondary actions styled with a single border so
-	// they read as lighter than the primary Sync button.
-	ink.DrawRect(a.layout.networkButton, ink.Black)
-	ink.DrawRect(a.layout.settingsButton, ink.Black)
-	ink.DrawRect(a.layout.quitButton, ink.Black)
-	drawCenteredText(btnFont, a.layout.networkButton, "Network", a.layout.fpx(44))
-	drawCenteredText(btnFont, a.layout.settingsButton, "Settings", a.layout.fpx(44))
-	drawCenteredText(btnFont, a.layout.quitButton, "Quit", a.layout.fpx(44))
+	return out
 }
 
-// drawMainProgressContent renders the progress strip (counter, bar, current
-// book line) without touching the rest of the main screen. Caller must have
-// the appropriate fonts set up; we do not own them here.
-func (a *app) drawMainProgressContent(body *ink.Font) {
-	a.sync.mu.Lock()
-	active := a.sync.active
-	planning := a.sync.planning
-	idx := a.sync.index
-	total := a.sync.total
-	curTitle := a.sync.title
-	curAuthor := a.sync.author
-	syncErr := a.sync.err
-	bookStart := a.sync.bookStart
-	unknown := a.sync.unknownSizes
-	a.sync.mu.Unlock()
-
-	ink.FillArea(a.layout.progressArea, ink.White)
-
-	switch {
-	case planning:
-		body.SetActive(ink.Black)
-		ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.progressArea.Min.Y + a.layout.sy(30)},
-			"Checking remote catalog and free space...")
-	case active:
-		body.SetActive(ink.Black)
-		counter := fmt.Sprintf("%d / %d", idx, total)
-		if !bookStart.IsZero() {
-			if elapsed := time.Since(bookStart); elapsed >= time.Second {
-				counter += "  (" + formatElapsed(elapsed) + ")"
-			}
-		}
-		ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.progressArea.Min.Y + a.layout.sy(30)}, counter)
-		ink.DrawRect(a.layout.progressBar, ink.Black)
-		if total > 0 {
-			fillW := (a.layout.progressBar.Dx() - 6) * idx / total
-			ink.FillArea(image.Rect(
-				a.layout.progressBar.Min.X+a.layout.sx(3),
-				a.layout.progressBar.Min.Y+a.layout.sy(3),
-				a.layout.progressBar.Min.X+a.layout.sx(3)+fillW,
-				a.layout.progressBar.Max.Y-a.layout.sy(3),
-			), ink.DarkGray)
-		}
-		ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.progressArea.Min.Y + a.layout.sy(180)}, truncate(curAuthor+": "+curTitle, 60))
-	case syncErr != nil:
-		body.SetActive(ink.Black)
-		ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.progressArea.Min.Y + a.layout.sy(30)}, "Last error:")
-		ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.progressArea.Min.Y + a.layout.sy(80)}, truncate(syncErr.Error(), 60))
-	case unknown > 0:
-		body.SetActive(ink.Black)
-		ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.progressArea.Min.Y + a.layout.sy(30)},
-			fmt.Sprintf("%d book(s) had unknown size; space estimate was a lower bound.", unknown))
+// mainView collects everything the main screen draws into one snapshot,
+// so the drawing itself touches no shared state and can run off-device.
+func (a *app) mainView() mainView {
+	v := mainView{
+		subtitle: mainSubtitle(a.Config()),
+		stats:    a.Stats(),
+		sync:     a.sync.snapshot(),
 	}
+	a.update.mu.Lock()
+	if a.update.available {
+		v.updateVer = a.update.release.Version
+	}
+	a.update.mu.Unlock()
+	return v
 }
 
 // refreshProgress redraws only the progress strip and pushes it with a
@@ -219,10 +108,10 @@ func (a *app) drawMainProgressContent(body *ink.Font) {
 // the deletion prompt the sync itself raised - so the draw runs under
 // DrawIfOn and is dropped whenever the main screen is not the one up.
 func (a *app) refreshProgress() {
+	c := deviceCanvas
 	a.DrawIfOn(screenMain, func() {
-		body := a.font(ink.DefaultFont, 32)
-		a.drawMainProgressContent(body)
-		ink.PartialUpdate(a.layout.progressArea)
+		drawMainProgress(c, a.layout, a.sync.snapshot())
+		c.PartialUpdate(a.layout.progressArea)
 	})
 }
 
@@ -548,16 +437,6 @@ func (a *app) progressTicker(done <-chan struct{}) {
 	}
 }
 
-// formatElapsed renders a duration as "m:ss" or "h:mm:ss" for display next
-// to the in-progress book counter.
-func formatElapsed(d time.Duration) string {
-	s := int(d.Seconds())
-	if s < 3600 {
-		return fmt.Sprintf("%d:%02d", s/60, s%60)
-	}
-	return fmt.Sprintf("%d:%02d:%02d", s/3600, (s%3600)/60, s%60)
-}
-
 // ---------- Library-refresh dialog ----------
 
 // drawLibraryRefresh paints a centred informational dialog shown after a
@@ -567,16 +446,16 @@ func formatElapsed(d time.Duration) string {
 // sync completion and the scanner UI appearing. It also serves as the
 // backdrop the user returns to when scanner exits, right before the
 // goroutine flips back to screenMain.
-func (a *app) drawLibraryRefresh() {
-	title := a.font(ink.DefaultFontBold, 54)
-	title.SetActive(ink.Black)
+func (a *app) drawLibraryRefresh(c Canvas) {
+	title := a.layout.font(c, 54, true)
+	c.SetFont(title, black)
 
-	body := a.font(ink.DefaultFont, 32)
-	body.SetActive(ink.Black)
+	body := a.layout.font(c, 32, false)
+	c.SetFont(body, black)
 
-	title.SetActive(ink.Black)
-	ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(300)}, "Refreshing library")
-	body.SetActive(ink.Black)
+	c.SetFont(title, black)
+	c.Text(image.Point{X: a.layout.margin, Y: a.layout.sy(300)}, "Refreshing library")
+	c.SetFont(body, black)
 
 	a.libRefresh.mu.Lock()
 	dots := a.libRefresh.dots
@@ -584,14 +463,15 @@ func (a *app) drawLibraryRefresh() {
 	a.libRefresh.rect = rect
 	a.libRefresh.mu.Unlock()
 
-	ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(400)}, "Indexing new books on the device"+strings.Repeat(".", dots))
-	ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(450)}, "This closes on its own.")
+	c.Text(image.Point{X: a.layout.margin, Y: a.layout.sy(400)}, "Indexing new books on the device"+strings.Repeat(".", dots))
+	c.Text(image.Point{X: a.layout.margin, Y: a.layout.sy(450)}, "This closes on its own.")
 }
 
 // refreshLibRefreshDots redraws just the "Indexing..." body line with the
 // current dot count and pushes a partial e-ink update. Called from the
 // spinner ticker goroutine.
 func (a *app) refreshLibRefreshDots() {
+	c := deviceCanvas
 	a.DrawIfOn(screenLibraryRefresh, func() {
 		a.libRefresh.mu.Lock()
 		dots := a.libRefresh.dots
@@ -601,11 +481,11 @@ func (a *app) refreshLibRefreshDots() {
 			return
 		}
 
-		body := a.font(ink.DefaultFont, 32)
-		body.SetActive(ink.Black)
-		ink.FillArea(rect, ink.White)
-		ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(400)}, "Indexing new books on the device"+strings.Repeat(".", dots))
-		ink.PartialUpdate(rect)
+		body := a.layout.font(c, 32, false)
+		c.SetFont(body, black)
+		c.Fill(rect, white)
+		c.Text(image.Point{X: a.layout.margin, Y: a.layout.sy(400)}, "Indexing new books on the device"+strings.Repeat(".", dots))
+		c.PartialUpdate(rect)
 	})
 }
 

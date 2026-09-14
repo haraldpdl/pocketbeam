@@ -66,15 +66,15 @@ func (a *app) openProfileList() {
 	ink.Repaint()
 }
 
-func (a *app) drawProfileList() {
-	title := a.font(ink.DefaultFontBold, 64)
-	title.SetActive(ink.Black)
+func (a *app) drawProfileList(c Canvas) {
+	title := a.layout.font(c, 64, true)
+	c.SetFont(title, black)
 
-	body := a.font(ink.DefaultFont, 32)
-	rowTitleFont := a.font(ink.DefaultFontBold, 36)
-	rowSubFont := a.font(ink.DefaultFont, 28)
-	btnFont := a.font(ink.DefaultFontBold, 44)
-	smallFont := a.font(ink.DefaultFont, 26)
+	body := a.layout.font(c, 32, false)
+	rowTitleFont := a.layout.font(c, 36, true)
+	rowSubFont := a.layout.font(c, 28, false)
+	btnFont := a.layout.font(c, 44, true)
+	smallFont := a.layout.font(c, 26, false)
 
 	a.profileList.mu.Lock()
 	names := append([]string(nil), a.profileList.names...)
@@ -83,15 +83,15 @@ func (a *app) drawProfileList() {
 	offset := a.profileList.offset
 	a.profileList.mu.Unlock()
 
-	title.SetActive(ink.Black)
-	ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(140)}, "Server profiles")
+	c.SetFont(title, black)
+	c.Text(image.Point{X: a.layout.margin, Y: a.layout.sy(140)}, "Server profiles")
 
 	if perr != nil {
-		body.SetActive(ink.Black)
-		ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(240)}, "Could not list profiles:")
-		ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(290)}, truncate(perr.Error(), 60))
-		ink.DrawRect(a.layout.backButton, ink.Black)
-		drawCenteredText(btnFont, a.layout.backButton, "Back", a.layout.fpx(44))
+		c.SetFont(body, black)
+		c.Text(image.Point{X: a.layout.margin, Y: a.layout.sy(240)}, "Could not list profiles:")
+		c.Text(image.Point{X: a.layout.margin, Y: a.layout.sy(290)}, truncate(perr.Error(), 60))
+		c.Rect(a.layout.backButton, black)
+		drawCenteredText(c, btnFont, a.layout.backButton, "Back")
 		return
 	}
 
@@ -111,16 +111,16 @@ func (a *app) drawProfileList() {
 		}
 		rows = append(rows, listRow{title: n, subtitle: sub})
 	}
-	list := a.drawPagedList(
+	list := a.layout.drawPagedList(c,
 		listFonts{rowTitle: rowTitleFont, rowSub: rowSubFont, button: btnFont, label: smallFont},
 		a.layout.pickerAreaTop, addY1-a.layout.sy(40), rows, offset)
 
 	// Primary action: Add new server, sized like the Sync buttons so it
 	// reads as the same kind of commit action.
 	addRect := image.Rect(a.layout.margin, addY1, a.layout.screen.X-a.layout.margin, addY2)
-	ink.DrawRect(addRect, ink.Black)
-	ink.DrawRect(addRect.Inset(2), ink.Black)
-	drawCenteredText(btnFont, addRect, "Add new server", a.layout.fpx(44))
+	c.Rect(addRect, black)
+	c.Rect(addRect.Inset(2), black)
+	drawCenteredText(c, btnFont, addRect, "Add new server")
 
 	a.profileList.mu.Lock()
 	a.profileList.offset = list.offset
@@ -131,8 +131,8 @@ func (a *app) drawProfileList() {
 	a.profileList.addRect = addRect
 	a.profileList.mu.Unlock()
 
-	ink.DrawRect(a.layout.backButton, ink.Black)
-	drawCenteredText(btnFont, a.layout.backButton, "Back", a.layout.fpx(44))
+	c.Rect(a.layout.backButton, black)
+	drawCenteredText(c, btnFont, a.layout.backButton, "Back")
 }
 
 func (a *app) profileListKey(e ink.KeyEvent) bool {
@@ -249,7 +249,7 @@ func (a *app) reloadActiveConfig() {
 	}
 	// The first open after an upgrade rewrites every tracked book; both
 	// callers repaint afterwards, which takes the icon down again.
-	a.showHourglass()
+	a.showHourglass(deviceCanvas)
 	store, err := OpenStore(cfg.StateDB)
 	if err != nil {
 		log.Printf("open store: %v", err)
@@ -302,14 +302,14 @@ func (a *app) openProfileDetail(name string) {
 	ink.Repaint()
 }
 
-func (a *app) drawProfileDetail() {
-	title := a.font(ink.DefaultFontBold, 64)
-	title.SetActive(ink.Black)
+func (a *app) drawProfileDetail(c Canvas) {
+	title := a.layout.font(c, 64, true)
+	c.SetFont(title, black)
 
-	body := a.font(ink.DefaultFont, 32)
-	body.SetActive(ink.Black)
+	body := a.layout.font(c, 32, false)
+	c.SetFont(body, black)
 
-	btnFont := a.font(ink.DefaultFontBold, 44)
+	btnFont := a.layout.font(c, 44, true)
 
 	a.profileDetail.mu.Lock()
 	name := a.profileDetail.name
@@ -320,25 +320,25 @@ func (a *app) drawProfileDetail() {
 	confirming := a.profileDetail.confirmDelete
 	a.profileDetail.mu.Unlock()
 
-	title.SetActive(ink.Black)
-	ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(140)}, truncate(name, 40))
-	body.SetActive(ink.DarkGray)
+	c.SetFont(title, black)
+	c.Text(image.Point{X: a.layout.margin, Y: a.layout.sy(140)}, truncate(name, 40))
+	c.SetFont(body, darkGray)
 	status := "Profile"
 	if isActive {
 		status = "Profile · Active"
 	}
-	ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(200)}, status)
-	a.drawHairline(a.layout.margin, a.layout.screen.X-a.layout.margin, a.layout.sy(240))
+	c.Text(image.Point{X: a.layout.margin, Y: a.layout.sy(200)}, status)
+	a.layout.drawHairline(c, a.layout.margin, a.layout.screen.X-a.layout.margin, a.layout.sy(240))
 
-	body.SetActive(ink.Black)
+	c.SetFont(body, black)
 	if loadErr != nil {
-		ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(310)}, "Could not load profile:")
-		body.SetActive(ink.DarkGray)
-		ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(360)}, truncate(loadErr.Error(), 60))
+		c.Text(image.Point{X: a.layout.margin, Y: a.layout.sy(310)}, "Could not load profile:")
+		c.SetFont(body, darkGray)
+		c.Text(image.Point{X: a.layout.margin, Y: a.layout.sy(360)}, truncate(loadErr.Error(), 60))
 	} else {
-		ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(310)}, backend)
-		body.SetActive(ink.DarkGray)
-		ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(360)}, truncate(host, 55))
+		c.Text(image.Point{X: a.layout.margin, Y: a.layout.sy(310)}, backend)
+		c.SetFont(body, darkGray)
+		c.Text(image.Point{X: a.layout.margin, Y: a.layout.sy(360)}, truncate(host, 55))
 	}
 
 	// Action stack anchored above Back: Delete (always) + Make active
@@ -354,13 +354,13 @@ func (a *app) drawProfileDetail() {
 	var makeActiveBtn image.Rectangle
 	if !isActive && loadErr == nil {
 		makeActiveBtn = image.Rect(a.layout.margin, makeActiveY1, a.layout.margin+contentW, makeActiveY2)
-		ink.DrawRect(makeActiveBtn, ink.Black)
-		ink.DrawRect(makeActiveBtn.Inset(2), ink.Black)
-		drawCenteredText(btnFont, makeActiveBtn, "Make active", a.layout.fpx(44))
+		c.Rect(makeActiveBtn, black)
+		c.Rect(makeActiveBtn.Inset(2), black)
+		drawCenteredText(c, btnFont, makeActiveBtn, "Make active")
 	}
 
 	deleteBtn := image.Rect(a.layout.margin, delY1, a.layout.margin+contentW, delY2)
-	ink.DrawRect(deleteBtn, ink.Black)
+	c.Rect(deleteBtn, black)
 	delLabel := "Delete this profile"
 	if confirming {
 		if isActive {
@@ -373,17 +373,17 @@ func (a *app) drawProfileDetail() {
 		} else {
 			delLabel = fmt.Sprintf("Tap again to delete \"%s\"", name)
 		}
-		ink.DrawRect(deleteBtn.Inset(2), ink.Black)
+		c.Rect(deleteBtn.Inset(2), black)
 	}
-	drawCenteredText(btnFont, deleteBtn, truncate(delLabel, 40), a.layout.fpx(44))
+	drawCenteredText(c, btnFont, deleteBtn, truncate(delLabel, 40))
 
 	a.profileDetail.mu.Lock()
 	a.profileDetail.makeActiveBtn = makeActiveBtn
 	a.profileDetail.deleteBtn = deleteBtn
 	a.profileDetail.mu.Unlock()
 
-	ink.DrawRect(a.layout.backButton, ink.Black)
-	drawCenteredText(btnFont, a.layout.backButton, "Back", a.layout.fpx(44))
+	c.Rect(a.layout.backButton, black)
+	drawCenteredText(c, btnFont, a.layout.backButton, "Back")
 }
 
 func (a *app) profileDetailKey(e ink.KeyEvent) bool {

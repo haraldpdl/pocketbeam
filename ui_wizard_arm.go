@@ -13,12 +13,12 @@ import (
 	ink "github.com/dennwc/inkview"
 )
 
-func (a *app) drawWizard() {
-	title := a.font(ink.DefaultFontBold, 54)
-	title.SetActive(ink.Black)
+func (a *app) drawWizard(c Canvas) {
+	title := a.layout.font(c, 54, true)
+	c.SetFont(title, black)
 
-	body := a.font(ink.DefaultFont, 32)
-	body.SetActive(ink.Black)
+	body := a.layout.font(c, 32, false)
+	c.SetFont(body, black)
 
 	// One snapshot for the whole pass: the probe goroutine can move the
 	// wizard on mid-draw, and a step drawn with the next step's error
@@ -27,45 +27,45 @@ func (a *app) drawWizard() {
 
 	switch wiz.step {
 	case stepWelcome:
-		title.SetActive(ink.Black)
-		ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(200)}, "pocketbeam")
-		body.SetActive(ink.DarkGray)
-		ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(260)}, "Wireless sync from a book server.")
-		a.drawHairline(a.layout.margin, a.layout.screen.X-a.layout.margin, a.layout.sy(300))
+		c.SetFont(title, black)
+		c.Text(image.Point{X: a.layout.margin, Y: a.layout.sy(200)}, "pocketbeam")
+		c.SetFont(body, darkGray)
+		c.Text(image.Point{X: a.layout.margin, Y: a.layout.sy(260)}, "Wireless sync from a book server.")
+		a.layout.drawHairline(c, a.layout.margin, a.layout.screen.X-a.layout.margin, a.layout.sy(300))
 
-		body.SetActive(ink.Black)
-		ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(370)}, "Supported servers")
-		body.SetActive(ink.DarkGray)
-		ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(430)}, "· Calibre-Web and any OPDS catalog")
-		ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(480)}, "· Nextcloud, Synology, ownCloud, WebDAV")
+		c.SetFont(body, black)
+		c.Text(image.Point{X: a.layout.margin, Y: a.layout.sy(370)}, "Supported servers")
+		c.SetFont(body, darkGray)
+		c.Text(image.Point{X: a.layout.margin, Y: a.layout.sy(430)}, "· Calibre-Web and any OPDS catalog")
+		c.Text(image.Point{X: a.layout.margin, Y: a.layout.sy(480)}, "· Nextcloud, Synology, ownCloud, WebDAV")
 
-		body.SetActive(ink.Black)
-		ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(620)}, "Press OK or tap to begin.")
+		c.SetFont(body, black)
+		c.Text(image.Point{X: a.layout.margin, Y: a.layout.sy(620)}, "Press OK or tap to begin.")
 
 	case stepProfileName:
-		title.SetActive(ink.Black)
-		ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(200)}, "Name this profile")
-		body.SetActive(ink.DarkGray)
-		ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(260)}, "Short identifier for this server (no spaces).")
-		a.drawHairline(a.layout.margin, a.layout.screen.X-a.layout.margin, a.layout.sy(300))
-		body.SetActive(ink.Black)
-		ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(370)}, "Tap or press OK to re-open the keyboard.")
+		c.SetFont(title, black)
+		c.Text(image.Point{X: a.layout.margin, Y: a.layout.sy(200)}, "Name this profile")
+		c.SetFont(body, darkGray)
+		c.Text(image.Point{X: a.layout.margin, Y: a.layout.sy(260)}, "Short identifier for this server (no spaces).")
+		a.layout.drawHairline(c, a.layout.margin, a.layout.screen.X-a.layout.margin, a.layout.sy(300))
+		c.SetFont(body, black)
+		c.Text(image.Point{X: a.layout.margin, Y: a.layout.sy(370)}, "Tap or press OK to re-open the keyboard.")
 		if wiz.err != nil {
-			ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(430)}, truncate(wiz.err.Error(), 60))
+			c.Text(image.Point{X: a.layout.margin, Y: a.layout.sy(430)}, truncate(wiz.err.Error(), 60))
 		}
 		if wiz.name != "" {
-			body.SetActive(ink.DarkGray)
-			ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(480)}, "Name: "+wiz.name)
+			c.SetFont(body, darkGray)
+			c.Text(image.Point{X: a.layout.margin, Y: a.layout.sy(480)}, "Name: "+wiz.name)
 		}
 
 	case stepBackend:
-		title.SetActive(ink.Black)
-		ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(200)}, "Choose server type")
-		body.SetActive(ink.DarkGray)
-		ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(260)}, "Tap the option that matches your server.")
+		c.SetFont(title, black)
+		c.Text(image.Point{X: a.layout.margin, Y: a.layout.sy(200)}, "Choose server type")
+		c.SetFont(body, darkGray)
+		c.Text(image.Point{X: a.layout.margin, Y: a.layout.sy(260)}, "Tap the option that matches your server.")
 
-		rowTitleFont := a.font(ink.DefaultFontBold, 36)
-		rowSubFont := a.font(ink.DefaultFont, 28)
+		rowTitleFont := a.layout.font(c, 36, true)
+		rowSubFont := a.layout.font(c, 28, false)
 
 		w := a.layout.screen.X
 		btnW := w - 2*a.layout.margin
@@ -75,16 +75,16 @@ func (a *app) drawWizard() {
 			w.opdsBtn, w.webdavBtn = opdsBtn, webdavBtn
 		})
 
-		a.drawListRow(rowTitleFont, rowSubFont, opdsBtn,
+		a.layout.drawListRow(c, rowTitleFont, rowSubFont, opdsBtn,
 			"Calibre-Web / OPDS", "Calibre-Web, COPS, and other OPDS catalogs", true)
-		a.drawListRow(rowTitleFont, rowSubFont, webdavBtn,
+		a.layout.drawListRow(c, rowTitleFont, rowSubFont, webdavBtn,
 			"WebDAV / Nextcloud", "Nextcloud, Synology, ownCloud, generic WebDAV", true)
-		a.drawHairline(webdavBtn.Min.X, webdavBtn.Max.X, webdavBtn.Max.Y)
+		a.layout.drawHairline(c, webdavBtn.Min.X, webdavBtn.Max.X, webdavBtn.Max.Y)
 
 	case stepURL, stepUser, stepPass:
-		title.SetActive(ink.Black)
-		ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(200)}, "pocketbeam setup")
-		body.SetActive(ink.DarkGray)
+		c.SetFont(title, black)
+		c.Text(image.Point{X: a.layout.margin, Y: a.layout.sy(200)}, "pocketbeam setup")
+		c.SetFont(body, darkGray)
 		var step, what string
 		switch wiz.step {
 		case stepURL:
@@ -94,41 +94,41 @@ func (a *app) drawWizard() {
 		case stepPass:
 			step, what = "Step 3 of 3", "Password"
 		}
-		ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(260)}, step+"  ·  "+what)
-		a.drawHairline(a.layout.margin, a.layout.screen.X-a.layout.margin, a.layout.sy(300))
-		body.SetActive(ink.Black)
-		ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(370)}, "Tap or press OK to open the keyboard.")
-		body.SetActive(ink.DarkGray)
+		c.Text(image.Point{X: a.layout.margin, Y: a.layout.sy(260)}, step+"  ·  "+what)
+		a.layout.drawHairline(c, a.layout.margin, a.layout.screen.X-a.layout.margin, a.layout.sy(300))
+		c.SetFont(body, black)
+		c.Text(image.Point{X: a.layout.margin, Y: a.layout.sy(370)}, "Tap or press OK to open the keyboard.")
+		c.SetFont(body, darkGray)
 		y := a.layout.sy(490)
 		if wiz.url != "" {
-			ink.DrawString(image.Point{X: a.layout.margin, Y: y}, "Server: "+truncate(wiz.url, 48))
+			c.Text(image.Point{X: a.layout.margin, Y: y}, "Server: "+truncate(wiz.url, 48))
 			y += a.layout.sy(50)
 		}
 		if wiz.user != "" {
-			ink.DrawString(image.Point{X: a.layout.margin, Y: y}, "User: "+truncate(wiz.user, 48))
+			c.Text(image.Point{X: a.layout.margin, Y: y}, "User: "+truncate(wiz.user, 48))
 		}
 
 	case stepTesting:
-		title.SetActive(ink.Black)
-		ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(300)}, "Testing connection")
-		body.SetActive(ink.DarkGray)
-		ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(370)}, truncate(wiz.url, 55))
-		a.showHourglassAt(image.Point{X: a.layout.margin, Y: a.layout.sy(480)})
+		c.SetFont(title, black)
+		c.Text(image.Point{X: a.layout.margin, Y: a.layout.sy(300)}, "Testing connection")
+		c.SetFont(body, darkGray)
+		c.Text(image.Point{X: a.layout.margin, Y: a.layout.sy(370)}, truncate(wiz.url, 55))
+		a.showHourglassAt(c, image.Point{X: a.layout.margin, Y: a.layout.sy(480)})
 
 	case stepError:
-		title.SetActive(ink.Black)
-		ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(200)}, "Connection failed")
-		body.SetActive(ink.DarkGray)
-		ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(260)}, "Check that the server URL and credentials are correct.")
-		a.drawHairline(a.layout.margin, a.layout.screen.X-a.layout.margin, a.layout.sy(300))
+		c.SetFont(title, black)
+		c.Text(image.Point{X: a.layout.margin, Y: a.layout.sy(200)}, "Connection failed")
+		c.SetFont(body, darkGray)
+		c.Text(image.Point{X: a.layout.margin, Y: a.layout.sy(260)}, "Check that the server URL and credentials are correct.")
+		a.layout.drawHairline(c, a.layout.margin, a.layout.screen.X-a.layout.margin, a.layout.sy(300))
 		msg := "Unknown error"
 		if wiz.err != nil {
 			msg = wiz.err.Error()
 		}
-		body.SetActive(ink.Black)
-		ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(370)}, truncate(msg, 60))
-		body.SetActive(ink.DarkGray)
-		ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(620)}, "Press OK or tap to try again.")
+		c.SetFont(body, black)
+		c.Text(image.Point{X: a.layout.margin, Y: a.layout.sy(370)}, truncate(msg, 60))
+		c.SetFont(body, darkGray)
+		c.Text(image.Point{X: a.layout.margin, Y: a.layout.sy(620)}, "Press OK or tap to try again.")
 	}
 }
 

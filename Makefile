@@ -16,7 +16,7 @@ HOSTENV := GOOS=linux GOARCH=amd64 GOARM= CC=gcc CGO_ENABLED=1
 ARMENV  := GOOS=linux GOARCH=arm GOARM=7 CGO_ENABLED=1 CC=$(ARM_CC)
 LDFLAGS := -s -w -X main.version=$(VERSION)
 
-.PHONY: ci quick fmt fmt-check vet lint tidy-check test build arm vuln hooks clean
+.PHONY: ci quick fmt fmt-check vet lint tidy-check test build arm vuln screenshots hooks clean
 
 ci: fmt-check vet lint tidy-check test build vuln
 ifneq ($(wildcard $(ARM_CC)),)
@@ -57,6 +57,11 @@ arm:
 
 vuln:
 	$(HOSTENV) $(GO) run $(GOVULNCHECK) ./...
+
+# Regenerate the committed screen renders. `make test` fails when they no
+# longer match what the screens draw, so run this after a UI change.
+screenshots:
+	$(HOSTENV) $(GO) run . -screenshots docs/screenshots
 
 hooks:
 	git config core.hooksPath .githooks

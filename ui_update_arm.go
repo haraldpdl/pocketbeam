@@ -185,27 +185,27 @@ func (a *app) updateStatusArea() image.Rectangle {
 // drawUpdateStatus paints whichever of the flow's states u describes.
 // It clears its own area first so it can be called on its own, outside a
 // full repaint.
-func (a *app) drawUpdateStatus(u updateSnapshot) {
-	hero := a.font(ink.DefaultFontBold, 40)
-	body := a.font(ink.DefaultFont, 32)
-	ink.FillArea(a.updateStatusArea(), ink.White)
+func (a *app) drawUpdateStatus(c Canvas, u updateSnapshot) {
+	hero := a.layout.font(c, 40, true)
+	body := a.layout.font(c, 32, false)
+	c.Fill(a.updateStatusArea(), white)
 
 	y := a.layout.sy(310)
 	switch {
 	case u.installed:
-		hero.SetActive(ink.Black)
-		ink.DrawString(image.Point{X: a.layout.margin, Y: y}, "Installed "+u.rel.Version)
-		body.SetActive(ink.DarkGray)
-		ink.DrawString(image.Point{X: a.layout.margin, Y: y + a.layout.sy(55)}, "Relaunching…")
+		c.SetFont(hero, black)
+		c.Text(image.Point{X: a.layout.margin, Y: y}, "Installed "+u.rel.Version)
+		c.SetFont(body, darkGray)
+		c.Text(image.Point{X: a.layout.margin, Y: y + a.layout.sy(55)}, "Relaunching…")
 	case u.installErr != nil:
-		hero.SetActive(ink.Black)
-		ink.DrawString(image.Point{X: a.layout.margin, Y: y}, "Install failed")
-		body.SetActive(ink.DarkGray)
-		ink.DrawString(image.Point{X: a.layout.margin, Y: y + a.layout.sy(55)}, truncate(u.installErr.Error(), 60))
+		c.SetFont(hero, black)
+		c.Text(image.Point{X: a.layout.margin, Y: y}, "Install failed")
+		c.SetFont(body, darkGray)
+		c.Text(image.Point{X: a.layout.margin, Y: y + a.layout.sy(55)}, truncate(u.installErr.Error(), 60))
 	case u.downloading:
-		hero.SetActive(ink.Black)
-		ink.DrawString(image.Point{X: a.layout.margin, Y: y}, "Downloading "+u.rel.Version)
-		body.SetActive(ink.DarkGray)
+		c.SetFont(hero, black)
+		c.Text(image.Point{X: a.layout.margin, Y: y}, "Downloading "+u.rel.Version)
+		c.SetFont(body, darkGray)
 		var line string
 		if u.total > 0 {
 			pct := int(100 * u.downloaded / u.total)
@@ -216,45 +216,45 @@ func (a *app) drawUpdateStatus(u updateSnapshot) {
 		} else {
 			line = fmt.Sprintf("%d KB received", u.downloaded/1024)
 		}
-		ink.DrawString(image.Point{X: a.layout.margin, Y: y + a.layout.sy(55)}, line)
+		c.Text(image.Point{X: a.layout.margin, Y: y + a.layout.sy(55)}, line)
 		if u.total > 0 {
 			barY1 := y + a.layout.sy(90)
 			barY2 := barY1 + a.layout.sy(30)
 			barX1 := a.layout.margin
 			barX2 := a.layout.screen.X - a.layout.margin
 			bar := image.Rect(barX1, barY1, barX2, barY2)
-			ink.DrawRect(bar, ink.Black)
+			c.Rect(bar, black)
 			fillW := int(int64(bar.Dx()-6) * u.downloaded / u.total)
 			if fillW > bar.Dx()-6 {
 				fillW = bar.Dx() - 6
 			}
 			if fillW > 0 {
-				ink.FillArea(image.Rect(barX1+a.layout.sx(3), barY1+a.layout.sy(3), barX1+a.layout.sx(3)+fillW, barY2-a.layout.sy(3)), ink.DarkGray)
+				c.Fill(image.Rect(barX1+a.layout.sx(3), barY1+a.layout.sy(3), barX1+a.layout.sx(3)+fillW, barY2-a.layout.sy(3)), darkGray)
 			}
 		}
 	case u.checking:
-		hero.SetActive(ink.Black)
-		ink.DrawString(image.Point{X: a.layout.margin, Y: y}, "Checking for updates…")
+		c.SetFont(hero, black)
+		c.Text(image.Point{X: a.layout.margin, Y: y}, "Checking for updates…")
 	case u.checkErr != nil:
-		hero.SetActive(ink.Black)
-		ink.DrawString(image.Point{X: a.layout.margin, Y: y}, "Could not check")
-		body.SetActive(ink.DarkGray)
-		ink.DrawString(image.Point{X: a.layout.margin, Y: y + a.layout.sy(55)}, truncate(u.checkErr.Error(), 60))
+		c.SetFont(hero, black)
+		c.Text(image.Point{X: a.layout.margin, Y: y}, "Could not check")
+		c.SetFont(body, darkGray)
+		c.Text(image.Point{X: a.layout.margin, Y: y + a.layout.sy(55)}, truncate(u.checkErr.Error(), 60))
 	case u.available:
-		hero.SetActive(ink.Black)
-		ink.DrawString(image.Point{X: a.layout.margin, Y: y}, u.rel.Version+" is available")
-		body.SetActive(ink.DarkGray)
+		c.SetFont(hero, black)
+		c.Text(image.Point{X: a.layout.margin, Y: y}, u.rel.Version+" is available")
+		c.SetFont(body, darkGray)
 		detail := "Tap Install now to update"
 		if u.rel.BinarySize > 0 {
 			detail = formatBytes(u.rel.BinarySize) + "  ·  " + detail
 		}
-		ink.DrawString(image.Point{X: a.layout.margin, Y: y + a.layout.sy(55)}, detail)
+		c.Text(image.Point{X: a.layout.margin, Y: y + a.layout.sy(55)}, detail)
 		if u.rel.SHA256 != "" {
-			ink.DrawString(image.Point{X: a.layout.margin, Y: y + a.layout.sy(105)}, "sha256 "+u.rel.SHA256[:12]+"…")
+			c.Text(image.Point{X: a.layout.margin, Y: y + a.layout.sy(105)}, "sha256 "+u.rel.SHA256[:12]+"…")
 		}
 	default:
-		hero.SetActive(ink.Black)
-		ink.DrawString(image.Point{X: a.layout.margin, Y: y}, "You are up to date")
+		c.SetFont(hero, black)
+		c.Text(image.Point{X: a.layout.margin, Y: y}, "You are up to date")
 	}
 }
 
@@ -266,29 +266,30 @@ func (a *app) drawUpdateStatus(u updateSnapshot) {
 // The user can leave mid-download, so the draw runs under DrawIfOn:
 // whatever screen replaced this one owns those pixels.
 func (a *app) refreshUpdateProgress() {
+	c := deviceCanvas
 	a.DrawIfOn(screenUpdate, func() {
-		a.drawUpdateStatus(a.update.snapshot())
-		ink.PartialUpdate(a.updateStatusArea())
+		a.drawUpdateStatus(c, a.update.snapshot())
+		c.PartialUpdate(a.updateStatusArea())
 	})
 }
 
-func (a *app) drawUpdate() {
-	title := a.font(ink.DefaultFontBold, 64)
-	body := a.font(ink.DefaultFont, 32)
-	rowTitleFont := a.font(ink.DefaultFontBold, 36)
-	rowSubFont := a.font(ink.DefaultFont, 28)
-	btnFont := a.font(ink.DefaultFontBold, 44)
+func (a *app) drawUpdate(c Canvas) {
+	title := a.layout.font(c, 64, true)
+	body := a.layout.font(c, 32, false)
+	rowTitleFont := a.layout.font(c, 36, true)
+	rowSubFont := a.layout.font(c, 28, false)
+	btnFont := a.layout.font(c, 44, true)
 
 	cfg := a.Config()
 	u := a.update.snapshot()
 
-	title.SetActive(ink.Black)
-	ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(140)}, "Updates")
-	body.SetActive(ink.DarkGray)
-	ink.DrawString(image.Point{X: a.layout.margin, Y: a.layout.sy(200)}, "Installed version "+version)
-	a.drawHairline(a.layout.margin, a.layout.screen.X-a.layout.margin, a.layout.sy(240))
+	c.SetFont(title, black)
+	c.Text(image.Point{X: a.layout.margin, Y: a.layout.sy(140)}, "Updates")
+	c.SetFont(body, darkGray)
+	c.Text(image.Point{X: a.layout.margin, Y: a.layout.sy(200)}, "Installed version "+version)
+	a.layout.drawHairline(c, a.layout.margin, a.layout.screen.X-a.layout.margin, a.layout.sy(240))
 
-	a.drawUpdateStatus(u)
+	a.drawUpdateStatus(c, u)
 
 	// Auto-check toggle row: list-row style matching Settings.
 	btnH := a.layout.sy(100)
@@ -300,7 +301,7 @@ func (a *app) drawUpdate() {
 	btnY1 := btnY2 - btnH
 
 	toggleRect := image.Rect(a.layout.margin, toggleY1, a.layout.margin+contentW, toggleY2)
-	a.drawToggleRow(rowTitleFont, rowSubFont, toggleRect,
+	a.layout.drawToggleRow(c, rowTitleFont, rowSubFont, toggleRect,
 		autoCheckTitle, autoCheckSubtitle(cfg.CheckUpdates), cfg.CheckUpdates)
 
 	// Primary action row (either Install now or Check for updates).
@@ -308,13 +309,13 @@ func (a *app) drawUpdate() {
 	var installBtn, checkBtn image.Rectangle
 	if u.available && !u.installed && !u.downloading {
 		installBtn = primary
-		ink.DrawRect(installBtn, ink.Black)
-		ink.DrawRect(installBtn.Inset(2), ink.Black)
-		drawCenteredText(btnFont, installBtn, "Install now", a.layout.fpx(44))
+		c.Rect(installBtn, black)
+		c.Rect(installBtn.Inset(2), black)
+		drawCenteredText(c, btnFont, installBtn, "Install now")
 	} else if !u.downloading && !u.installed && !u.checking {
 		checkBtn = primary
-		ink.DrawRect(checkBtn, ink.Black)
-		drawCenteredText(btnFont, checkBtn, "Check for updates", a.layout.fpx(44))
+		c.Rect(checkBtn, black)
+		drawCenteredText(c, btnFont, checkBtn, "Check for updates")
 	}
 
 	a.update.mu.Lock()
@@ -324,8 +325,8 @@ func (a *app) drawUpdate() {
 	a.update.backBtn = a.layout.backButton
 	a.update.mu.Unlock()
 
-	ink.DrawRect(a.layout.backButton, ink.Black)
-	drawCenteredText(btnFont, a.layout.backButton, "Back", a.layout.fpx(44))
+	c.Rect(a.layout.backButton, black)
+	drawCenteredText(c, btnFont, a.layout.backButton, "Back")
 }
 
 func (a *app) updateKey(e ink.KeyEvent) bool {

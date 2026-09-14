@@ -22,7 +22,18 @@ func main() {
 	cfgPath := flag.String("config", "/mnt/ext1/system/config/pocketbeam.cfg", "path to config file")
 	verbose := flag.Bool("v", false, "verbose: log every book considered")
 	yes := flag.Bool("yes", false, "skip delete-missing confirmation prompt (scripted use)")
+	shots := flag.String("screenshots", "", "render the device screens to PNG in this directory and exit (development tool)")
 	flag.Parse()
+
+	// The screenshot renderer needs no server and no config: it paints
+	// the screens with fixture state. Handled before anything else so
+	// `make screenshots` runs on a machine that has neither.
+	if *shots != "" {
+		if err := writeScreenshots(*shots); err != nil {
+			die("screenshots: %v", err)
+		}
+		return
+	}
 
 	cfg, err := LoadConfig(*cfgPath)
 	if err != nil {

@@ -62,6 +62,10 @@ Connect over USB and delete `applications/pocketbeam.app`. To remove its setting
 
 ## Usage
 
+<img src="docs/screenshots/main.png" alt="The pocketbeam main screen: server and filter in the header, last-sync summary, an update badge, Sync Now, and the Network / Settings / Quit row" width="300"> <img src="docs/screenshots/main-syncing.png" alt="The same screen during a sync: the button reads Stop and the progress strip shows the book counter, elapsed time, a progress bar and the current title" width="300">
+
+The main screen between syncs and during one. Both images are rendered from the app's own drawing code (`make screenshots`), so they stay in step with it.
+
 The main screen has four actions:
 
 - **Sync Now**: connects the Wi-Fi (wakes the radio if asleep), probes the server, then pulls the configured catalog (all books by default, or one or more filters / folders that you picked) and downloads everything that is new or updated since the last sync. Before downloads start, pocketbeam tallies what the run will transfer against the free space on the device; if the new books wouldn't fit, it shows a prompt with the shortfall and lets you cancel or proceed anyway. (Partial syncs are safe: the device just stops writing when the disk fills up.) Progress shows the current book counter, a live elapsed-time indicator, and the book title being downloaded. Already-synced books skip instantly. While a sync is in flight the same button reads **Stop**; tapping it halts the run cleanly at any stage, including the server probe and catalog listing (books already downloaded stay, the in-flight `.part` file is left for the next sync's stale-sweep to remove).
@@ -192,6 +196,16 @@ Live tests against a real CWA (gated behind the `live` build tag; host and crede
 ```sh
 POCKETBEAM_TEST_HOST=http://cwa.lan:8083 go test -tags=live -run TestLive
 ```
+
+### Screens without a device
+
+Every screen draws through a small `Canvas` interface with two backends: InkView on the device, and an image renderer (the Go fonts, `golang.org/x/image/font`) everywhere else. Screens that draw through it can therefore be rendered, asserted on in tests, and turned into the images in this README without a PocketBook.
+
+```sh
+make screenshots   # regenerates docs/screenshots/*.png
+```
+
+`make test` re-renders the same screens and fails when a committed image no longer matches what the code draws, so a UI change either updates the images or is caught. The render uses the Go fonts rather than PocketBook's system font, so it is a faithful picture of the layout and the text, not a pixel-exact photograph of the panel.
 
 ### Releases
 
