@@ -117,7 +117,7 @@ The wizard derives `library` from the profile name, filtered for characters the 
 
 `filter_href` / `filter_name` can repeat to sync more than one feed per profile; books are deduped by UUID across the union. `state_db` is global and shared by every profile, but every part of a sync that looks at the files is scoped to the library of the profile being synced: a book is skipped only when a copy of it is in that library, delete-missing only ever proposes books from that library (another profile's books are never deleted by a sync it was not part of), and the book count on the main screen is that library's. Two profiles whose servers hand out the same identity (WebDAV identities are derived from the file path, and two servers can host the same path) therefore each download their own copy. From then on both skip it as long as the two copies are the same size, which is the only cheap evidence that the file in the other library is this book; copies that differ in size, and rows written before sizes were recorded, download again.
 
-Two more optional top-level keys sit next to `active` and `state_db`: `check_updates = off` disables the weekly update check, and `update_url = https://...` points the checker at another release endpoint (a GitHub or Gitea releases API URL works, as does anything that serves the same JSON shape). Both are written back by the app when you change them from Settings.
+Two more optional top-level keys sit next to `active` and `state_db`: `check_updates = off` disables the weekly update check, and `update_url = https://...` points the checker at another release endpoint (a GitHub or Gitea releases API URL works, as does anything that serves the same JSON shape). `check_updates` is what the Settings toggle writes; `update_url` is file-only and is preserved when the app rewrites the config.
 
 You can edit this file by hand over USB if you prefer not to go through the on-device wizard.
 
@@ -139,7 +139,7 @@ pocketbeam checks for new releases so you don't have to re-sideload manually. Th
 
 The update check is a single HTTPS GET to `https://pocketbeam.shinyredapples.com/releases/latest`, the endpoint compiled into the released binaries, or to whatever `update_url` you set in the config.
 
-To disable all automatic update checks, open **Check for updates** in Settings, then tap the **Automatic weekly checks: on** row to flip it off. Manual "Check for updates" remains available on that screen even when automatic checks are disabled. Power users can also set `check_updates = off` at the top of `pocketbeam.cfg`.
+To disable all automatic update checks, open **Check for updates** in Settings, then tap the **Automatic update checks** row (it reads "Check once a week" when on) to flip it off. Manual "Check for updates" remains available on that screen even when automatic checks are disabled. Power users can also set `check_updates = off` at the top of `pocketbeam.cfg`.
 
 The only outbound HTTP traffic pocketbeam ever initiates is (a) OPDS / WebDAV requests to your configured server, (b) the update check described above, (c) the release binary download when you tap Install.
 
