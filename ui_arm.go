@@ -249,11 +249,11 @@ func (a *app) drawCurrentScreen(c Canvas) {
 	case screenSpaceWarn:
 		drawSpaceWarn(c, a.layout, a.spaceWarnView())
 	case screenProfileList:
-		a.drawProfileList(c)
+		drawProfileList(c, a.layout, a.profileListView())
 	case screenProfileDetail:
-		a.drawProfileDetail(c)
+		drawProfileDetail(c, a.layout, a.profileDetailView())
 	case screenUpdate:
-		a.drawUpdate(c)
+		drawUpdate(c, a.layout, a.updateView())
 	case screenLibraryRefresh:
 		drawLibraryRefresh(c, a.layout, a.libRefreshView())
 	}

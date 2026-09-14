@@ -12,31 +12,6 @@ import (
 	"image"
 )
 
-// formatBytes renders b as a short human-readable size. Binary units
-// (KiB/MiB/GiB) are skipped in favour of base-10 because free-space
-// estimates are already approximate and base-10 matches how every
-// PocketBook file dialog phrases sizes.
-func formatBytes(b int64) string {
-	if b < 0 {
-		b = 0
-	}
-	const (
-		kb = 1000
-		mb = 1000 * kb
-		gb = 1000 * mb
-	)
-	switch {
-	case b >= gb:
-		return fmt.Sprintf("%.1f GB", float64(b)/float64(gb))
-	case b >= mb:
-		return fmt.Sprintf("%.0f MB", float64(b)/float64(mb))
-	case b >= kb:
-		return fmt.Sprintf("%.0f KB", float64(b)/float64(kb))
-	default:
-		return fmt.Sprintf("%d B", b)
-	}
-}
-
 // spaceWarnView is the shortfall the prompt reports, resolved from the
 // pre-flight plan before the draw starts. The plan itself carries the
 // book lists the sync is about to run, which the screen never shows.

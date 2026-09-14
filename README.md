@@ -72,7 +72,7 @@ Connect over USB and delete `applications/pocketbeam.app`. To remove its setting
 
 ## Usage
 
-The screens are pictured in the install guide above: the wizard and the sync screen, before and during a sync, in [Start it for the first time](#3-start-it-for-the-first-time); the sync screen with an update waiting and Settings in [Updates](#4-updates). The two pickers, and the screens a sync raises on its own, are below. Every image in this README is rendered from the app's own drawing code (`make screenshots`), so they stay in step with it.
+The screens are pictured in the install guide above: the wizard and the sync screen, before and during a sync, in [Start it for the first time](#3-start-it-for-the-first-time); the sync screen with an update waiting and Settings in [Updates](#4-updates). The two pickers, the screens a sync raises on its own, and the profile screens are below; the update screen is in [Updates and privacy](#updates-and-privacy). Every image in this README is rendered from the app's own drawing code (`make screenshots`), so they stay in step with it.
 
 The main screen has four actions:
 
@@ -95,6 +95,10 @@ A sync raises three screens of its own, in the order they can appear:
 <img src="docs/screenshots/space-warning.png" alt="The pre-flight space warning: 145 books and 1.8 GB needed against 612 MB free on the device, notes about books of unknown size and space delete-missing would reclaim, and Download / Cancel buttons" width="240"> <img src="docs/screenshots/delete-confirm.png" alt="The delete-missing prompt: 8 books are no longer on the server, the first five listed by author and title with the rest counted, and Keep / Delete buttons" width="240"> <img src="docs/screenshots/library-refresh.png" alt="The library-refresh dialog shown after a sync that changed the library: Refreshing library, Indexing new books on the device, and a note that it closes on its own" width="240">
 
 The space warning comes before any download and only when the run would not fit; the delete-missing prompt comes after the downloads and only with the toggle on; the refresh dialog appears whenever the sync changed the library, and closes itself when the PocketBook scanner is done.
+
+<img src="docs/screenshots/profiles.png" alt="The Server profiles list: three profiles, the active one marked Active under its name, an Add new server button and a Back button" width="300"> <img src="docs/screenshots/profile-detail.png" alt="One profile's panel: the profile name, its backend and server address, a Make active button, a Delete this profile button and a Back button" width="300">
+
+The profile list and the panel one profile opens into. The active profile is the one marked **Active**; every row opens a panel, and a profile that is not the active one offers **Make active** above the delete.
 
 Books land under `/mnt/ext1/Books/<profile name>/<Author>/<Title>.<ext>` (`Books/default` on a fresh install, since the first profile is not named on screen) and show up in the device's library after the next library refresh. If a second, different book resolves to the same author and title (another edition, or a same-named file in another WebDAV folder), its filename gets a short `[xxxxxxxx]` tag so the two never share one file.
 
@@ -162,6 +166,10 @@ pocketbeam checks for new releases so you don't have to re-sideload manually. Th
 - **Once at first launch** after sideloading (there's no prior check timestamp, so the app hits the release endpoint within a few seconds of startup).
 - **Once a week thereafter**, gated by the `last_update_check` timestamp stored in the local state DB.
 - **On demand** via **Check for updates** in Settings.
+
+<img src="docs/screenshots/update.png" alt="The Updates screen with a release waiting: v0.6.0 is available with its download size and sha256, an Install now button, the Automatic update checks toggle and a Back button" width="300"> <img src="docs/screenshots/update-downloading.png" alt="The same screen while the release downloads: Downloading v0.6.0 with the percentage, the transferred and total size, and a progress bar" width="300">
+
+The Updates screen, reached from **Check for updates** in Settings: what a waiting release offers, and the download it starts. Leaving the screen mid-download does not stop it, and the install is only performed once the whole file has been verified against the digest in the release notes.
 
 The update check is a single HTTPS GET to `https://pocketbeam.shinyredapples.com/releases/latest`, the endpoint compiled into the released binaries, or to whatever `update_url` you set in the config.
 

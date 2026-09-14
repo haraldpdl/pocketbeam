@@ -74,6 +74,23 @@ type layout struct {
 	pickerSelectRow image.Rectangle
 	pickerAddRow    image.Rectangle
 	pickerDoneRow   image.Rectangle
+
+	// profile list and profile detail: the full-width action rows
+	// stacked above the Back button. profileAction is the slot next to
+	// Back - "Add new server" on the list, "Delete this profile" on the
+	// detail panel - and profileUpperAction the one above it, which only
+	// the detail panel uses (Make active). profileListBottom is where
+	// the paginated rows have to stop so they clear the action row.
+	profileAction      image.Rectangle
+	profileUpperAction image.Rectangle
+	profileListBottom  int
+
+	// update screen: the strip the status block owns (refreshed on its
+	// own while a download runs), the toggle row for automatic checks,
+	// and the primary button above it that installs or checks.
+	updateStatusArea    image.Rectangle
+	updateToggleRow     image.Rectangle
+	updatePrimaryButton image.Rectangle
 }
 
 // computeLayout lays out the UI relative to the given screen size. Positions
@@ -155,6 +172,11 @@ func computeLayout(sz image.Point) layout {
 	wizardOPDS := image.Rect(sideMargin, sc(360), sideMargin+contentW, sc(500))
 	wizardWebDAV := image.Rect(sideMargin, sc(500), sideMargin+contentW, sc(640))
 
+	// aboveBack is where anything a Back-button screen stacks at the
+	// bottom has to end: the Back button shares btnY1 with the main
+	// screen's bottom row, and a gap keeps the two apart.
+	aboveBack := btnY1 - sc(40)
+
 	// Confirmation dialogs: two buttons filling the bottom row's band,
 	// split down the middle with the same gap the main screen's buttons
 	// leave between them.
@@ -183,6 +205,22 @@ func computeLayout(sz image.Point) layout {
 	// The up-row is one list row minus a small gap, so the paginated rows
 	// below it start on the row grid.
 	pickerUp := image.Rect(sideMargin, pickerTop, sideMargin+contentW, pickerTop+sc(listRowPx)-sc(20))
+
+	// Profile screens: one button-sized action row above Back, and a
+	// second one above that for the detail panel's Make active.
+	profileActionY1 := aboveBack - btnH
+	profileAction := image.Rect(sideMargin, profileActionY1, sideMargin+contentW, aboveBack)
+	profileUpperY2 := profileActionY1 - sc(30)
+	profileUpper := image.Rect(sideMargin, profileUpperY2-btnH, sideMargin+contentW, profileUpperY2)
+
+	// Update screen: the status strip sits under the header, the toggle
+	// row takes the slot next to Back (a list row, so it is taller than a
+	// button), and the primary action sits above it.
+	updateStatus := image.Rect(sideMargin, sc(300), sideMargin+contentW, sc(460))
+	updateToggleY1 := aboveBack - sc(listRowPx)
+	updateToggle := image.Rect(sideMargin, updateToggleY1, sideMargin+contentW, aboveBack)
+	updatePrimaryY2 := updateToggleY1 - sc(30)
+	updatePrimary := image.Rect(sideMargin, updatePrimaryY2-btnH, sideMargin+contentW, updatePrimaryY2)
 
 	return layout{
 		screen:             sz,
@@ -214,6 +252,13 @@ func computeLayout(sz image.Point) layout {
 		pickerSelectRow:    pickerSelect,
 		pickerAddRow:       pickerAdd,
 		pickerDoneRow:      pickerDone,
+		profileAction:      profileAction,
+		profileUpperAction: profileUpper,
+		profileListBottom:  profileActionY1 - sc(40),
+
+		updateStatusArea:    updateStatus,
+		updateToggleRow:     updateToggle,
+		updatePrimaryButton: updatePrimary,
 	}
 }
 
@@ -273,7 +318,8 @@ func (s layout) togglePill(row image.Rectangle) image.Rectangle {
 
 // listRowPx is the height of one full-width list row on the reference
 // device. computeLayout and rowH both scale it, so a picker's fixed
-// up-row lines up with the paginated rows below it.
+// up-row lines up with the paginated rows below it, and the update
+// screen's toggle row comes out exactly one row tall.
 const listRowPx = 110
 
 // rowH is the height of one full-width list row. Every stacked-row

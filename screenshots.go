@@ -52,7 +52,19 @@ func screenshots() []screenshot {
 		{"delete-confirm", func(c Canvas, l layout) { drawDeleteConfirm(c, l, deleteConfirmFixtureView()) }},
 		{"space-warning", func(c Canvas, l layout) { drawSpaceWarn(c, l, spaceWarnFixtureView()) }},
 		{"library-refresh", func(c Canvas, l layout) { drawLibraryRefresh(c, l, libraryRefreshView{dots: 2}) }},
+		{"profiles", func(c Canvas, l layout) { drawProfileList(c, l, profileListFixtureView()) }},
+		{"profile-detail", func(c Canvas, l layout) { drawProfileDetail(c, l, profileDetailFixtureView()) }},
+		{"update", func(c Canvas, l layout) { drawUpdate(c, l, updateFixtureView()) }},
+		{"update-downloading", func(c Canvas, l layout) { drawUpdate(c, l, updateDownloadingFixtureView()) }},
 	}
+}
+
+// screenshotRelease is the waiting release every update fixture offers,
+// matching the version the main and settings fixtures announce.
+var screenshotRelease = Release{
+	Version:    "v0.6.0",
+	BinarySize: 7_300_000,
+	SHA256:     "9f2c4a1b7d3e5086c41f9ab2d7e6035481cbb9de7a2f4c10d8e63b5a90271fe4",
 }
 
 // mainIdleView is the main screen between syncs, with an update waiting.
@@ -162,6 +174,42 @@ func dirPickerFixtureView() pickerView {
 		path: "/Books/Fiction",
 		dirs: []string{"Anthologies", "Novellas", "Series", "Standalone"},
 	})
+}
+
+// profileListFixtureView is the profile list of a device syncing from
+// three servers, with the active one marked.
+func profileListFixtureView() profileListView {
+	return profileListView{
+		names:  []string{"default", "nextcloud", "friends-opds"},
+		active: "default",
+	}
+}
+
+// profileDetailFixtureView is the panel of a profile that is not the
+// active one, so it shows both actions it can offer.
+func profileDetailFixtureView() profileDetailView {
+	return profileDetailView{
+		name:    "nextcloud",
+		backend: BackendWebDAV,
+		host:    "https://nc.example.com/remote.php/dav/files/alice",
+	}
+}
+
+// updateFixtureView is the update screen with a release waiting: the
+// state the About row in Settings opens into.
+func updateFixtureView() updateView {
+	return updateViewOf(updateSnapshot{available: true, rel: screenshotRelease}, true, "v0.5.0")
+}
+
+// updateDownloadingFixtureView is the same screen while the release is
+// coming down. The counters are fixed values, so the image does not
+// depend on a clock or on a real transfer.
+func updateDownloadingFixtureView() updateView {
+	v := updateFixtureView()
+	v.downloading = true
+	v.downloaded = 2_920_000
+	v.total = screenshotRelease.BinarySize
+	return v
 }
 
 // renderScreenshot paints s into a fresh image.
