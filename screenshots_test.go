@@ -3,11 +3,11 @@
 package main
 
 import (
-	"bytes"
 	"image"
 	"image/png"
 	"os"
 	"path/filepath"
+	"regexp"
 	"testing"
 )
 
@@ -60,19 +60,42 @@ func TestScreenshotDirHasNoStrays(t *testing.T) {
 	}
 }
 
-// TestREADMEShowsEveryScreenshot is the other half of the stray check: a
-// rendered screen nobody embeds is a picture the install guide could have
-// used and an image that is regenerated for nothing, so a new screen has
-// to reach the README in the same change that adds it.
-func TestREADMEShowsEveryScreenshot(t *testing.T) {
+// readmeScreenshotRef matches an embedded screenshot, in either of the
+// two forms markdown allows: <img src="docs/screenshots/main.png" ...> and
+// ![alt](docs/screenshots/main.png). The leading delimiter is part of the
+// match so that prose about the directory (`docs/screenshots/*.png`) is
+// not read as a reference to a screen. The capture is the bare screen
+// name, which is what screenshots() keys on.
+var readmeScreenshotRef = regexp.MustCompile(`(?:src="|\]\()` + regexp.QuoteMeta(screenshotDir) + `/([^"')\s]+)\.png`)
+
+// TestREADMEShowsExactlyTheRenderedScreens is the other half of the stray
+// check, in both directions. A rendered screen nobody embeds is a picture
+// the install guide could have used and an image regenerated for nothing,
+// so a new screen has to reach the README in the change that adds it; a
+// README reference to a screen that is not rendered is a broken image on
+// the project's front page, which no other gate sees (the stray check
+// only walks the directory, the drift check only walks screenshots()).
+func TestREADMEShowsExactlyTheRenderedScreens(t *testing.T) {
 	readme, err := os.ReadFile("README.md")
 	if err != nil {
 		t.Fatalf("read README.md: %v", err)
 	}
+
+	rendered := map[string]bool{}
 	for _, s := range screenshots() {
-		ref := screenshotDir + "/" + s.name + ".png"
-		if !bytes.Contains(readme, []byte(ref)) {
-			t.Errorf("README.md does not show %s", ref)
+		rendered[s.name] = true
+	}
+
+	shown := map[string]bool{}
+	for _, m := range readmeScreenshotRef.FindAllStringSubmatch(string(readme), -1) {
+		shown[m[1]] = true
+		if !rendered[m[1]] {
+			t.Errorf("README.md shows %s/%s.png, which no screen renders", screenshotDir, m[1])
+		}
+	}
+	for _, s := range screenshots() {
+		if !shown[s.name] {
+			t.Errorf("README.md does not show %s/%s.png", screenshotDir, s.name)
 		}
 	}
 }

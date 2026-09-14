@@ -26,6 +26,10 @@ var screenshotScreen = image.Point{X: 1264, Y: 1680}
 // repository root.
 const screenshotDir = "docs/screenshots"
 
+// screenshotHost is the server address every fixture is configured
+// against, so the header reads the same on all of them.
+const screenshotHost = "https://library.example.com:8083"
+
 // screenshot is one rendered image: the file name (without extension)
 // and the screen to paint.
 type screenshot struct {
@@ -38,6 +42,7 @@ type screenshot struct {
 // missing here and get added as they move.
 func screenshots() []screenshot {
 	return []screenshot{
+		{"main-first-run", func(c Canvas, l layout) { drawMain(c, l, mainFirstRunView()) }},
 		{"main", func(c Canvas, l layout) { drawMain(c, l, mainIdleView()) }},
 		{"main-syncing", func(c Canvas, l layout) { drawMain(c, l, mainSyncingView()) }},
 		{"first-run", func(c Canvas, l layout) { drawWizard(c, l, wizardURLView()) }},
@@ -52,7 +57,7 @@ func screenshots() []screenshot {
 func mainIdleView() mainView {
 	return mainView{
 		subtitle: mainSubtitle(&Config{
-			Host:        "https://library.example.com:8083",
+			Host:        screenshotHost,
 			FilterHrefs: []string{"/opds/shelf/2"},
 			FilterNames: []string{"Science Fiction"},
 		}),
@@ -64,6 +69,21 @@ func mainIdleView() mainView {
 		lastSyncAgo: "3 hours ago",
 		updateVer:   "v0.6.0",
 	}
+}
+
+// mainFirstRunView is the sync screen as the install guide's reader
+// first meets it: the wizard has just written the config, nothing has
+// been synced yet, and the release they sideloaded is the current one,
+// so no update is waiting.
+func mainFirstRunView() mainView {
+	v := mainIdleView()
+	// The wizard never asks for a filter, so a fresh profile syncs the
+	// whole catalog and the header says All books.
+	v.subtitle = mainSubtitle(&Config{Host: screenshotHost})
+	v.stats = mainStats{}
+	v.lastSyncAgo = ""
+	v.updateVer = ""
+	return v
 }
 
 // mainSyncingView is the same screen mid-sync: the primary button reads
@@ -87,14 +107,14 @@ func mainSyncingView() mainView {
 // address already entered, the step that shows what setting pocketbeam
 // up asks for.
 func wizardURLView() wizardState {
-	return wizardState{step: stepURL, url: "https://library.example.com:8083"}
+	return wizardState{step: stepURL, url: screenshotHost}
 }
 
 // settingsFixtureView is the settings list of a configured OPDS profile,
 // with an update waiting so the About row shows the install it offers.
 func settingsFixtureView() settingsView {
 	v := settingsViewOf(&Config{
-		Host:          "https://library.example.com:8083",
+		Host:          screenshotHost,
 		Profile:       "default",
 		FilterHrefs:   []string{"/opds/shelf/2"},
 		FilterNames:   []string{"Science Fiction"},

@@ -44,9 +44,9 @@ The setup wizard asks, in order:
 
 It then tests the connection and, on success, lands on the sync screen; tap **Sync Now**. On failure it names the problem (bad URL, wrong credentials, server unreachable, ...) and offers a retry.
 
-<img src="docs/screenshots/main.png" alt="The pocketbeam sync screen: server and filter in the header, the last-sync line with the book count, an update badge, the Sync Now button, and the Network / Settings / Quit row" width="300"> <img src="docs/screenshots/main-syncing.png" alt="The same screen during a sync: the button reads Stop and a progress strip shows the book counter, elapsed time, a progress bar and the title being downloaded" width="300">
+<img src="docs/screenshots/main-first-run.png" alt="The pocketbeam sync screen as it looks before the first sync: the server address and All books in the header, Not yet synced, the Sync Now button, and the Network / Settings / Quit row" width="300"> <img src="docs/screenshots/main-syncing.png" alt="The same screen during a sync: the button reads Stop and a progress strip shows the book counter, elapsed time, a progress bar and the title being downloaded" width="300">
 
-While a sync runs the button reads **Stop**, and the strip above it counts the books and names the one being downloaded. The first run fetches everything that matches your selection, so it is the long one; later runs download only what changed.
+The sync screen as it looks straight after the wizard, and while a sync runs. During a sync the button reads **Stop**, and the strip below it counts the books and names the one being downloaded. The first run fetches everything that matches your selection, so it is the long one; later runs download only what changed.
 
 Books are stored in `Books/default` on the reader's internal storage. Each extra server profile you add later gets a folder named after the profile (see [Usage](#usage)). After the download finishes, pocketbeam runs the stock library scanner so the new books appear in Library.
 
@@ -54,9 +54,9 @@ Books are stored in `Books/default` on the reader's internal storage. Each extra
 
 pocketbeam checks for new releases on its own: once at first start, weekly after that, and on demand via **Check for updates** in Settings. When a newer release exists, that row reads **Install update vX.Y.Z** and installs it in place, so there is no second USB trip. See [Updates and privacy](#updates-and-privacy) for what the check does and how to switch it off.
 
-<img src="docs/screenshots/settings.png" alt="The Settings list: SERVER with the server URL and the active profile, LIBRARY with the sync filter and the delete-missing toggle, ABOUT with Install update v0.6.0 above the running version, and a Back button" width="300">
+<img src="docs/screenshots/main.png" alt="The sync screen after a few syncs: the last-sync line with the book count, and an Update v0.6.0 available in Settings badge above the Sync Now button" width="300"> <img src="docs/screenshots/settings.png" alt="The Settings list: SERVER with the server URL and the active profile, LIBRARY with the sync filter and the delete-missing toggle, ABOUT with Install update v0.6.0 above the running version, and a Back button" width="300">
 
-Settings is also where the server, the profile and what gets synced live; [Usage](#usage) goes through every row.
+The sync screen after a few syncs with an update waiting, and the Settings list it points at: the badge above the Sync Now button announces it, and the **Install update** row that performs it sits in Settings under ABOUT. Settings is also where the server, the profile and what gets synced live; [Usage](#usage) goes through every row.
 
 **Going back to an older version:** delete `system/config/pocketbeam.db` over USB before you start it. The sync state file is upgraded in place on first launch, and an older release cannot read the upgraded format: left in place, it makes every book fail and download again on every sync. Deleting it costs nothing but one re-scan — your settings live in `pocketbeam.cfg`, the books stay under `Books/`, and the next sync tracks them again.
 
@@ -72,7 +72,7 @@ Connect over USB and delete `applications/pocketbeam.app`. To remove its setting
 
 ## Usage
 
-The screens are pictured in the install guide above: the wizard and the sync screen in [Start it for the first time](#3-start-it-for-the-first-time), Settings in [Updates](#4-updates). Every image in this README is rendered from the app's own drawing code (`make screenshots`), so they stay in step with it.
+The screens are pictured in the install guide above: the wizard and the sync screen, before and during a sync, in [Start it for the first time](#3-start-it-for-the-first-time); the sync screen with an update waiting and Settings in [Updates](#4-updates). Every image in this README is rendered from the app's own drawing code (`make screenshots`), so they stay in step with it.
 
 The main screen has four actions:
 
@@ -213,7 +213,7 @@ Every screen draws through a small `Canvas` interface with two backends: InkView
 make screenshots   # regenerates docs/screenshots/*.png
 ```
 
-`make test` re-renders the same screens and fails when a committed image no longer matches what the code draws, so a UI change either updates the images or is caught; it also fails on a PNG in `docs/screenshots/` that no screen renders any more. The comparison is on decoded pixels, so a different PNG encoder is not a failure. When the `quality` job goes red it attaches a `screenshots` artifact holding the screens as that commit draws them, so a drift can be compared against the committed images straight from the run. The render uses the Go fonts rather than PocketBook's system font, so it is a faithful picture of the layout and the text, not a pixel-exact photograph of the panel.
+`make test` re-renders the same screens and fails when a committed image no longer matches what the code draws, so a UI change either updates the images or is caught; it also fails on a PNG in `docs/screenshots/` that no screen renders any more, on a screen in `screenshots()` that the README never shows, and on a README image reference that no screen renders. The comparison is on decoded pixels, so a different PNG encoder is not a failure. When the `quality` job goes red it attaches a `screenshots` artifact holding the screens as that commit draws them, so a drift can be compared against the committed images straight from the run. The render uses the Go fonts rather than PocketBook's system font, so it is a faithful picture of the layout and the text, not a pixel-exact photograph of the panel.
 
 ### Releases
 
