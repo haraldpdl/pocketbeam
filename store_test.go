@@ -19,7 +19,7 @@ func TestStore_UpsertAndEntriesByUUID(t *testing.T) {
 	b := makeBook("u1", "Author", "Title", "http://x/1")
 	b.Updated = time.Unix(1_700_000_000, 0)
 	b.Size = 500
-	if err := s.Upsert("/lib", "home", b, "/lib/Author/Title.epub", 1234); err != nil {
+	if err := s.Upsert("/lib", "home", b, "/lib/Author/Title.epub", 1234, false); err != nil {
 		t.Fatalf("Upsert: %v", err)
 	}
 	e, exists := lookup(t, s, "/lib", "u1")
@@ -40,7 +40,7 @@ func TestStore_UpsertAndEntriesByUUID(t *testing.T) {
 	// Re-upserting the same UUID updates in place rather than duplicating.
 	b.Title = "Renamed"
 	b.Updated = b.Updated.Add(time.Hour)
-	if err := s.Upsert("/lib", "home", b, "/lib/Author/Renamed.epub", 0); err != nil {
+	if err := s.Upsert("/lib", "home", b, "/lib/Author/Renamed.epub", 0, false); err != nil {
 		t.Fatalf("Upsert(again): %v", err)
 	}
 	if n, _ := s.BookCount("/lib"); n != 1 {
@@ -57,7 +57,7 @@ func TestStore_UpsertAndEntriesByUUID(t *testing.T) {
 
 	// Neither measured nor advertised: stored as 0 (unknown), never negative.
 	b.Size = -7
-	if err := s.Upsert("/lib", "home", b, e.LocalPath, -1); err != nil {
+	if err := s.Upsert("/lib", "home", b, e.LocalPath, -1, false); err != nil {
 		t.Fatalf("Upsert(negative): %v", err)
 	}
 	if e, _ = lookup(t, s, "/lib", "u1"); e.Size != 0 {
@@ -70,7 +70,7 @@ func TestStore_AllEntriesAndDelete(t *testing.T) {
 	defer s.Close()
 
 	for _, id := range []string{"a", "b"} {
-		if err := s.Upsert("/lib", "home", makeBook(id, "Au", "T"+id, ""), "/lib/"+id, 10); err != nil {
+		if err := s.Upsert("/lib", "home", makeBook(id, "Au", "T"+id, ""), "/lib/"+id, 10, false); err != nil {
 			t.Fatalf("Upsert(%s): %v", id, err)
 		}
 	}
@@ -274,7 +274,7 @@ func TestOpenStore_WaitsForForeignLock(t *testing.T) {
 	}
 
 	done := make(chan error, 1)
-	go func() { done <- s.Upsert("/lib", "home", makeBook("u1", "Au", "T", ""), "/lib/Au/T.epub", 1) }()
+	go func() { done <- s.Upsert("/lib", "home", makeBook("u1", "Au", "T", ""), "/lib/Au/T.epub", 1, false) }()
 
 	// Without the busy timeout Upsert returns "database is locked" at once;
 	// with it the call is still pending when the lock is released.
@@ -304,7 +304,7 @@ func TestStore_OtherOwner(t *testing.T) {
 	s, _ := openTempStore(t)
 	defer s.Close()
 
-	if err := s.Upsert("/lib", "home", makeBook("u1", "Au", "T", ""), "/lib/Au/T.epub", 1); err != nil {
+	if err := s.Upsert("/lib", "home", makeBook("u1", "Au", "T", ""), "/lib/Au/T.epub", 1, false); err != nil {
 		t.Fatal(err)
 	}
 	cases := []struct{ path, except, want string }{
@@ -325,7 +325,7 @@ func TestStore_OtherOwner(t *testing.T) {
 
 	// Stores from before filename disambiguation hold several UUIDs at one
 	// path; excluding one must still surface the other.
-	if err := s.Upsert("/lib", "home", makeBook("u2", "Au", "T", ""), "/lib/Au/T.epub", 1); err != nil {
+	if err := s.Upsert("/lib", "home", makeBook("u2", "Au", "T", ""), "/lib/Au/T.epub", 1, false); err != nil {
 		t.Fatal(err)
 	}
 	if got, _ := s.OtherOwner("/lib", "/lib/Au/T.epub", "u2"); got != "u1" {
@@ -353,7 +353,7 @@ func TestStore_BookCountScopedToLibrary(t *testing.T) {
 	}
 	for _, e := range seed {
 		path := filepath.Join(e.library, "Author", e.uuid+".epub")
-		if err := s.Upsert(e.library, "home", Book{UUID: e.uuid, Title: e.uuid, Author: "Author", Updated: time.Unix(0, 0)}, path, 1); err != nil {
+		if err := s.Upsert(e.library, "home", Book{UUID: e.uuid, Title: e.uuid, Author: "Author", Updated: time.Unix(0, 0)}, path, 1, false); err != nil {
 			t.Fatalf("Upsert: %v", err)
 		}
 	}
@@ -379,7 +379,9 @@ func TestStore_BookCountScopedToLibrary(t *testing.T) {
 
 // Rows record the profile that downloaded them so the delete step can
 // tell two profiles' books apart inside one library folder. Migrated
-// rows have none until a sync claims them, and a claim is one-way.
+// rows have none until a sync claims them, and while the folder is
+// shared ownership is one-way: neither a second claim nor a download by
+// the other profile moves the row.
 func TestStore_ProfileOwnership(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "legacy.db")
 	const local = "/Books/CWA/Old Author/Old Title.epub"
@@ -407,8 +409,19 @@ func TestStore_ProfileOwnership(t *testing.T) {
 	if e, _ := lookup(t, s, "/Books/CWA", "migrated"); e.Profile != "home" {
 		t.Errorf("profile after the second Claim = %q, want home to keep it", e.Profile)
 	}
-	// Downloading over a row hands it to whoever fetched the file.
-	if err := s.Upsert("/Books/CWA", "nas", makeBook("migrated", "Au", "T", ""), local, 1); err != nil {
+	// Re-downloading the book into the shared folder does not hand the
+	// row over either: both servers list it, and the second profile must
+	// not end up able to delete the first one's only copy.
+	if err := s.Upsert("/Books/CWA", "nas", makeBook("migrated", "Au", "T", ""), local, 1, true); err != nil {
+		t.Fatalf("Upsert(shared): %v", err)
+	}
+	if e, _ := lookup(t, s, "/Books/CWA", "migrated"); e.Profile != "home" {
+		t.Errorf("profile after Upsert into a shared folder = %q, want home to keep it", e.Profile)
+	}
+	// In a folder no other profile writes to there is nothing to protect,
+	// so the row follows whoever fetched the file: that is how a profile
+	// renamed in the config file re-adopts its own books.
+	if err := s.Upsert("/Books/CWA", "nas", makeBook("migrated", "Au", "T", ""), local, 1, false); err != nil {
 		t.Fatalf("Upsert: %v", err)
 	}
 	if e, _ := lookup(t, s, "/Books/CWA", "migrated"); e.Profile != "nas" {

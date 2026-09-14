@@ -272,9 +272,19 @@ func (s *Store) Close() error { return s.db.Close() }
 // count read off the wire during this download; it takes precedence over
 // b.Size (which is the server-advertised value and may not match). A
 // non-positive actualSize falls back to b.Size so callers can use Upsert
-// from contexts that don't measure the transfer. Downloading over an
-// existing row hands it to profile: whoever fetched the file owns it.
-func (s *Store) Upsert(library, profile string, b Book, localPath string, actualSize int64) error {
+// from contexts that don't measure the transfer.
+//
+// sharedLibrary makes ownership sticky: in a folder another profile
+// downloads into (see SyncOptions.LibraryShared) there is one row for
+// the UUID and one file on disk, so re-downloading a book both servers
+// list must not move the row to the second profile - it would hand that
+// profile the right to delete the first one's only copy as soon as the
+// book leaves its shelf. Ownership there follows the same one-way rule
+// as Store.Claim: the first profile to own a row keeps it. In a folder
+// only this profile writes to there is nothing to protect, so the row
+// records whoever last fetched the file and a profile renamed in the
+// config file re-adopts its books.
+func (s *Store) Upsert(library, profile string, b Book, localPath string, actualSize int64, sharedLibrary bool) error {
 	size := actualSize
 	if size <= 0 {
 		size = b.Size
@@ -285,13 +295,14 @@ func (s *Store) Upsert(library, profile string, b Book, localPath string, actual
 	_, err := s.db.Exec(`INSERT INTO books (library, uuid, profile, title, author, updated, local_path, size)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(library, uuid) DO UPDATE SET
-			profile = excluded.profile,
+			profile = CASE WHEN ? AND books.profile <> '' THEN books.profile ELSE excluded.profile END,
 			title = excluded.title,
 			author = excluded.author,
 			updated = excluded.updated,
 			local_path = excluded.local_path,
 			size = excluded.size`,
-		libraryKey(library), b.UUID, profile, b.Title, b.Author, b.Updated.Unix(), localPath, size)
+		libraryKey(library), b.UUID, profile, b.Title, b.Author, b.Updated.Unix(), localPath, size,
+		sharedLibrary)
 	return err
 }
 

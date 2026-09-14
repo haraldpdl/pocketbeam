@@ -216,7 +216,7 @@ func TestPlan_SharedPathNotReclaimable(t *testing.T) {
 	a := makeBookSized("a", "Same Title", 100, t0)
 	b := makeBookSized("b", "Same Title", 100, t0)
 	for _, bk := range []Book{a, b} {
-		if err := store.Upsert(library, "", bk, shared, 100); err != nil {
+		if err := store.Upsert(library, "", bk, shared, 100, false); err != nil {
 			t.Fatal(err)
 		}
 	}

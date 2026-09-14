@@ -562,6 +562,29 @@ func TestSync_DeleteMissing_SharedLegacyFolderKeepsOtherProfilesBooks(t *testing
 	if _, err := os.Stat(nasA); err != nil {
 		t.Errorf("the claimed file was deleted by the other profile: %v", err)
 	}
+
+	// A shared folder holds one row and one file per book, and both
+	// shelves can list the same book. A metadata edit on the server makes
+	// home re-download nas's copy; the row has to stay with nas, or the
+	// book leaving home's shelf afterwards would delete nas's only copy.
+	homeSrc.books = append(homeSrc.books, makeBookSized("nas-a", "Nas A", 0, t0.Add(time.Hour)))
+	if res := Sync(context.Background(), homeSrc, store, library, nil, homeOpts); res.Downloaded != 1 || res.FirstErr != nil {
+		t.Fatalf("home sync of the edited shared book = %+v, want it re-downloaded", res)
+	}
+	if e, _ := lookup(t, store, library, "nas-a"); e.Profile != "nas" {
+		t.Errorf("nas-a after home re-downloaded it = %q, want nas to keep it", e.Profile)
+	}
+	homeSrc.books = homeSrc.books[:1]
+	asked = nil
+	if res := Sync(context.Background(), homeSrc, store, library, nil, homeOpts); res.Deleted != 0 || len(asked) != 0 {
+		t.Errorf("home sync after the shared book left its shelf = %+v, asked about %+v, want nothing", res, asked)
+	}
+	if _, err := os.Stat(nasA); err != nil {
+		t.Errorf("nas's file was deleted after home re-downloaded it: %v", err)
+	}
+	if _, ok := lookup(t, store, library, "nas-a"); !ok {
+		t.Error("nas's row was deleted after home re-downloaded it")
+	}
 }
 
 // A renamed book's old file is tidied up after the new one lands, which
@@ -576,7 +599,7 @@ func TestSync_RenameLeavesFileOutsideLibraryAlone(t *testing.T) {
 	seedFile(t, outside)
 
 	t0 := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
-	if err := store.Upsert(library, "home", makeBookSized("u1", "Old", 0, t0), outside, 13); err != nil {
+	if err := store.Upsert(library, "home", makeBookSized("u1", "Old", 0, t0), outside, 13, false); err != nil {
 		t.Fatalf("Upsert: %v", err)
 	}
 

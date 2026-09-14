@@ -213,7 +213,7 @@ func Sync(ctx context.Context, src Source, store *Store, library string, progres
 				}
 			}
 		}
-		if err := store.Upsert(library, opts.Profile, b, path, actualSize); err != nil {
+		if err := store.Upsert(library, opts.Profile, b, path, actualSize, opts.LibraryShared); err != nil {
 			res.Failed++
 			if res.FirstErr == nil {
 				res.FirstErr = fmt.Errorf("store %q: %w", b.Title, err)
