@@ -44,11 +44,19 @@ The setup wizard asks, in order:
 
 It then tests the connection and, on success, lands on the sync screen; tap **Sync Now**. On failure it names the problem (bad URL, wrong credentials, server unreachable, ...) and offers a retry.
 
+<img src="docs/screenshots/main.png" alt="The pocketbeam sync screen: server and filter in the header, the last-sync line with the book count, an update badge, the Sync Now button, and the Network / Settings / Quit row" width="300"> <img src="docs/screenshots/main-syncing.png" alt="The same screen during a sync: the button reads Stop and a progress strip shows the book counter, elapsed time, a progress bar and the title being downloaded" width="300">
+
+While a sync runs the button reads **Stop**, and the strip above it counts the books and names the one being downloaded. The first run fetches everything that matches your selection, so it is the long one; later runs download only what changed.
+
 Books are stored in `Books/default` on the reader's internal storage. Each extra server profile you add later gets a folder named after the profile (see [Usage](#usage)). After the download finishes, pocketbeam runs the stock library scanner so the new books appear in Library.
 
 ### 4. Updates
 
 pocketbeam checks for new releases on its own: once at first start, weekly after that, and on demand via **Check for updates** in Settings. When a newer release exists, that row reads **Install update vX.Y.Z** and installs it in place, so there is no second USB trip. See [Updates and privacy](#updates-and-privacy) for what the check does and how to switch it off.
+
+<img src="docs/screenshots/settings.png" alt="The Settings list: SERVER with the server URL and the active profile, LIBRARY with the sync filter and the delete-missing toggle, ABOUT with Install update v0.6.0 above the running version, and a Back button" width="300">
+
+Settings is also where the server, the profile and what gets synced live; [Usage](#usage) goes through every row.
 
 **Going back to an older version:** delete `system/config/pocketbeam.db` over USB before you start it. The sync state file is upgraded in place on first launch, and an older release cannot read the upgraded format: left in place, it makes every book fail and download again on every sync. Deleting it costs nothing but one re-scan — your settings live in `pocketbeam.cfg`, the books stay under `Books/`, and the next sync tracks them again.
 
@@ -64,9 +72,7 @@ Connect over USB and delete `applications/pocketbeam.app`. To remove its setting
 
 ## Usage
 
-<img src="docs/screenshots/main.png" alt="The pocketbeam main screen: server and filter in the header, last-sync summary, an update badge, Sync Now, and the Network / Settings / Quit row" width="300"> <img src="docs/screenshots/main-syncing.png" alt="The same screen during a sync: the button reads Stop and the progress strip shows the book counter, elapsed time, a progress bar and the current title" width="300"> <img src="docs/screenshots/settings.png" alt="The Settings list: SERVER with the server URL and the active profile, LIBRARY with the sync filter and the delete-missing toggle, ABOUT with the waiting update, and a Back button" width="300">
-
-The main screen between syncs and during one, and the Settings list. Every image in this README is rendered from the app's own drawing code (`make screenshots`), so they stay in step with it.
+The screens are pictured in the install guide above: the wizard and the sync screen in [Start it for the first time](#3-start-it-for-the-first-time), Settings in [Updates](#4-updates). Every image in this README is rendered from the app's own drawing code (`make screenshots`), so they stay in step with it.
 
 The main screen has four actions:
 

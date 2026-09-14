@@ -3,6 +3,7 @@
 package main
 
 import (
+	"bytes"
 	"image"
 	"image/png"
 	"os"
@@ -55,6 +56,23 @@ func TestScreenshotDirHasNoStrays(t *testing.T) {
 		if !rendered[e.Name()] {
 			t.Errorf("%s is not rendered by any screen, delete it",
 				filepath.Join(screenshotDir, e.Name()))
+		}
+	}
+}
+
+// TestREADMEShowsEveryScreenshot is the other half of the stray check: a
+// rendered screen nobody embeds is a picture the install guide could have
+// used and an image that is regenerated for nothing, so a new screen has
+// to reach the README in the same change that adds it.
+func TestREADMEShowsEveryScreenshot(t *testing.T) {
+	readme, err := os.ReadFile("README.md")
+	if err != nil {
+		t.Fatalf("read README.md: %v", err)
+	}
+	for _, s := range screenshots() {
+		ref := screenshotDir + "/" + s.name + ".png"
+		if !bytes.Contains(readme, []byte(ref)) {
+			t.Errorf("README.md does not show %s", ref)
 		}
 	}
 }
