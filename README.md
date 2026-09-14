@@ -205,7 +205,7 @@ Every screen draws through a small `Canvas` interface with two backends: InkView
 make screenshots   # regenerates docs/screenshots/*.png
 ```
 
-`make test` re-renders the same screens and fails when a committed image no longer matches what the code draws, so a UI change either updates the images or is caught. The render uses the Go fonts rather than PocketBook's system font, so it is a faithful picture of the layout and the text, not a pixel-exact photograph of the panel.
+`make test` re-renders the same screens and fails when a committed image no longer matches what the code draws, so a UI change either updates the images or is caught; it also fails on a PNG in `docs/screenshots/` that no screen renders any more. The comparison is on decoded pixels, so a different PNG encoder is not a failure. When the `quality` job goes red it attaches a `screenshots` artifact holding the screens as that commit draws them, so a drift can be compared against the committed images straight from the run. The render uses the Go fonts rather than PocketBook's system font, so it is a faithful picture of the layout and the text, not a pixel-exact photograph of the panel.
 
 ### Releases
 

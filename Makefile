@@ -11,6 +11,9 @@ GOVULNCHECK := golang.org/x/vuln/cmd/govulncheck@v1.8.0
 TESTFLAGS ?=
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 ARM_CC ?= /opt/pocketbook-sdk/usr/bin/arm-obreey-linux-gnueabi-clang
+# Where `make screenshots` writes. CI points it at a scratch directory when
+# a gate fails, so the run keeps the screens as this commit draws them.
+SCREENSHOT_DIR ?= docs/screenshots
 
 HOSTENV := GOOS=linux GOARCH=amd64 GOARM= CC=gcc CGO_ENABLED=1
 ARMENV  := GOOS=linux GOARCH=arm GOARM=7 CGO_ENABLED=1 CC=$(ARM_CC)
@@ -61,7 +64,7 @@ vuln:
 # Regenerate the committed screen renders. `make test` fails when they no
 # longer match what the screens draw, so run this after a UI change.
 screenshots:
-	$(HOSTENV) $(GO) run . -screenshots docs/screenshots
+	$(HOSTENV) $(GO) run . -screenshots $(SCREENSHOT_DIR)
 
 hooks:
 	git config core.hooksPath .githooks

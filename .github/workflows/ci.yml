@@ -21,6 +21,27 @@ jobs:
       # absent here, so the Makefile skips the arm gate; the `arm` job
       # below covers it.
       - run: make ci TESTFLAGS=-race
+      # The screenshot drift gate in `make test` names the screen and the
+      # first differing pixel, which says that an image moved but not what
+      # it now looks like. Re-render the screens so the run carries the
+      # current ones as an artifact to diff against the committed files.
+      # It hangs off `failure()` rather than off that test alone because a
+      # step cannot ask which test failed; rendering after an unrelated
+      # failure costs one `go run` and keeps the condition honest.
+      - name: Render current screens
+        if: failure()
+        continue-on-error: true
+        run: make screenshots SCREENSHOT_DIR="${{ runner.temp }}/screenshots"
+      - name: Upload current screens
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: screenshots
+          path: ${{ runner.temp }}/screenshots
+          # A failure that stops the render (a build error, say) leaves the
+          # directory empty; that must not add a second red step.
+          if-no-files-found: ignore
+          retention-days: 7
   arm:
     runs-on: ubuntu-latest
     timeout-minutes: 15
