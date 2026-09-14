@@ -53,6 +53,12 @@ func newHTTPClient() *http.Client {
 	}
 }
 
+// probeClient runs the wizard's OPDS connection test. The probe sends the
+// server password as Basic auth and Go replays the Authorization header
+// across a same-host redirect, so it needs the same https-to-http guard as
+// the sync client; http.DefaultClient has no redirect policy at all.
+var probeClient = newHTTPClient()
+
 // ProbeCWA verifies that host points to a CWA (or compatible) OPDS server
 // that accepts the given credentials. Returns nil on success; on failure the
 // error message is short and suitable for display on the device.
@@ -74,7 +80,7 @@ func ProbeCWA(ctx context.Context, host, user, pass string) error {
 		req.SetBasicAuth(user, pass)
 	}
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := probeClient.Do(req)
 	if err != nil {
 		return classifyTransportError(err)
 	}

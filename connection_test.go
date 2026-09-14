@@ -147,3 +147,38 @@ func TestProbeCWA_HostWithPathPrefix(t *testing.T) {
 		})
 	}
 }
+
+// The probe sends the server password as Basic auth, so it must run on a
+// client that refuses an https-to-http redirect (http.DefaultClient has no
+// redirect policy and would replay the Authorization header in clear).
+// rejectSchemeDowngrade itself is covered in opds_test.go; this pins that
+// the probe is actually wired to it.
+func TestProbeCWA_UsesGuardedClient(t *testing.T) {
+	orig := probeClient.CheckRedirect
+	if orig == nil {
+		t.Fatal("probeClient has no redirect policy")
+	}
+	t.Cleanup(func() { probeClient.CheckRedirect = orig })
+	consulted := 0
+	probeClient.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		consulted++
+		return orig(req, via)
+	}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/opds" {
+			http.Redirect(w, r, "/opds/", http.StatusFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/atom+xml")
+		_, _ = w.Write([]byte(`<?xml version="1.0"?><feed xmlns="http://www.w3.org/2005/Atom"/>`))
+	}))
+	defer srv.Close()
+
+	if err := ProbeCWA(context.Background(), srv.URL, "alice", "hunter2"); err != nil {
+		t.Fatalf("ProbeCWA = %v, want nil", err)
+	}
+	if consulted == 0 {
+		t.Error("redirect was not checked by probeClient; the probe is using an unguarded client")
+	}
+}
