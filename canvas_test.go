@@ -15,6 +15,17 @@ import (
 type recordCanvas struct {
 	*imageCanvas
 	texts []string
+	boxes []textBox
+}
+
+// textBox is a drawn string plus the rectangle it claims: the position
+// it was drawn at, the measured width, and the height of the face that
+// was active. Screens place their lines by hard-coded offsets, so this
+// is what a test needs to catch two of them landing on top of each
+// other.
+type textBox struct {
+	s string
+	r image.Rectangle
 }
 
 func newRecordCanvas() *recordCanvas {
@@ -23,7 +34,24 @@ func newRecordCanvas() *recordCanvas {
 
 func (c *recordCanvas) Text(p image.Point, s string) {
 	c.texts = append(c.texts, s)
+	c.boxes = append(c.boxes, textBox{
+		s: s,
+		r: image.Rect(p.X, p.Y, p.X+c.imageCanvas.TextWidth(s), p.Y+c.imageCanvas.active.Height()),
+	})
 	c.imageCanvas.Text(p, s)
+}
+
+// overlappingText returns the first pair of drawn strings whose glyph
+// boxes intersect, if any.
+func (c *recordCanvas) overlappingText() (textBox, textBox, bool) {
+	for i, a := range c.boxes {
+		for _, b := range c.boxes[i+1:] {
+			if a.r.Overlaps(b.r) {
+				return a, b, true
+			}
+		}
+	}
+	return textBox{}, textBox{}, false
 }
 
 // drew reports whether any drawn string contains want.

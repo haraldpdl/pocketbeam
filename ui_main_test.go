@@ -11,8 +11,9 @@ import (
 // mainTestView is the baseline the cases below vary one thing from.
 func mainTestView() mainView {
 	return mainView{
-		subtitle: "https://books.example.com  ·  All books",
-		stats:    mainStats{lastSync: SyncSummary{At: time.Now().Add(-2 * time.Hour)}, hasLastSync: true, bookCount: 12},
+		subtitle:    "https://books.example.com  ·  All books",
+		stats:       mainStats{hasLastSync: true, bookCount: 12},
+		lastSyncAgo: "2 hours ago",
 	}
 }
 
@@ -72,6 +73,35 @@ func TestDrawMainUpdateBadge(t *testing.T) {
 	v.updateVer = "v9.9.9"
 	if c := drawMainOn(v); !c.drew("Update v9.9.9 available in Settings") {
 		t.Errorf("update badge missing; drew %q", c.texts)
+	}
+}
+
+// Every line on the screen is placed by a hard-coded offset, and a
+// string occupies a glyph box as tall as the face it is drawn in, so a
+// gap smaller than the line above it silently stacks two lines on top of
+// each other. That is not visible in a text assertion and there is no
+// device in CI, so the geometry is asserted directly.
+func TestDrawMainLinesDoNotOverlap(t *testing.T) {
+	full := mainTestView()
+	full.updateVer = "v9.9.9"
+	full.stats.lastSync.Failed = 3
+	syncing := mainTestView()
+	syncing.sync = syncSnapshot{active: true, index: 7, total: 24, author: "Le Guin", title: "The Dispossessed", elapsed: 95 * time.Second}
+	for name, v := range map[string]mainView{
+		"idle": mainTestView(),
+		"first run": func() mainView {
+			v := mainTestView()
+			v.stats = mainStats{}
+			return v
+		}(),
+		"failures and an update": full,
+		"syncing":                syncing,
+	} {
+		t.Run(name, func(t *testing.T) {
+			if a, b, ok := drawMainOn(v).overlappingText(); ok {
+				t.Errorf("%q at %v overlaps %q at %v", a.s, a.r, b.s, b.r)
+			}
+		})
 	}
 }
 

@@ -55,11 +55,12 @@ func mainIdleView() mainView {
 			FilterNames: []string{"Science Fiction"},
 		}),
 		stats: mainStats{
-			lastSync:    SyncSummary{At: time.Now().Add(-3 * time.Hour), Downloaded: 4},
+			lastSync:    SyncSummary{Downloaded: 4},
 			hasLastSync: true,
 			bookCount:   214,
 		},
-		updateVer: "v0.6.0",
+		lastSyncAgo: "3 hours ago",
+		updateVer:   "v0.6.0",
 	}
 }
 

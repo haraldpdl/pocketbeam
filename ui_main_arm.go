@@ -94,6 +94,9 @@ func (a *app) mainView() mainView {
 		stats:    a.Stats(),
 		sync:     a.sync.snapshot(),
 	}
+	if v.stats.hasLastSync {
+		v.lastSyncAgo = humanAgo(v.stats.lastSync.At)
+	}
 	a.update.mu.Lock()
 	if a.update.available {
 		v.updateVer = a.update.release.Version

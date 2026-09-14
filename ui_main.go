@@ -31,10 +31,15 @@ type syncSnapshot struct {
 // starts: the header subtitle, the library stats, the sync progress, and
 // the version of a waiting update ("" when none).
 type mainView struct {
-	subtitle  string
-	stats     mainStats
-	sync      syncSnapshot
-	updateVer string
+	subtitle string
+	stats    mainStats
+	// lastSyncAgo is stats.lastSync.At already phrased ("3 hours ago"),
+	// read only when stats.hasLastSync. Resolved by the caller like
+	// syncSnapshot.elapsed, so the draw depends on no clock and renders
+	// the same image every time.
+	lastSyncAgo string
+	sync        syncSnapshot
+	updateVer   string
 }
 
 // mainSubtitle renders the header's second line: which server this
@@ -61,22 +66,24 @@ func drawMain(c Canvas, l layout, v mainView) {
 	btnFont := l.font(c, 44, true)
 
 	// Title + host subtitle (host in muted gray so the filter/host context
-	// is present but secondary to the action area).
+	// is present but secondary to the action area). A string sits in a
+	// glyph box as tall as the size it was opened at, so the 64px title
+	// occupies down to sy(204): the subtitle goes below that, on the same
+	// 140/210/240 header grid every other screen uses.
 	c.SetFont(title, black)
 	c.Text(image.Point{X: l.margin, Y: l.sy(140)}, "pocketbeam")
 	c.SetFont(small, darkGray)
-	c.Text(image.Point{X: l.margin, Y: l.sy(190)}, truncate(v.subtitle, 60))
+	c.Text(image.Point{X: l.margin, Y: l.sy(210)}, truncate(v.subtitle, 60))
 
 	// Hairline under the header.
-	l.drawHairline(c, l.margin, l.screen.X-l.margin, l.sy(220))
+	l.drawHairline(c, l.margin, l.screen.X-l.margin, l.sy(240))
 
 	// Status hero: emphatic primary line + muted supporting details.
 	statusY := l.sy(300)
 	c.SetFont(hero, black)
-	c.SetFont(body, darkGray)
 	if v.stats.hasLastSync {
-		c.Text(image.Point{X: l.margin, Y: statusY},
-			"Last synced "+humanAgo(v.stats.lastSync.At))
+		c.Text(image.Point{X: l.margin, Y: statusY}, "Last synced "+v.lastSyncAgo)
+		c.SetFont(body, darkGray)
 		c.Text(image.Point{X: l.margin, Y: statusY + l.sy(60)},
 			fmt.Sprintf("%d books in library", v.stats.bookCount))
 		if v.stats.lastSync.Failed > 0 {
@@ -85,6 +92,7 @@ func drawMain(c Canvas, l layout, v mainView) {
 		}
 	} else {
 		c.Text(image.Point{X: l.margin, Y: statusY}, "Not yet synced")
+		c.SetFont(body, darkGray)
 		c.Text(image.Point{X: l.margin, Y: statusY + l.sy(60)},
 			"Tap Sync Now to begin")
 	}
