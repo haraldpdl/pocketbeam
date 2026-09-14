@@ -1,56 +1,62 @@
 # pocketbeam
 
-Wireless ebook sync from any OPDS server or WebDAV share to a PocketBook Era Color and likely other PocketBook devices on firmware 6.x. Tested against [Calibre-Web Automated](https://github.com/crocodilestick/Calibre-Web-Automated) (with shelf-filter and single-request "all books" fast paths) and against Nextcloud / Synology / ownCloud via WebDAV.
+Wireless ebook sync for PocketBook e-readers. pocketbeam runs on the reader itself: it pulls new and updated books over Wi-Fi from any OPDS server ([Calibre-Web Automated](https://github.com/crocodilestick/Calibre-Web-Automated), Calibre-Web, COPS, Calibre's content server) or any WebDAV share (Nextcloud, ownCloud, Synology) and drops them straight into the device's library. No PC in the loop after the one-time install, and every sync is an incremental diff against local state, so only what changed is downloaded.
 
-Native on-device app, no PC, no USB cable. Pulls new and updated ebooks over Wi-Fi, keeps local state so every sync is an incremental diff, and drops the files straight into the device's library.
+## Install on your PocketBook
 
-## Status
+Written for someone who has never sideloaded an app. Building pocketbeam yourself is in [Development](#development).
 
-Early but working. The first-run wizard, main sync screen, settings, OPDS feed picker (nested + multi-select), WebDAV directory picker, and multi-server profile switcher all run under InkView on device. Primary development happens on a PocketBook Era Color (1264x1680); the layout scales for smaller panels (Touch HD, Touch Lux 5, InkPad X) via a three-tier width heuristic. Pending features listed near the bottom.
+### What you need
 
-## Why
+- A PocketBook e-reader on firmware 6.x. Development and testing happen on an Era Color; other recent PocketBook models run the same InkView firmware and are expected to work, but they are untested.
+- Wi-Fi on the reader.
+- A book server: Calibre-Web, Calibre-Web Automated or any other OPDS catalog, or a WebDAV share (Nextcloud, ownCloud, Synology).
+- The USB cable that came with your reader (USB-C on the Era Color, micro-USB on older models), for the first install only.
 
-The stock OPDS catalog browser is regionally gated; on the German-market firmware of the Era Color it is not even in the Applications menu. The regional lock disables only the stock UI, not the network stack, so a custom app can talk to OPDS endpoints directly. Even where stock OPDS is available it is manual pull-on-demand; pocketbeam is built around one-tap sync of the entire library.
+### 1. Download pocketbeam
 
-## Install
+Go to the [latest release](https://github.com/haraldpdl/pocketbeam/releases/latest) and download `pocketbeam-app.zip`. Unpack it and you have one file, `pocketbeam.app`:
 
-### 1. Get the `.app`
+- **Windows**: right-click the zip, "Extract All...". Explorer puts the file in a new folder called `pocketbeam-app`; the file inside it is the one you need.
+- **macOS**: double-click the zip in Finder.
+- **Linux**: `unzip pocketbeam-app.zip`.
 
-Download `pocketbeam.app.gz` from the [latest release](https://github.com/haraldpdl/pocketbeam/releases/latest) and unpack it (`gunzip pocketbeam.app.gz`, or any archive tool). Verify it against `SHA256SUMS` if you like. Or build it yourself:
+Releases up to and including `v0.5.0` predate the zip and carry only `pocketbeam.app.gz`. Unpack that one with `gunzip pocketbeam.app.gz` on Linux and macOS, or with [7-Zip](https://www.7-zip.org/) on Windows; it yields the same single `pocketbeam.app` file.
 
-The project expects to be built inside the [`sunsung/pocketbook-go-sdk`](https://hub.docker.com/r/sunsung/pocketbook-go-sdk) Docker image, which ships the PocketBook ARMv7 cross-compile toolchain. Inside the container `make arm` builds `dist/pocketbeam.app` with the version baked in and verifies the result is an ARM binary; the plain `go build` below is the same thing spelled out:
+The release also carries `pocketbeam.app.gz` (the copy the app's own updater downloads) and `SHA256SUMS`, if you want to verify the download (on Linux: `sha256sum -c SHA256SUMS --ignore-missing`).
 
-```sh
-docker run --rm -v "$PWD":/app -w /app sunsung/pocketbook-go-sdk:latest \
-    go build -ldflags="-s -w -X main.version=$(git describe --tags --always --dirty)" \
-    -o pocketbeam.app .
-```
+### 2. Copy it to the device
 
-The stripped binary is about 8 MB. The `-X main.version=...` flag bakes the
-current git tag into the binary; the on-device updater compares that against
-the latest published release to decide whether to offer an upgrade. A bare
-`go build` without the flag leaves the version as `dev`, which the updater
-treats as older than any tagged release (so the updater is always willing
-to replace a dev build with a real release).
+Connect the reader to the computer with the USB cable and confirm the USB connection on the reader; it appears as a normal removable drive. Copy `pocketbeam.app` into the folder named `applications` at the top level of that drive. If there is no such folder, create one named exactly `applications`. Eject the drive properly, then unplug the cable.
 
-### 2. Sideload
+### 3. Start it for the first time
 
-Connect the PocketBook to a computer or phone over USB-C. It shows up as a mass-storage drive. Copy `pocketbeam.app` into the `applications/` folder at the root of the device's internal storage. Eject cleanly and disconnect.
+On the reader, open Applications and tap `@pocketbeam`. Sideloaded apps are listed with a leading `@` and a generic icon; that is how the PocketBook firmware presents them (KOReader shows up as `@koreader` the same way).
 
-The app then appears in the device's Applications menu as `@pocketbeam` with a generic icon. That is the PocketBook firmware convention for sideloaded apps (the same `@koreader` + default icon applies to [KOReader](https://github.com/koreader/koreader)). See the note under [Known limitations](#known-limitations) below.
+The setup wizard asks, in order:
 
-### 3. First-run wizard
+1. **Server type**: Calibre-Web / OPDS, or WebDAV / Nextcloud.
+2. **Server URL**: e.g. `http://library.lan:8083` for OPDS (a path prefix such as `https://example.com/calibre` is fine), or `https://nc.example.com/remote.php/dav/files/alice` for WebDAV.
+3. **Username**.
+4. **Password**.
 
-Launch pocketbeam from the Applications menu. You will be walked through:
+It then tests the connection and, on success, lands on the sync screen; tap **Sync Now**. On failure it names the problem (bad URL, wrong credentials, server unreachable, ...) and offers a retry.
 
-1. **Server type**: Calibre-Web / OPDS, or WebDAV / Nextcloud
-2. **Server URL**: e.g. `http://library.lan:8083` for OPDS (a path prefix such as `https://example.com/calibre` is fine), or `https://nc.example.com/remote.php/dav/files/alice` for WebDAV
-3. **Username** and **password**: your server login
-4. **Testing connection**: the wizard probes the server and validates your credentials before saving
+Books are stored in `Books/default` on the reader's internal storage. Each extra server profile you add later gets a folder named after the profile (see [Usage](#usage)). After the download finishes, pocketbeam runs the stock library scanner so the new books appear in Library.
 
-On success, the main sync screen appears. On failure, the wizard shows a specific error (bad URL, wrong credentials, server unreachable, etc.) and offers retry.
+### 4. Updates
 
-For OPDS servers, pocketbeam auto-detects whether the endpoint is Calibre-Web / Calibre-Web Automated and enables a fast path when it is. Against other OPDS servers (Calibre's built-in content server, COPS, Audiobookshelf's OPDS feed, etc.) it falls back to a generic recursive walker that navigates the catalog's subsections; all books still sync, just via more HTTP requests. If any subsection fails to load, the listing is aborted and the sync reports the error instead of working from a partial catalog (which would otherwise make delete-missing propose the unreachable books for deletion).
+pocketbeam checks for new releases on its own: once at first start, weekly after that, and on demand via **Check for updates** in Settings. When a newer release exists, that row reads **Install update vX.Y.Z** and installs it in place, so there is no second USB trip. See [Updates and privacy](#updates-and-privacy) for what the check does and how to switch it off.
+
+### Troubleshooting
+
+- **`@pocketbeam` is not in the Applications menu.** The file has to sit directly in `applications` at the root of the internal drive, not in a subfolder, and its name has to end in `.app`. A common miss on Windows: "Extract All..." leaves a folder named `pocketbeam-app` and the file is inside it, so copying the folder puts `pocketbeam.app` one level too deep. If the folder looks right, reboot the reader so the launcher re-reads it.
+- **The connection test fails.** The URL needs the scheme (`http://` or `https://`) and, unless the server answers on port 80 / 443, the port: `http://library.lan:8083`. For OPDS give only the server's base URL, pocketbeam appends `/opds` itself. Opening the same URL in the reader's web browser tells a wrong address apart from a Wi-Fi problem.
+- **The sync ran but no books arrived.** Open Settings and check **Sync filter** (OPDS) or **Sync folder** (WebDAV): only what is selected there is synced. Books that are already on the device are skipped, so a second run downloading nothing is normal.
+
+### Uninstall
+
+Connect over USB and delete `applications/pocketbeam.app`. To remove its settings and sync state as well, delete `system/config/pocketbeam.cfg` and `system/config/pocketbeam.db`. Downloaded books are ordinary files under `Books/` and stay until you delete them yourself.
 
 ## Usage
 
@@ -58,14 +64,25 @@ The main screen has four actions:
 
 - **Sync Now**: connects the Wi-Fi (wakes the radio if asleep), probes the server, then pulls the configured catalog (all books by default, or one or more filters / folders that you picked) and downloads everything that is new or updated since the last sync. Before downloads start, pocketbeam tallies what the run will transfer against the free space on the device; if the new books wouldn't fit, it shows a prompt with the shortfall and lets you cancel or proceed anyway. (Partial syncs are safe: the device just stops writing when the disk fills up.) Progress shows the current book counter, a live elapsed-time indicator, and the book title being downloaded. Already-synced books skip instantly. While a sync is in flight the same button reads **Stop**; tapping it halts the run cleanly at any stage, including the server probe and catalog listing (books already downloaded stay, the in-flight `.part` file is left for the next sync's stale-sweep to remove).
 - **Network**: opens the PocketBook system network dialog so you can switch Wi-Fi networks or re-enable Wi-Fi if you had it off.
-- **Settings**: change the server URL / credentials, pick sync filters, toggle delete-missing, or switch between server profiles. Four buttons:
-    - **Change server info**: re-runs the wizard for the active profile.
-    - **Change sync filter / folder**: opens the picker. For OPDS, drills through the catalog's subsections; tapping a row descends, "Add this level" accumulates a selection, and "Done" saves the set. Empty subsections (opds:count = 0) are hidden, long lists paginate with Prev / Next. Each level fetch is capped at two minutes; a server that stops answering shows "Server did not respond in time." instead of loading forever. For WebDAV it drills through server directories the same way, under the same cap. The "< Back to ..." row at the top stays tappable while a level is loading and after a failed fetch, so a slow or flaky connection costs one level instead of the whole drill-down.
+- **Settings**: five rows.
+    - **Server**: shows the active server URL; tap it to re-run the wizard for the active profile.
+    - **Profile**: shows the active profile's name; tap it for the profile list, paginated with Prev / Next like the pickers. Tap a profile to open its panel, where "Make active" switches to it and "Delete this profile" (tap twice) removes it; "Add new server" creates another (one device can sync from a home CWA, a friend's Nextcloud, and a public OPDS server, each as its own profile).
+    - **Sync filter** (OPDS) / **Sync folder** (WebDAV): opens the picker. For OPDS, drills through the catalog's subsections; tapping a row descends, "Add this level" accumulates a selection, and "Done" saves the set. Empty subsections (opds:count = 0) are hidden, long lists paginate with Prev / Next. Each level fetch is capped at two minutes; a server that stops answering shows "Server did not respond in time." instead of loading forever. For WebDAV it drills through server directories the same way, under the same cap. The "< Back to ..." row at the top stays tappable while a level is loading and after a failed fetch, so a slow or flaky connection costs one level instead of the whole drill-down.
     - **Delete missing**: opt-in toggle. When on, every sync ends with a confirmation prompt listing books no longer on the server; tap Delete or Keep.
-    - **Profile: &lt;name&gt;**: opens the profile list, paginated with Prev / Next like the pickers. Tap a profile to open its panel, where "Make active" switches to it and "Delete this profile" (tap twice) removes it; "Add new server" creates another (one device can sync from a home CWA, a friend's Nextcloud, and a public OPDS server, each as its own profile).
+    - **Check for updates**: shows the running version and checks the release endpoint on demand; see [Updates and privacy](#updates-and-privacy).
 - **Quit**: back to the Applications menu.
 
 Books land under `/mnt/ext1/Books/<profile name>/<Author>/<Title>.<ext>` (`Books/default` on a fresh install, since the first profile is not named on screen) and show up in the device's library after the next library refresh. If a second, different book resolves to the same author and title (another edition, or a same-named file in another WebDAV folder), its filename gets a short `[xxxxxxxx]` tag so the two never share one file.
+
+## Status
+
+Early but working. The first-run wizard, main sync screen, settings, OPDS feed picker (nested + multi-select), WebDAV directory picker, and multi-server profile switcher all run under InkView on device. Primary development happens on a PocketBook Era Color (1264x1680); the layout scales for smaller panels (Touch HD, Touch Lux 5, InkPad X) via a three-tier width heuristic.
+
+For OPDS servers, pocketbeam auto-detects whether the endpoint is Calibre-Web / Calibre-Web Automated and enables a fast path (shelf filters and a single-request "all books" listing) when it is. Against other OPDS servers (Calibre's built-in content server, COPS, Audiobookshelf's OPDS feed, etc.) it falls back to a generic recursive walker that navigates the catalog's subsections; all books still sync, just via more HTTP requests. If any subsection fails to load, the listing is aborted and the sync reports the error instead of working from a partial catalog (which would otherwise make delete-missing propose the unreachable books for deletion).
+
+## Why
+
+The stock OPDS catalog browser is regionally gated; on the German-market firmware of the Era Color it is not even in the Applications menu. The regional lock disables only the stock UI, not the network stack, so a custom app can talk to OPDS endpoints directly. Even where stock OPDS is available it is manual pull-on-demand; pocketbeam is built around one-tap sync of the entire library.
 
 ## Configuration file
 
@@ -100,37 +117,9 @@ The wizard derives `library` from the profile name, filtered for characters the 
 
 `filter_href` / `filter_name` can repeat to sync more than one feed per profile; books are deduped by UUID across the union. `state_db` is global and shared by every profile, but every part of a sync that looks at the files is scoped to the library of the profile being synced: a book is skipped only when a copy of it is in that library, delete-missing only ever proposes books from that library (another profile's books are never deleted by a sync it was not part of), and the book count on the main screen is that library's. Two profiles whose servers hand out the same identity (WebDAV identities are derived from the file path, and two servers can host the same path) therefore each download their own copy. From then on both skip it as long as the two copies are the same size, which is the only cheap evidence that the file in the other library is this book; copies that differ in size, and rows written before sizes were recorded, download again.
 
-Two more optional top-level keys: `check_updates = off` disables the weekly update check, and `update_url = https://...` points the checker at another release endpoint (a GitHub or Gitea releases API URL works, as does anything that serves the same JSON shape).
+Two more optional top-level keys sit next to `active` and `state_db`: `check_updates = off` disables the weekly update check, and `update_url = https://...` points the checker at another release endpoint (a GitHub or Gitea releases API URL works, as does anything that serves the same JSON shape). Both are written back by the app when you change them from Settings.
 
-You can edit this by hand over USB if you prefer not to go through the on-device wizard.
-
-## Development
-
-Quality gates live in the `Makefile`. `make ci` is exactly what GitHub Actions runs: gofmt, `go vet`, staticcheck, `go mod tidy` drift, tests, an amd64 build, govulncheck, and the ARM build whenever the SDK toolchain is present. `make hooks` wires the same gates into your clone as pre-commit (`make quick`) and pre-push (`make ci`) hooks. Tests need cgo and a C compiler because of go-sqlite3. Every change goes through a pull request; `main` requires the `quality` check.
-
-A second entry point compiles on every architecture except ARM (the device build) and runs the sync as a plain CLI without InkView, so you can iterate on the core logic without sideloading:
-
-```sh
-# dev build for fast iteration on a workstation or in a container
-GOOS=linux GOARCH=amd64 GOARM= CC= go build -o pocketbeam-amd64 .
-
-# run against a server
-./pocketbeam-amd64 -config ./pocketbeam.cfg -v
-```
-
-Unit tests:
-
-```sh
-go test ./...
-```
-
-Live tests against a real CWA (gated behind the `live` build tag; host and credentials come from `POCKETBEAM_TEST_HOST`, `POCKETBEAM_TEST_USER`, `POCKETBEAM_TEST_PASS`):
-
-```sh
-POCKETBEAM_TEST_HOST=http://cwa.lan:8083 go test -tags=live -run TestLive
-```
-
-Releases are cut by pushing a `vX.Y.Z` tag on `main`. The release workflow builds the ARM binary in the SDK container, publishes a GitHub Release with `pocketbeam.app`, `pocketbeam.app.gz` and `SHA256SUMS`, and pushes the same files to the update endpoint the app polls.
+You can edit this file by hand over USB if you prefer not to go through the on-device wizard.
 
 ## Known limitations
 
@@ -148,13 +137,61 @@ pocketbeam checks for new releases so you don't have to re-sideload manually. Th
 - **Once a week thereafter**, gated by the `last_update_check` timestamp stored in the local state DB.
 - **On demand** via **Check for updates** in Settings.
 
-The update check is a single HTTPS GET to `https://pocketbeam.shinyredapples.com/releases/latest` (or whatever `update_url` you set in the config).
+The update check is a single HTTPS GET to `https://pocketbeam.shinyredapples.com/releases/latest`, the endpoint compiled into the released binaries, or to whatever `update_url` you set in the config.
 
 To disable all automatic update checks, open **Check for updates** in Settings, then tap the **Automatic weekly checks: on** row to flip it off. Manual "Check for updates" remains available on that screen even when automatic checks are disabled. Power users can also set `check_updates = off` at the top of `pocketbeam.cfg`.
 
 The only outbound HTTP traffic pocketbeam ever initiates is (a) OPDS / WebDAV requests to your configured server, (b) the update check described above, (c) the release binary download when you tap Install.
 
 Installs are verified: the downloaded binary must match the `sha256:` digest published in the release notes, and a release that publishes no digest is refused rather than installed unverified. Redirects from `https://` to `http://` are refused for the update check and the download, as they are for OPDS requests.
+
+## Development
+
+### Build the device binary yourself
+
+The project expects to be built inside the [`sunsung/pocketbook-go-sdk`](https://hub.docker.com/r/sunsung/pocketbook-go-sdk) Docker image, which ships the PocketBook ARMv7 cross-compile toolchain. Inside the container `make arm` builds `dist/pocketbeam.app` with the version baked in and verifies the result is an ARM binary; the plain `go build` below is the same thing spelled out:
+
+```sh
+docker run --rm -v "$PWD":/app -w /app sunsung/pocketbook-go-sdk:latest \
+    go build -ldflags="-s -w -X main.version=$(git describe --tags --always --dirty)" \
+    -o pocketbeam.app .
+```
+
+The stripped binary is about 8 MB. The `-X main.version=...` flag bakes the current git tag into the binary; the on-device updater compares that against the latest published release to decide whether to offer an upgrade. A bare `go build` without the flag leaves the version as `dev`, which the updater treats as older than any tagged release (so the updater is always willing to replace a dev build with a real release). Copy the result onto the device the same way as a downloaded release, see [Install on your PocketBook](#install-on-your-pocketbook).
+
+### Quality gates
+
+Quality gates live in the `Makefile`. `make ci` is exactly what GitHub Actions runs: gofmt, `go vet`, staticcheck, `go mod tidy` drift, tests, an amd64 build, govulncheck, and the ARM build whenever the SDK toolchain is present. `make hooks` wires the same gates into your clone as pre-commit (`make quick`) and pre-push (`make ci`) hooks. Every change goes through a pull request; `main` requires the `quality` check.
+
+The local state DB uses `mattn/go-sqlite3`, so the amd64 build and the tests need cgo and a C compiler; the ARM build needs the SDK's `arm-obreey-linux-gnueabi-clang`. The SDK container also exports `GOARCH=arm` and an ARM `CC` globally, which is why every host-side target pins its own environment instead of inheriting it.
+
+### Iterating without a device
+
+A second entry point compiles on every architecture except ARM (the device build) and runs the sync as a plain CLI without InkView, so you can iterate on the core logic without sideloading:
+
+```sh
+# dev build for fast iteration on a workstation or in the SDK container
+GOOS=linux GOARCH=amd64 GOARM= CC=gcc CGO_ENABLED=1 go build -o pocketbeam-amd64 .
+
+# run against a server
+./pocketbeam-amd64 -config ./pocketbeam.cfg -v
+```
+
+Unit tests (`make test` sets the same environment):
+
+```sh
+GOOS=linux GOARCH=amd64 GOARM= CC=gcc CGO_ENABLED=1 go test ./...
+```
+
+Live tests against a real CWA (gated behind the `live` build tag; host and credentials come from `POCKETBEAM_TEST_HOST`, `POCKETBEAM_TEST_USER`, `POCKETBEAM_TEST_PASS`):
+
+```sh
+POCKETBEAM_TEST_HOST=http://cwa.lan:8083 go test -tags=live -run TestLive
+```
+
+### Releases
+
+Releases are cut by pushing a `vX.Y.Z` tag on `main`. The release workflow builds the ARM binary in the SDK container and publishes a GitHub Release with `pocketbeam-app.zip` (for sideloading by hand), `pocketbeam.app.gz` (what the in-app updater fetches) and `SHA256SUMS`, which lists the raw binary as well. The release notes carry the raw binary's `sha256:` digest, which is what the updater verifies after decompressing. Devices pick the new version up through the release endpoint they poll.
 
 ## License
 
